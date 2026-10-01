@@ -10,6 +10,7 @@
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { Duplex } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
+import { ConnectxError } from '@agentx/core'
 import type { Config } from '../config'
 import type { DataPlaneHandler, DataPlaneResponse } from '../dataplane'
 // 这两条路由的路径由**铸 `upload_uri` / `object_uri` 的那个模块**定义：客户端的 URL 与
@@ -20,6 +21,42 @@ import { upgrade, type WebSocketConnection, type WebSocketHandlers } from '../st
 export const RPC_PATH = '/anp-im/rpc'
 export const STREAM_PATH = '/anp-im/stream'
 export const WELL_KNOWN_PATH = '/.well-known/anp-message-service.json'
+
+/** 一个端点先当成 URL 解出来。解不出来就是一条不会自己好的失败——报清楚是哪一端的文档
+ *  写坏了，而不是让 `new URL` 的 `Invalid URL` 混进重试日志。 */
+function endpointUrl(raw: string): URL {
+  try {
+    return new URL(raw)
+  } catch {
+    throw new ConnectxError('message_send_failed', `${JSON.stringify(raw)} is not a usable serviceEndpoint`)
+  }
+}
+
+/** 本服务入口的绝对地址。`serviceEndpoint`（well-known 里发布的那一条）与"这是不是我
+ *  自己"必须是同一个字符串，所以两者都从这里取。 */
+export function ingressUrl(config: Config): URL {
+  return new URL(`${config.publicUrl}${RPC_PATH}`)
+}
+
+/**
+ * P8 §3.3 那条唯一的"该不该出站"判断：目标公开的 `ANPMessageService` 是不是本服务。
+ *
+ * 只比 origin 与路径。要判"两个 DID 是不是同一个域"是个我们无从权威得知的属性，而这里
+ * 问的是更小的一件事——解析出来的那个端点指向谁。放在这个模块，是因为 `RPC_PATH` 定义
+ * 在这里：路由改了而这里没改，表现会是"本地的收件人被当成跨域送出去"。
+ */
+export function isOurOwnIngress(config: Config, endpoint: string): boolean {
+  const theirs = endpointUrl(endpoint)
+  const own = ingressUrl(config)
+  return (
+    theirs.origin === own.origin &&
+    trimTrailingSlash(theirs.pathname) === trimTrailingSlash(own.pathname)
+  )
+}
+
+function trimTrailingSlash(path: string): string {
+  return path.replace(/\/+$/, '')
+}
 
 /** `POST /anp-im/rpc`, the control plane. `body` is the request text, undecoded: the
  *  envelope layer needs the bytes it was given, and the `Content-Digest` check (C3)

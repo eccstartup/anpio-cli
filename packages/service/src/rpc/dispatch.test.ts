@@ -28,6 +28,7 @@ import {
   utf8,
 } from '@agentx/core/advanced'
 import { loadConfig } from '../config'
+import type { ForwardOutcome, Relay } from '../federation/forward'
 import { createHttpNonceStore } from '../federation/nonces'
 import { openObjectStore } from '../objects'
 import { openStorage } from '../storage/sqlite'
@@ -203,7 +204,7 @@ interface Harness {
 }
 
 function harness(
-  overrides: { storage?: Storage; locator?: ServiceLocator; nonceStore?: NonceStore } = {},
+  overrides: { storage?: Storage; locator?: ServiceLocator; nonceStore?: NonceStore; relay?: Relay } = {},
 ): Harness {
   const storage = overrides.storage ?? openStorage({ path: ':memory:' })
   const logs: string[] = []
@@ -217,6 +218,7 @@ function harness(
     resolver: inlineResolver(DOCUMENTS),
     locator: overrides.locator ?? locator(publishedBySender()),
     nonceStore: overrides.nonceStore ?? createHttpNonceStore(storage),
+    ...(overrides.relay !== undefined ? { relay: overrides.relay } : {}),
     log: (line) => logs.push(line),
     now: () => NOW,
   })
@@ -343,30 +345,26 @@ describe('accepting a direct message', () => {
     expect(h.storage.headSeq(receiver.did)).toBe(1)
   })
 
-  it('queues the outbound push as the notification P3 §7.2.3 describes', async () => {
+  it('carries the P3 §7.2.3 fields on the delivery, which is where the message ends', async () => {
+    // C11 之后这条消息在域内的终点就是这一行投递（§3.1：`direct.incoming` 是"已被目标
+    // ingress 接受"之后的那一跳，而收件人就住在本服务上）。C11 之前这里还会往 outbox 排
+    // 一条通知，由后台 worker 再发一次 HTTP 到自家入口——那一条从来只是白跑一趟。
     const h = harness()
     await h.call(await signed())
 
-    const due = h.storage.dueOutbox(NOW.toISOString(), 10)
-    expect(due).toHaveLength(1)
-    expect(due[0]?.recipientDid).toBe(receiver.did)
-    // Due immediately: accepting and pushing are the same moment; backoff only starts
-    // after the first failure.
-    expect(due[0]?.nextAttemptAt).toBe(NOW.toISOString())
+    expect(h.storage.dueOutbox(NOW.toISOString(), 10)).toEqual([])
 
-    const notification = JSON.parse(due[0]?.payloadJson ?? '{}') as {
-      jsonrpc: string
-      id?: unknown
-      method: string
-      params: { meta: Record<string, unknown>; auth?: unknown; body: Record<string, unknown> }
+    const delivered = h.storage.deliveriesSince(receiver.did, 0, 10)
+    expect(delivered).toHaveLength(1)
+    expect(delivered[0]?.method).toBe('direct.incoming')
+
+    const params = JSON.parse(delivered[0]?.paramsJson ?? '{}') as {
+      meta: Record<string, unknown>
+      body: Record<string, unknown>
     }
-    expect(notification.jsonrpc).toBe('2.0')
-    // §5.3 L162: a push is a Notification, so it carries no id and asks for no answer.
-    expect('id' in notification).toBe(false)
-    expect(notification.method).toBe('direct.incoming')
-    expect(notification.params.body).toEqual({ text: 'hello' })
+    expect(params.body).toEqual({ text: 'hello' })
     // §7.2.3 L411–418: exactly these seven, and meta.target is the RECIPIENT.
-    expect(notification.params.meta).toEqual({
+    expect(params.meta).toEqual({
       profile: 'anp.direct.base.v1',
       security_profile: 'transport-protected',
       sender_did: sender.did,
@@ -376,29 +374,26 @@ describe('accepting a direct message', () => {
       content_type: 'text/plain',
     })
     // L421: device selectors MUST NOT appear, even as undefined-valued keys.
-    expect(Object.keys(notification.params.meta)).not.toContain('sender_device_id')
-    expect(Object.keys(notification.params.meta)).not.toContain('recipient_device_id')
+    expect(Object.keys(params.meta)).not.toContain('sender_device_id')
+    expect(Object.keys(params.meta)).not.toContain('recipient_device_id')
   })
 
   it('forwards the original origin proof rather than signing its own (P3 §7.2.3 L420)', async () => {
     const h = harness()
     const request = await signed()
     await h.call(request)
-    const notification = JSON.parse(h.storage.dueOutbox(NOW.toISOString(), 1)[0]?.payloadJson ?? '{}') as {
-      params: { auth?: unknown }
-    }
-    expect(notification.params.auth).toEqual(request.params.auth)
+    const delivered = h.storage.deliveriesSince(receiver.did, 0, 1)[0]
+    const params = JSON.parse(delivered?.paramsJson ?? '{}') as { auth?: unknown }
+    expect(params.auth).toEqual(request.params.auth)
   })
 
-  it('queues no second push when the operation is replayed', async () => {
+  it('appends no second delivery when the operation is replayed', async () => {
     const h = harness()
     await h.call(await signed())
     const retry = await h.call({ ...(await signed()), id: 'req-2' })
     expect(retry.json?.result?.accepted).toBe(true)
-    // Two rows here would mean two identical pushes to the peer, which §8.4 tolerates
-    // but which the accept path has no reason to cause.
-    const stored = h.storage.dueOutbox(NOW.toISOString(), 10)
-    expect(stored).toHaveLength(1)
+    // 两行意味着收件人会读两遍同一条消息，而这正是 §8.2 L444–450 要避免的。
+    expect(h.storage.deliveriesSince(receiver.did, 0, 10)).toHaveLength(1)
   })
 
   it('carries conversation_id through to the result when the body has one', async () => {
@@ -418,6 +413,78 @@ describe('accepting a direct message', () => {
       'operation_id',
       'target_did',
     ])
+  })
+})
+
+describe('a direct message whose recipient lives elsewhere (P8 §3.2)', () => {
+  /** 一条不落库、只记下被问了什么的 relay：这个文件要证的是**顺序**（转发在事务外、
+   *  拒绝不落库），不是转发本身——那是 `federation/forward.test.ts` 的事。 */
+  function recording(outcome: ForwardOutcome): { relay: Relay; asked: string[] } {
+    const asked: string[] = []
+    return {
+      asked,
+      relay: {
+        async forward(_request, targetDid): Promise<ForwardOutcome> {
+          asked.push(targetDid)
+          return outcome
+        },
+      },
+    }
+  }
+
+  it('answers with the peer result, and files no delivery of its own', async () => {
+    // 收件人不在本服务上：投递行与附件授权都是**目标 ingress** 的事（§3.1 把
+    // `direct.incoming` 定成"已被目标 ingress 接受"之后的那一跳）。我们这边留下的只有
+    // 台账——消息行与幂等记录，所以 §8.2 的重复识别与 §9.1 的重放都还成立。
+    const { relay, asked } = recording({
+      kind: 'answered',
+      result: { accepted: true, message_id: 'msg-1', operation_id: 'op-1', target_did: receiver.did, accepted_at: '2026-10-01T00:00:00Z' },
+    })
+    const h = harness({ relay })
+    const outcome = await h.call(await signed())
+
+    expect(asked).toEqual([receiver.did])
+    expect(outcome.json?.result?.accepted_at).toBe('2026-10-01T00:00:00Z')
+    expect(h.storage.message(sender.did, receiver.did, 'msg-1')).toBeDefined()
+    expect(h.storage.headSeq(receiver.did)).toBe(0)
+  })
+
+  it('stores nothing at all when the peer refuses', async () => {
+    // §3.2 的原话："对端拒绝时**不落库**，调用方用同一个 `operation_id` 重试即可干净地
+    // 再来一次。" 落一半才是最坏的中间态：调用方以为被拒了，我们这边却已经收下。
+    const { relay } = recording({
+      kind: 'refused',
+      rejection: {
+        code: 1012,
+        anpCode: 'anp.temporarily_unavailable',
+        retryable: true,
+        message: 'the target service answered HTTP 503',
+        details: { status: 503 },
+      },
+    })
+    const h = harness({ relay })
+    const outcome = await h.call(await signed())
+
+    expect(outcome.json?.error?.code).toBe(1012)
+    expect(outcome.json?.error?.data?.anp_code).toBe('anp.temporarily_unavailable')
+    expect(h.storage.message(sender.did, receiver.did, 'msg-1')).toBeUndefined()
+    expect(h.storage.headSeq(receiver.did)).toBe(0)
+  })
+
+  it('does not forward a retry of an operation it already answered', async () => {
+    // 转发必须在事务外，所以它排在 `acceptOperation` 之前；挡住第二次出站的是一个显式的
+    // 预查（`relayFor` 里的 `idempotentRow`）。少了它，重试就等于再打扰对端一次——对端
+    // 恰好不可达时，"已经受理过"的重试会回 1012，把一次成功说成失败。
+    const { relay, asked } = recording({
+      kind: 'answered',
+      result: { accepted: true, message_id: 'msg-1', operation_id: 'op-1', target_did: receiver.did, accepted_at: NOW.toISOString() },
+    })
+    const h = harness({ relay })
+    await h.call(await signed())
+    const retry = await h.call({ ...(await signed()), id: 'req-2' })
+
+    expect(retry.json?.result?.accepted).toBe(true)
+    expect(asked).toEqual([receiver.did])
   })
 })
 

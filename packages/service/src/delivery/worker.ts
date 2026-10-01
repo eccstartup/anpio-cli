@@ -1,8 +1,13 @@
-// C5b —— `direct.incoming` 的出站推送与退避重试。
+// C5b —— outbox 的出站推送与退避重试。
 //
-// 受理一条 `direct.send` 只写库（`rpc/direct.ts`），真正把通知送到收件人的入口服务是
-// 这里的事。分成两半的理由是事务：受理的整个操作（消息 + 投递 + 幂等记录）必须在一个
-// 事务里，而事务里不得有网络往返——一次慢连接会让所有并发受理在锁上等。
+// **C11 之后这个 outbox 只装通知**（P8 §3.4）：请求（`direct.send` / `group.*` /
+// `attachment.*`）有人在等答复，走的是请求路径里的同步转发（`federation/forward.ts`），
+// 因为 §6.7 L464 要求最终服务的错误**走回原始调用方**——异步 outbox 在受理那一刻就已经
+// 答复过了，之后没有通道可回。这个文件保留的是 `group.incoming` / `group.state_changed` /
+// `group.e2ee.notice` 那一档：没人在等，可以慢慢来。
+//
+// 分成两半的理由是事务：受理的整个操作（消息 + 投递 + 幂等记录）必须在一个事务里，而事务
+// 里不得有网络往返——一次慢连接会让所有并发受理在锁上等。
 //
 // 这个文件拥有三件别处不该知道的事：
 //
@@ -15,12 +20,11 @@
 //      MAY 由服务按本地策略自行决定；本 Profile MUST NOT 要求必须重发、固定重发次数或
 //      固定退避算法"。所以下面的数值是本实现的选择，不是规范的值。
 //
-// `direct.incoming` 是**幂等**的：重发用同一份 `operation_id` / `message_id`，收件人按
-// P3 §8.2 的重复识别把它认出来。所以"可能重复推送"在这里不是缺陷，而是 §8.4 L471–477
-// 允许的那一档；反过来，宁可重发也不丢。
+// 出站的这条腿**幂等**：重发用同一份 `operation_id` / `message_id`，收件人按 P3 §8.2
+// 的重复识别把它认出来。所以"可能重复推送"在这里不是缺陷，而是 §8.4 L471–477 允许的
+// 那一档；反过来，宁可重发也不丢。
 
 import {
-  ConnectxError,
   discoverMessageService,
   DidServiceLocator,
   postNotification,
@@ -29,7 +33,7 @@ import {
   type ServiceLocator,
 } from '@agentx/core'
 import type { Config } from '../config'
-import { RPC_PATH } from '../http/server'
+import { isOurOwnIngress } from '../http/server'
 import type { OutboxEntry, Storage } from '../storage/types'
 
 /** 一轮最多处理多少条待发。 */
@@ -74,20 +78,6 @@ function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
-/** 一个端点先当成 URL 解出来。解不出来就是一条不会自己好的失败——报清楚是哪一端的
- *  文档写坏了，而不是让 `new URL` 的 `Invalid URL` 混进重试日志。 */
-function endpointUrl(raw: string): URL {
-  try {
-    return new URL(raw)
-  } catch {
-    throw new ConnectxError('message_send_failed', `${JSON.stringify(raw)} is not a usable serviceEndpoint`)
-  }
-}
-
-function trimTrailingSlash(path: string): string {
-  return path.replace(/\/+$/, '')
-}
-
 export function createDeliveryWorker(options: DeliveryOptions): DeliveryWorker {
   const { config, storage } = options
   const locator = options.locator ?? new DidServiceLocator()
@@ -101,16 +91,10 @@ export function createDeliveryWorker(options: DeliveryOptions): DeliveryWorker {
   const intervalMs = options.intervalMs ?? DEFAULT_INTERVAL_MS
   const random = options.random ?? Math.random
 
-  /** 本服务自己的入口地址。收件人指的是它，就等于消息已经在本机躺着了。 */
-  const ownIngress = endpointUrl(`${config.publicUrl}${RPC_PATH}`)
-
-  function isOurOwnIngress(endpoint: string): boolean {
-    const theirs = endpointUrl(endpoint)
-    return (
-      theirs.origin === ownIngress.origin &&
-      trimTrailingSlash(theirs.pathname) === trimTrailingSlash(ownIngress.pathname)
-    )
-  }
+  /** 本服务自己的入口地址。收件人指的是它，就等于消息已经在本机躺着了。
+   *  这个判断只有一处（`http/server.ts` 的 `isOurOwnIngress`）——C11 的请求路径也要用它
+   *  决定"本地办完还是转出去"，两处各写一遍就是将来只改了一边。 */
+  const isOwn = (endpoint: string): boolean => isOurOwnIngress(config, endpoint)
 
   /** 第 `attempts` 次失败之后的等待时长（`attempts` 从 1 起）。 */
   function backoffMs(attempts: number): number {
@@ -124,7 +108,7 @@ export function createDeliveryWorker(options: DeliveryOptions): DeliveryWorker {
     const at = now()
     try {
       const target = await discoverMessageService(entry.recipientDid, { locator, ...locateOptions })
-      if (isOurOwnIngress(target.endpoint)) {
+      if (isOwn(target.endpoint)) {
         storage.dropOutbox(entry.seq)
         return
       }
@@ -140,12 +124,12 @@ export function createDeliveryWorker(options: DeliveryOptions): DeliveryWorker {
       if (attempts >= maxAttempts) {
         // 丢弃是**有意的放弃**，不是成功：收件人可能永远不会知道这条消息存在。日志里
         // 说清楚次数与最后的错误，运维才有得查。
-        log(`anp: direct.incoming to ${entry.recipientDid} dropped after ${attempts} attempts: ${reason}`)
+        log(`anp: outbound push to ${entry.recipientDid} dropped after ${attempts} attempts: ${reason}`)
         storage.dropOutbox(entry.seq)
         return
       }
       storage.rescheduleOutbox(entry.seq, attempts, new Date(at.getTime() + backoffMs(attempts)).toISOString(), reason)
-      log(`anp: direct.incoming to ${entry.recipientDid} failed (attempt ${attempts}): ${reason}`)
+      log(`anp: outbound push to ${entry.recipientDid} failed (attempt ${attempts}): ${reason}`)
     }
   }
 

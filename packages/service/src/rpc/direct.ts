@@ -6,8 +6,12 @@
 //
 // 写库发生在 `acceptOperation` 的 `perform` 里，所以这里**不得**自己开事务、
 // 也不得在写之前做任何可能失败的 I/O（一次网络往返会让并发写在锁里等）。
+//
+// 跨域那一跳（P8 §3.2）在**调用本模块之前**就已经做完了，而且是事务外面做的：目标不在
+// 本服务上时，`relayed` 带着对端的答复进来，这里只记台账、不写投递。转发本身不属于这个
+// 文件——它连一个字节都不该知道。
 
-import { buildMessageNotification, type AnpAuth, type AnpMeta, type AnpParams } from '@agentx/core'
+import { type AnpAuth, type AnpMeta, type AnpParams } from '@agentx/core'
 import type { DeliveryRecord, Storage } from '../storage/types'
 import { attachmentGrantsFor, insertAttachmentGrants } from './attachments'
 
@@ -68,6 +72,16 @@ export interface StoreDirectInput {
   meta: AnpMeta
   body: Record<string, unknown>
   auth?: AnpAuth
+  /**
+   * 目标不在本服务上时，**对端的答复**（P8 §3.2）。
+   *
+   * 给了它，这次受理就只到"消息行 + 幂等记录"为止：投递行、outbox 与附件授权都是
+   * **目标 ingress** 的事。§3.1 把 `direct.incoming` 定成"已被目标 ingress 接受"之后的
+   * 那一跳，而收件人不在我们这儿，我们这边没有可投递的邮箱；附件对象同理，它落在对端
+   * （§9.2 L570 的域服务代理模式）。返回的是对端那一份结果，不是我们拼的——调用方拿到的
+   * `accepted_at` 必须是真的受理时刻，那只有对端知道。
+   */
+  relayed?: Record<string, unknown>
   /** RFC 3339。由调用方给，测试才好钉住这个值。 */
   acceptedAt: string
   /**
@@ -139,6 +153,12 @@ export function storeDirectMessage(storage: Storage, input: StoreDirectInput): R
   //
   // 上面那条重复消息的分支没有这一步，是对的：它的 Grant 在**第一次**受理时就已经落了，
   // 重放一条通知不会多长出一条授权。
+  if (input.relayed !== undefined) {
+    // 跨域那一档到此为止（见 `relayed` 的注释）：投递行、outbox 与附件授权都是目标
+    // ingress 的事，而这次受理在我们这边只是"替谁转过一次"的台账——消息行与幂等记录。
+    return input.relayed
+  }
+
   insertAttachmentGrants(
     storage,
     attachmentGrantsFor({
@@ -151,8 +171,8 @@ export function storeDirectMessage(storage: Storage, input: StoreDirectInput): R
     }),
   )
 
-  // §7.2.3 的字段表只写一遍：投递行与出站通知用的是**同一份** `params`，两处各拼一次
-  // 就是将来某次改动只改了一边的入口。
+  // §7.2.3 的字段表只写一遍：投递行与（C13 的）群通知用的是**同一份** `params`，两处各
+  // 拼一次就是将来某次改动只改了一边的入口。
   const params = incomingParams({
     meta,
     targetDid,
@@ -160,6 +180,12 @@ export function storeDirectMessage(storage: Storage, input: StoreDirectInput): R
     ...(input.auth !== undefined ? { auth: input.auth } : {}),
   })
 
+  // 投递行就是这条消息在我域内的**终点**：收件人住在本服务上，C7 的订阅面与取件面从这里
+  // 把它交出去（`onDelivery` 在事务提交之后推送）。C11 之前这里还往 outbox 排一条
+  // `direct.incoming`，由后台 worker 再发一次 HTTP——而那个 worker 遇到自家入口时是直接
+  // 丢掉的，所以那一条从来只是白跑一趟数据库。§3.1 把 `direct.incoming` 定成"已被目标
+  // ingress 接受"之后的那一跳，而这里正是那个 ingress：没有第二跳要发。
+  // 收件人**不在**本服务上时走的是 `relayed` 那条早返回，本节整段不执行。
   const delivered = storage.appendDelivery({
     ownerDid: targetDid,
     messageId,
@@ -168,25 +194,6 @@ export function storeDirectMessage(storage: Storage, input: StoreDirectInput): R
     acceptedAt,
   })
   input.onDelivery?.(delivered)
-
-  // 出站推送排进 outbox。载荷存**整个通知信封**：worker 到那时手上只有这一行，任何
-  // "到时候再拼"都要它知道方法名与 §7.2.3 的字段搬运规则，而那正是上面刚刚做过的事。
-  //
-  // `nextAttemptAt` 取受理时刻：受理成功之后马上尝试一次是常态，退避只在失败之后开始。
-  // 这一步仍然是纯写——真正解析对端与发 HTTP 的是 delivery worker，不在这里。事务里
-  // 不得有网络往返，否则一次慢连接会让所有并发受理在锁上等。
-  storage.enqueueOutbox({
-    recipientDid: targetDid,
-    payloadJson: JSON.stringify(
-      buildMessageNotification({
-        method: DIRECT_INCOMING,
-        meta: params.meta,
-        body: params.body,
-        ...(params.auth !== undefined ? { auth: params.auth } : {}),
-      }),
-    ),
-    nextAttemptAt: acceptedAt,
-  })
 
   return {
     accepted: true,

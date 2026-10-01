@@ -14,6 +14,9 @@ import { ConnectxError } from '@agentx/core'
 import { loadConfig } from './config'
 import { createDataPlane } from './dataplane'
 import { createDeliveryWorker } from './delivery/worker'
+import { createEgress } from './federation/egress'
+import { createRelay } from './federation/forward'
+import { loadHttpSigner } from './federation/signing'
 import { createServer } from './http/server'
 import { openObjectStore } from './objects'
 import { createDispatch } from './rpc/dispatch'
@@ -35,10 +38,15 @@ async function main(): Promise<void> {
   // watching that mailbox (realtime.md §8.1). Nothing is published from inside the
   // transaction — see `dispatch.ts`'s `publish`.
   const registry = createSubscriberRegistry()
+  // Outbound cross-domain requests (P8, C11). The signer is absent unless the deployment
+  // configured a key; without it the calls still go out, unsigned (§2.3).
+  const signer = await loadHttpSigner(config)
+  const egress = createEgress({ config, ...(signer !== undefined ? { signer } : {}) })
   const handleRpc: RpcHandler = createDispatch({
     config,
     storage,
     objects,
+    relay: createRelay({ config, egress }),
     onDelivered: (record) => {
       registry.publish(record)
     },
@@ -82,6 +90,15 @@ async function main(): Promise<void> {
   process.stdout.write(`  rpc           ${config.publicUrl}/anp-im/rpc\n`)
   process.stdout.write(`  database      ${config.dbPath}\n`)
   process.stdout.write(`  objects       ${config.objectDir}\n`)
+  // The deployment coupling federation.md §4 names: the keyid's fragment is decided by
+  // whoever publishes this service's DID document, so an operator needs to see which one
+  // this process is signing with — every outgoing request fails at the peer's step 6 if
+  // it does not match.
+  process.stdout.write(
+    signer === undefined
+      ? '  outbound      unsigned (no AGENTX_KEY_FILE)\n'
+      : `  outbound      signed as ${signer.keyid}\n`,
+  )
   // Outbound DID resolution is the one setting whose default is a closed door, so say so
   // at startup rather than let the first 2005 be the operator's introduction to it.
   process.stdout.write(

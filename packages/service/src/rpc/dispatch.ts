@@ -21,6 +21,7 @@ import {
   type AnpMeta,
   type AnpParams,
   type AnpRejection,
+  type AnpRequest,
   type KeyResolver,
   type LocateOptions,
   type NonceStore,
@@ -28,6 +29,7 @@ import {
 } from '@agentx/core'
 import type { Config } from '../config'
 import { capabilitiesResult } from '../capabilities'
+import type { ForwardOutcome, Relay } from '../federation/forward'
 import { createHttpNonceStore } from '../federation/nonces'
 import { challengeHeader, verifyOuterIdentity } from '../federation/outer'
 import type { RpcHandler, RpcResponse } from '../http/server'
@@ -42,6 +44,9 @@ import type { ObjectStore } from '../objects'
 import { AnpRefusal } from './refusal'
 import { INBOX_GET, INBOX_MARK_READ, MESSAGE_GET_BATCH, SYNC_DELTA, markRead, readBatch, readDelta, readInbox } from './inbox'
 import { errorResponse, failureId, noResponse, parseRequestText, successResponse } from './envelope'
+
+/** 目标就是本服务（§3.3）。一个共享的常量：它没有内容，没必要每次现造一个。 */
+const LOCAL: ForwardOutcome = { kind: 'local' }
 
 export interface DispatchDeps {
   /** Read for the service's own DID and for {@link DidResolution}, which becomes the
@@ -70,6 +75,15 @@ export interface DispatchDeps {
   /** 跨域外层签名的重放缓存（P8 §6.2.2 第 8 步、federation.md §2.2）。默认为本服务自己
    *  `Storage` 上的 `http_nonces` 表。 */
   nonceStore?: NonceStore
+  /**
+   * 跨域请求的同步出站（P8 §3.2）。
+   *
+   * 缺席时 `direct.send` 一律当成同域受理——这是**测试的缝**，不是部署的档位：`main.ts`
+   * 总是把它接上，因为"收件人不在本服务上而我们当本地收下了"是一种会静默走错域的行为，
+   * 不该有一个开关能把它打开。与 `locator` / `nonceStore` 同一个理由：不让每个用例都
+   * 起一个出站 HTTP。
+   */
+  relay?: Relay
   /** Authentication failures are logged with their reason, which is deliberately NOT
    *  put on the wire (`auth.ts` explains why: answering "was this keyid authorized"
    *  per request is an oracle). */
@@ -92,6 +106,7 @@ export interface DispatchDeps {
 
 export function createDispatch(deps: DispatchDeps): RpcHandler {
   const resolver = deps.resolver ?? new DidKeyResolver()
+  const relay = deps.relay
   const resolverOptions = deps.resolverOptions ?? deps.config.didResolution
   const locator = deps.locator ?? new DidServiceLocator()
   const nonceStore = deps.nonceStore ?? createHttpNonceStore(deps.storage)
@@ -114,6 +129,7 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
     acceptedAt: string,
     pending: DeliveryRecord[],
     requestDigest: string,
+    relayed: Record<string, unknown> | undefined,
   ): Record<string, unknown> {
     const { meta, body, auth } = params
     switch (spec.name) {
@@ -126,6 +142,7 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
           body,
           ...(auth !== undefined ? { auth } : {}),
           acceptedAt,
+          ...(relayed !== undefined ? { relayed } : {}),
           // Collected, not published: this runs inside the transaction, and a delivery
           // pushed from here would have been seen by a live client before a rollback could
           // undo it. The caller publishes once `acceptOperation` has returned.
@@ -264,6 +281,7 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
       if (bodyRefusal !== undefined) return errorResponse(envelope.id, bodyRefusal)
 
       const acceptedAt = at.toISOString()
+
       // A.3 L1044–1050：SRO 只含 method / meta / body，所以重新签过一次、`auth` 换了、
       // `id` 换了的重试，摘要仍与原请求相同——那正是 §9.1 L630 要的"语义等价"。
       //
@@ -274,19 +292,39 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
       // §8.1: what this request delivered. Filled by `perform`, and empty on every path
       // that did not create one (a replay, and every method but `direct.send`).
       const pending: DeliveryRecord[] = []
-      const run = (): Record<string, unknown> => perform(spec, envelope.params, acceptedAt, pending, requestDigest)
 
       // 这个方法不改状态：没有幂等作用域，也就没有要记的操作，直接跑（P1 §9.1 L628 的
       // 四段键里 operation_id 的语义是"重试同一次操作"，无状态调用没有这个东西）。
-      if (spec.targetScope === undefined) return successResponse(envelope.id, run())
+      if (spec.targetScope === undefined) {
+        return successResponse(
+          envelope.id,
+          perform(spec, envelope.params, acceptedAt, pending, requestDigest, undefined),
+        )
+      }
+
+      // 四段键按**请求里写的** `sender_did` 算（§9.1 L641 的另一半：DID 被替代时，重试要用
+      // 旧 DID 才查得到；`idempotency.ts` 里有完整的说明）。转发之前要拿它查一次记录，
+      // 所以在这里算出来，而不是留在 `acceptOperation` 的参数里当内联表达式。
+      const key = idempotencyKey(
+        idempotencyScopeFromMeta({ meta, targetScope: spec.targetScope(meta, body), method: spec.name }),
+      )
+
+      // P8 §3.2：请求在**事务外**同步转发——对端接受了才落库（§3.3 的"是不是本服务"
+      // 由 relay 一并判掉，是本服务时它返回 `local`，一个字节都不发）。
+      //
+      // 位置在这里而不是更早，理由与 C5b 那条"事务里不得有网络往返"是同一个：认证与
+      // 正文校验都已经过了，此刻转发的是**已经认证过的**请求；再往前走一步就是
+      // `acceptOperation` 的事务，网络往返进不去。对端拒绝时我们什么都不写，调用方拿
+      // 同一个 `operation_id` 重试即是一次干净的再来。
+      const relayed = await relayFor(spec, envelope, key)
+      if (relayed.kind === 'refused') return errorResponse(envelope.id, relayed.rejection)
+      const forwarded = relayed.kind === 'answered' ? relayed.result : undefined
 
       const outcome = acceptOperation({
         storage: deps.storage,
-        // 键按**请求里写的** `sender_did` 算（§9.1 L641 的另一半：DID 被替代时，重试要用
-        // 旧 DID 才查得到；`idempotency.ts` 里有完整的说明）。
-        key: idempotencyKey(idempotencyScopeFromMeta({ meta, targetScope: spec.targetScope(meta, body), method: spec.name })),
+        key,
         fingerprint: requestDigest,
-        perform: run,
+        perform: () => perform(spec, envelope.params, acceptedAt, pending, requestDigest, forwarded),
       })
 
       // §10.3 L709：同键不同语义。
@@ -304,6 +342,38 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
       log(`anp: ${spec.name} failed internally: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`)
       return errorResponse(envelope.id, rpcRejection(JSON_RPC_ERROR.INTERNAL_ERROR, 'Internal error'))
     }
+  }
+
+  /**
+   * 这次调用该不该出站，以及出站的结果（P8 §3.3）。
+   *
+   * **只接 `direct.send` 一条**。P8 §3.2 点的那一族是 `direct.send` / `group.*` /
+   * `attachment.*`，但另外两族今天还接不上：
+   *
+   *   - `group.*` 的锚点是 `group_did`，而"是不是本服务"要先解析它的文档才判得了
+   *     （[federation.md](docs/design/federation.md) §5.1）。群 DID 文档**还没有人发布**
+   *     ——所以接上它只会让**自家**的群也解析失败。这是那条已记录的 v1 缺口，不是这里
+   *     能补的：等 Host 侧发布文档之后，这里的 `spec.name` 判断换成"这个方法的目标 DID"
+   *     即可，机制本身不用改。
+   *   - `attachment.*` 的锚点是**原始附件消息的发送者 DID**（§9.1 L565、§5.3 L249），
+   *     而不是 `meta.target.did`。C10 的 `attachment.get_download_ticket` 是域内实现，
+   *     跨域代理模式还没接。
+   *
+   * 两族今天都落在本地受理上，且都是**响亮的失败**（群不存在、授权不在）而不是静默走错
+   * 域——C13 / 后续那一块接上时改的只是这一行判断。
+   *
+   * `key` 是这次操作的幂等键：**已经记过账的操作不再出站**。那份记录里的结果就是对端的
+   * 答复，重试要的是它。不查这一下，每次重试都会再打扰对端一遍——而对端若正好不可达，
+   * 那句 1012 会让调用方以为这颗消息没被受理，事实上它早就被受理过了。§9.1 L630 说的
+   * "重试得到同一结果"包括不重做网络那一跳。查表在这里、判定在 `acceptOperation` 里，
+   * 两处看的都是同一行，所以"重放"与"同键不同语义"仍然由后者说了算。
+   */
+  async function relayFor(spec: MethodSpec, envelope: AnpRequest, key: string): Promise<ForwardOutcome> {
+    if (relay === undefined || spec.name !== DIRECT_SEND) return LOCAL
+    if (deps.storage.idempotentRow(key) !== undefined) return LOCAL
+    const targetDid = envelope.params.meta.target?.did
+    if (targetDid === undefined || targetDid === '') return LOCAL
+    return relay.forward(envelope, targetDid)
   }
 
   /**

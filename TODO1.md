@@ -211,14 +211,16 @@
     说话的地方——外层认证按"有没有带 `Signature-Input`"触发；失败回 ANP-02 的 401 + `WWW-Authenticate` 而不是
     §2.1 的 200；**请求同步转发、通知才走 outbox**；`isOurOwnIngress()` 就是"该不该出站"的全部判断；
     重放防护一张 `http_nonces` 表。八步验证与 §6.2.2 的 caller anchor 落到 C3 的同一个 `callerAnchor()`）
-  - **动手前先修**：`delivery/worker.ts` 转发的是 `direct.incoming`，而 P8 §5.1 L206–210 要的是**原始
-    `direct.send`**（§6.2.2 L348–368 的跨域方法表里没有 `direct.incoming`），且 P3 §7.2.1 L397 把它
-    定义成"已被目标 ingress 接受"之后的那一跳——跨域时它语义上不成立。C5b 写的，当时没读 P8
+  - ~~**动手前先修**：`delivery/worker.ts` 转发的是 `direct.incoming`，而 P8 §5.1 L206–210 要的是
+    **原始 `direct.send`**（§6.2.2 L348–368 的跨域方法表里没有 `direct.incoming`），且 P3 §7.2.1 L397
+    把它定义成"已被目标 ingress 接受"之后的那一跳——跨域时它语义上不成立。C5b 写的，当时没读 P8~~
+    （2026-10-01 拆完：请求在事务外同步转发原始 `direct.send`，对端接受才落库、拒绝什么都不写；
+    `direct.incoming` 不再入队，outbox 只剩群通知在写。转发前先查一次幂等记录，重试不再出站）
   - ~~外层八步 + `http_nonces`~~、~~出站签名（`AGENTX_KEY_ID`，配上 `AGENTX_KEY_FILE` 才签；
     没钥就不签，§2.3 说那失去的是域级归属而不是受理）~~、~~非 2xx 读成答复而不是异常
     （core 新原语 `fetchControlledResponse`，两条既有出站函数把非 2xx 读成失败，不能走）~~
-  - 还剩：请求/通知两条出站路的拆分，即上面那条"动手前先修"——请求在事务外同步转发**原始
-    `direct.send`**（对端接受才落库），通知继续走 outbox；`direct.incoming` 不再入队
+  - 还剩：`group.*` / `attachment.*` 两族的出站判断（今天落本地、响亮失败）。两族的锚点各异
+    （§3.2），接口留在一个入口 `dispatch.ts` 的 `relayFor`
   - **挡住 v1 的**：群 DID 文档没人发布（§5.2 L220 要求解析 `group_did` 才能找到 Host），
     挡 MTI 第 1/4/5 项；`serviceDid` 文档由 `awiki-open-server` 托管，外层 `keyid` 的 fragment
     必须与它写进去的一致
