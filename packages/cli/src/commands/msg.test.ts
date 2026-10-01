@@ -5,7 +5,8 @@
 
 import { describe, it, expect } from 'vitest'
 import { ConnectxError } from '@agentx/core'
-import { callExtension, payloadOf, runMsg, type Channel } from './msg'
+import { callExtension, payloadOf, type Channel } from './channel'
+import { runMsg } from './msg'
 import type { Values } from './auth'
 
 const TO = 'did:wba:example.com:user:bob:e1_xyz'

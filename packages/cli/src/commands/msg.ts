@@ -1,63 +1,55 @@
 // The `msg` family — the client half of an ANPMessageService, i.e. `connectx` talking
 // to `AgentXAgent` (or to any conforming service, `awiki-open-server` included).
 //
-// Two things this file is NOT allowed to do (docs/design/cli.md §9), because both are
-// places where a second implementation fails in the hardest possible way — the
-// signature verifies on this machine and nowhere else:
-//
-//   - assemble a JSON-RPC envelope;            `buildMessageRequest` does, once
-//   - canonicalize for the origin proof;       `buildOriginProofAuth` does, once
-//
-// What is left is the part only a command can do: pick the recipient, decide the
-// payload, drive the discovery, and report what came back.
+// What is left here is what only a `msg` command can decide: which recipient, which
+// payload, and how to report what came back. Resolving a DID to its message service,
+// holding the signer, and placing one signed call are shared with `group` and live in
+// `channel.ts`, along with the two laws this file used to state at its top —
+// `buildMessageRequest` assembles the envelope, `buildOriginProofAuth` canonicalizes for
+// the origin proof, and neither is assembled a second time anywhere.
 
 import { randomUUID } from 'node:crypto'
 import {
   buildMessageRequest,
   buildOriginProofAuth,
-  discoverMessageService,
   parseCapabilities,
   postMessage,
-  anpCodeOf,
   resolveDidChain,
-  walletOriginProofSigner,
+  anpCodeOf,
   ConnectxError,
 } from '@agentx/core'
-import type {
-  AnpCapabilities,
-  AnpErrorResponse,
-  AnpMessageServiceTarget,
-  AnpMeta,
-  AnpResponse,
-  DidChain,
-  DidChainOptions,
-  OriginProofSigner,
-  ResolveDidOptions,
-} from '@agentx/core'
-import { buildConnector, cliError, require, type Values } from './auth'
-import { didHost, relaxedHosts } from './did'
+import type { AnpErrorResponse, AnpMeta, AnpResponse, DidChain, DidChainOptions } from '@agentx/core'
+import { cliError, require, type Values } from './auth'
+import { didHost } from './did'
+import {
+  DID_SUPERSEDED,
+  TRANSPORT_PROTECTED,
+  asRow,
+  callExtension,
+  discover,
+  field,
+  isError,
+  joined,
+  openChannel,
+  payloadOf,
+  policyFor,
+  rejection,
+  rowsOf,
+  senderFor,
+  type Channel,
+  type Row,
+  type Sender,
+} from './channel'
 import { runListen } from './listen'
 
 /** P3 §7.1.2 L353–355: the three fixed values of a `direct.send`. */
 const DIRECT_SEND = 'direct.send'
 const DIRECT_PROFILE = 'anp.direct.base.v1'
-const TRANSPORT_PROTECTED = 'transport-protected'
 
 /** P1 §8.2 L520. */
 const GET_CAPABILITIES = 'anp.get_capabilities'
 /** P1 §8.2.1 L528: a capabilities probe explains itself under the core binding. */
 const CORE_BINDING = 'anp.core.binding.v1'
-
-/** ANP error 1019 (P1 §10.3 L720). The description is the contract this file follows:
- *  "请求使用的 DID 已存在后继；调用方必须验证迁移、重建请求并重新签名". */
-const DID_SUPERSEDED = 'anp.did_superseded'
-
-/** The extension surface's own Profile (message-service.md §9.1). P1 §6.2.2 L277 makes
- *  `meta.profile` MUST and calls it "本次请求的唯一解释 Profile", so a read request has
- *  to name one — and no normative Profile interprets `inbox.get`. The `x_` prefix is the
- *  namespace P1 §12 leaves for extensions, and it is what keeps this value out of the
- *  `profiles[]` a service advertises as its spec conformance (message-service.md §13). */
-const EXTENSION_PROFILE = 'x_agentx.inbox.v1'
 
 /** message-service.md §9.3: the three extension methods the read commands call. */
 const INBOX_GET = 'inbox.get'
@@ -66,12 +58,6 @@ const MESSAGE_GET_BATCH = 'message.get_batch'
 
 /** How many unread ids `msg read --all` asks for at a time. */
 const ALL_PAGE = 100
-
-/** JSON-RPC "no such method". */
-const METHOD_NOT_FOUND = -32601
-/** P1 §10.3: 1001 `anp.unsupported_profile`. On an `x_agentx.*` profile this says the
- *  same thing `-32601` does — the peer does not implement this extension. */
-const UNSUPPORTED_PROFILE = 'anp.unsupported_profile'
 
 export async function runMsg(v: Values, sub: string | undefined, args: string[]): Promise<void> {
   switch (sub) {
@@ -93,167 +79,13 @@ export async function runMsg(v: Values, sub: string | undefined, args: string[])
   }
 }
 
-// ---- the outbound network policy ---------------------------------------------
-
-/** The policy for a fetch whose host is DERIVED rather than typed.
- *
- *  `did resolve` makes the caller name `--allow-host`, because there the host is the
- *  thing being asked about. Here it comes from `--to <did>`: it IS the recipient, and a
- *  second flag repeating it would only be one more way to get it wrong. What the caller
- *  still controls is the private-address gate, because a message service on this machine
- *  is a development setup (`--allow-private-host`). */
-function policyFor(hosts: readonly string[], v: Values): ResolveDidOptions {
-  const allowedHosts = [...new Set(hosts)]
-  const relaxed = relaxedHosts(allowedHosts, v)
-  return {
-    allowedHosts,
-    ...(relaxed.length > 0 ? { allowPrivateHosts: relaxed, allowInsecureTransport: relaxed } : {}),
-  }
-}
-
-/** The host a DID names, or `undefined` when the identifier names none.
- *
- *  `didHost` throws `invalid_did` for an `eip155:…` account id, and that verdict has to
- *  come from the locator instead (`caip10_has_no_ingress`, docs/design/cli.md §4), so
- *  this swallows it: the empty allowlist that follows is never consulted, because the
- *  locator refuses the identifier before any fetch. Raising the host error here instead
- *  would replace "an account id has no ingress" with a policy complaint about a host
- *  that never existed. */
-function hostOf(identity: string): string | undefined {
-  try {
-    return didHost(identity)
-  } catch {
-    return undefined
-  }
-}
-
-/** The host of a `serviceEndpoint`. The document chose it, so a value that is not a URL
- *  is a fact about the document rather than about the caller's flags. */
-function endpointHost(endpoint: string): string {
-  try {
-    return new URL(endpoint).hostname
-  } catch {
-    throw new ConnectxError(
-      'message_service_not_found',
-      `the ANPMessageService endpoint ${JSON.stringify(endpoint)} is not a URL`,
-    )
-  }
-}
-
-interface Endpoint {
-  target: AnpMessageServiceTarget
-  /** The document fetch is held to the DID's host; the POST is held to both that host
-   *  and the endpoint's, because the document is what named the endpoint. */
-  options: ResolveDidOptions
-}
-
-/** P2 §9.1 L549–560: the recipient's document, then its ONE message service.
- *
- *  The locator decides whether this identity can be addressed at all — this file never
- *  asks what kind of identifier it is holding, which is the whole point of §6 of
- *  vendored-core.md and of E3. */
-async function discover(identity: string, v: Values): Promise<Endpoint> {
-  const documentHost = hostOf(identity)
-  const target = await discoverMessageService(identity, policyFor(documentHost === undefined ? [] : [documentHost], v))
-  const hosts = documentHost === undefined ? [endpointHost(target.endpoint)] : [documentHost, endpointHost(target.endpoint)]
-  return { target, options: policyFor(hosts, v) }
-}
-
-// ---- the sender --------------------------------------------------------------
-
-export interface Sender {
-  did: string
-  signer: OriginProofSigner
-  /** The local `agent` / `profile` names this run signs under. They are what `msg listen`
-   *  derives its default `device_id` from (realtime.md §5.4), so they belong with the
-   *  identity rather than being looked up a second time by whichever command needs them. */
-  agent: string
-  profile: string
-}
-
-/** The identity this run signs as.
- *
- *  `requireRegistered` because a `direct.send` carries `meta.sender_did` (P3 §7.1.2
- *  L353) and the recipient resolves that DID back to an ingress to answer on. An
- *  identity no DID server has taken on has no such thing, and composing one from
- *  whatever `--target` happened to say would name a host that never accepted this key. */
-async function senderFor(v: Values): Promise<Sender> {
-  const { connector, wallet, location } = await buildConnector(v, { requireRegistered: true })
-  const identity = await connector.getIdentity()
-  return {
-    did: identity.did,
-    signer: walletOriginProofSigner(wallet, identity.keyid),
-    agent: location.agent,
-    profile: location.profile,
-  }
-}
-
-// ---- the payload -------------------------------------------------------------
-
-interface Payload {
-  body: Record<string, unknown>
-  contentType: string
-}
-
-/** P3 §6.2 and §6.3: of `text` / `payload` / `payload_b64u` EXACTLY one MUST be present,
- *  and the two fixed content types each pin which one (§6.2.4 L262, §6.2.5 L266). The
- *  command therefore takes a payload as text or as a JSON object, and refuses the two
- *  combinations the Profile has no body shape for.
- *
- *  Exported because it is the whole of the command's argument validation: the four
- *  combinations it decides on are the part a test can pin without a peer to talk to. */
-export function payloadOf(v: Values): Payload {
-  const text = v.text as string | undefined
-  const raw = v.body as string | undefined
-  const asked = v['content-type'] as string | undefined
-
-  if (text !== undefined && raw !== undefined) {
-    throw cliError('invalid_argument', '--text and --body are two spellings of the same thing; pass one')
-  }
-  if (text === undefined && raw === undefined) {
-    throw cliError('missing_flag', 'missing required option --text or --body')
-  }
-
-  if (text !== undefined) {
-    const contentType = asked ?? 'text/plain'
-    if (contentType === 'application/json') {
-      throw cliError(
-        'invalid_argument',
-        '--text is sent as `text`, which content_type application/json does not have a body shape for (P3 §6.2.5 L266); pass --body instead',
-      )
-    }
-    return { body: { text }, contentType }
-  }
-
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(raw as string)
-  } catch {
-    throw cliError('invalid_argument', `--body must be JSON (got ${JSON.stringify(raw)})`)
-  }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    throw cliError(
-      'invalid_argument',
-      '--body must be a JSON object, which is the only shape `payload` has (P3 §6.2.5 L266); use --text for a plain string',
-    )
-  }
-  const contentType = asked ?? 'application/json'
-  if (contentType === 'text/plain') {
-    throw cliError(
-      'invalid_argument',
-      '--body is sent as `payload`, which content_type text/plain does not have a body shape for (P3 §6.2.4 L262); pass --text instead',
-    )
-  }
-  return { body: { payload: parsed }, contentType }
-}
-
 // ---- direct.send -------------------------------------------------------------
 
 interface Delivery {
   sender: Sender
   /** `meta.target.did`. Replaced after a VERIFIED migration, never on a peer's word. */
   targetDid: string
-  /** `meta.operation_id` == `meta.message_id` (P1 §6.2.6 L392). */
+  /** `meta.operation_id` == `meta.message_id` (P1 §6.2.6 L394). */
   operationId: string
   contentType: string
   body: Record<string, unknown>
@@ -268,7 +100,7 @@ async function runSend(v: Values): Promise<void> {
   const delivery: Delivery = {
     sender,
     targetDid: v.to as string,
-    // P1 §6.2.6 L392: for a message operation the sender SHOULD make `operation_id`
+    // P1 §6.2.6 L394: for a message operation the sender SHOULD make `operation_id`
     // the `message_id`, and P3 §5.5 L208 requires a retry to keep that pair unchanged.
     // One flag therefore pins both, which is the entire reason `--operation-id` exists.
     operationId: (v['operation-id'] as string | undefined) ?? randomUUID(),
@@ -417,84 +249,6 @@ async function runCaps(v: Values, positional: string | undefined): Promise<void>
 
 // ---- the extension surface (message-service.md §9) ---------------------------
 
-/** A read is addressed to the caller's OWN message service. There is no `--to`: the
- *  owner of the inbox is `meta.sender_did`, so the DID whose document has to be fetched
- *  for the service entry is the one we sign as. */
-export interface Channel {
-  sender: Sender
-  target: AnpMessageServiceTarget
-  options: ResolveDidOptions
-}
-
-/** Exported for `msg listen`, which authenticates the same way but over a socket instead
- *  of a POST: one channel resolution, one signer, two transports (realtime.md §3). */
-export async function openChannel(v: Values): Promise<Channel> {
-  const sender = await senderFor(v)
-  const { target, options } = await discover(sender.did, v)
-  return { sender, target, options }
-}
-
-/** One extension call. Authenticated exactly like `direct.send` — `origin_proof` over
- *  `{method, meta, body}`, no bearer token — because the CLI does not hold one and the
- *  proof is the stronger answer anyway (cli.md §6).
- *
- *  `meta.target` is the mailbox owner, i.e. the identity in use. That is not a formality:
- *  P1 附录 A.4 L1068 requires `meta.target` whenever a method carries an `origin_proof`,
- *  and the same appendix requires an endpoint-local method to have its target modelling
- *  written down by its Profile — which is message-service.md §9.1.1. Reading one's own
- *  inbox is addressed to oneself, so `target.did` and `sender_did` are the same DID.
- *
- *  Exported, and `post` is injectable, only so the wire shape above can be asserted
- *  without a service: this is the one place every extension command goes through, and
- *  the envelope it builds is the part a live service would otherwise be the first to
- *  check (`msg.test.ts`). */
-export async function callExtension(
-  channel: Channel,
-  method: string,
-  body: Record<string, unknown>,
-  post: typeof postMessage = postMessage,
-): Promise<Record<string, unknown>> {
-  const meta: AnpMeta = {
-    profile: EXTENSION_PROFILE,
-    security_profile: TRANSPORT_PROTECTED,
-    sender_did: channel.sender.did,
-    target: { kind: 'agent', did: channel.sender.did },
-    operation_id: randomUUID(),
-    created_at: new Date().toISOString(),
-  }
-  const auth = await buildOriginProofAuth({ method, meta, body, signer: channel.sender.signer })
-  const request = buildMessageRequest({ id: randomUUID(), method, meta, auth, body })
-  const response = await post(channel.target.endpoint, request, channel.options)
-  if (isError(response)) throw extensionRejection(response, method, channel.sender.did)
-  return response.result
-}
-
-/** B8. A peer that has no extension surface is not a failure — it is an answer, and a
- *  specific one. Both codes below say "I do not have this": `-32601` is what a JSON-RPC
- *  service returns for a method it does not implement (awiki's `dispatch` returns it for
- *  an unknown method or a mismatched surface), and `1001` is what a service returns for a
- *  Profile it does not know.
- *
- *  No capabilities probe is made first: an extension Profile is not supposed to be in
- *  `profiles[]` (message-service.md §13), so the probe could only ever confirm the
- *  absence, at the price of a second round trip (cli.md §5). */
-function extensionRejection(response: AnpErrorResponse, method: string, identity: string): ConnectxError {
-  const anpCode = anpCodeOf(response)
-  if (response.error.code !== METHOD_NOT_FOUND && anpCode !== UNSUPPORTED_PROFILE) {
-    return rejection(response, method, identity)
-  }
-  const named = anpCode ?? `JSON-RPC error ${response.error.code}`
-  return new ConnectxError(
-    'unsupported_extension',
-    `${identity} does not implement ${method} (${named}): the inbox / history / read-state methods ` +
-      'are an implementation extension, not defined by the ANP message specification',
-    {
-      ...(anpCode !== undefined ? { serverCode: anpCode } : {}),
-      cause: { code: response.error.code, anpCode, data: response.error.data },
-    },
-  )
-}
-
 /** message-service.md §9.3: `inbox.get` takes `limit` (default 20), `skip`, `include_read`. */
 function limitOf(v: Values): number {
   const raw = v.limit as string | undefined
@@ -591,24 +345,6 @@ async function unreadIds(channel: Channel): Promise<string[]> {
 
 // ---- reading what came back --------------------------------------------------
 
-/** A peer's JSON, narrowed rather than trusted: everything below reads fields that a
- *  different implementation may name differently, and a message with a field missing is
- *  still worth printing. */
-type Row = Record<string, unknown>
-
-function asRow(value: unknown): Row | undefined {
-  return typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Row) : undefined
-}
-
-function rowsOf(result: Row, key: string): Row[] {
-  const raw = result[key]
-  if (!Array.isArray(raw)) return []
-  return raw.flatMap((item) => {
-    const row = asRow(item)
-    return row === undefined ? [] : [row]
-  })
-}
-
 /** The identifier `msg show` takes. `id` is the same value under the name
  *  `_direct_message_result` also publishes, so either spelling resolves. */
 function idOf(row: Row): string | undefined {
@@ -641,9 +377,9 @@ function renderMessage(row: Row): string[] {
   return out
 }
 
-/** The body as it arrived. `text` and `payload` are P3 §6.2's two shapes and are printed
- *  as they were sent; a P5/P6 payload stays opaque, because decrypting is the client's
- *  job and this service never holds the key (message-service.md §11). */
+/** The body as it arrived. `text` and `payload` are the two shapes P3 §6.2 defines and are
+ *  printed as they were sent; a P5/P6 payload stays opaque, because decrypting is the
+ *  client's job and this service never holds the key (message-service.md §11). */
 function contentOf(row: Row): string[] {
   const body = asRow(row.body)
   if (body !== undefined) {
@@ -655,27 +391,6 @@ function contentOf(row: Row): string[] {
   }
   if (typeof row.content === 'string') return row.content.split('\n')
   return ['(no content)']
-}
-
-// ---- reporting ---------------------------------------------------------------
-
-function isError(response: AnpResponse): response is AnpErrorResponse {
-  return 'error' in response
-}
-
-/** A peer's refusal. The SDK code stays coarse, as it does for login; the peer's own
- *  `anp_code` goes on the message line so a script can branch on it without `--json`. */
-function rejection(response: AnpErrorResponse, method: string, identity: string): ConnectxError {
-  const anpCode = anpCodeOf(response)
-  const named = anpCode ?? `JSON-RPC error ${response.error.code}`
-  return new ConnectxError(
-    'message_send_failed',
-    `${identity} rejected ${method}: ${named}: ${response.error.message}`,
-    {
-      ...(anpCode !== undefined ? { serverCode: anpCode } : {}),
-      cause: { code: response.error.code, anpCode, data: response.error.data },
-    },
-  )
 }
 
 /** P3 §7.1.3 L366–376. Only `accepted` is checked: it MUST be `true` in a success
@@ -695,13 +410,4 @@ function reportAccepted(result: Record<string, unknown>, json: boolean): void {
   field('target:', result.target_did)
   field('accepted at:', result.accepted_at)
   field('conversation:', result.conversation_id)
-}
-
-function field(label: string, value: unknown): void {
-  if (value === undefined) return
-  console.log(`${label.padEnd(20)} ${typeof value === 'string' ? value : JSON.stringify(value)}`)
-}
-
-function joined(values: readonly string[]): string {
-  return values.length === 0 ? '(none)' : values.join(', ')
 }

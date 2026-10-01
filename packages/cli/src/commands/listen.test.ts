@@ -7,7 +7,7 @@ import { describe, it, expect } from 'vitest'
 import { ConnectxError } from '@agentx/core'
 import { backoffMs, decodeMessage, runListen, streamUrl, type ListenDeps, type StreamConnection } from './listen'
 import type { ListenEvent, ListenView } from './listen-view'
-import type { Channel } from './msg'
+import type { Channel } from './channel'
 
 /** A socket we drive by hand. `sent` is what the command put on the wire, in order;
  *  `deliver` is a frame arriving from the server. */

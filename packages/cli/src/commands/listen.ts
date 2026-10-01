@@ -14,7 +14,7 @@ import { randomUUID } from 'node:crypto'
 import { buildMessageRequest, buildOriginProofAuth, anpCodeOf, ConnectxError } from '@agentx/core'
 import type { AnpErrorResponse, AnpMeta, AnpResponse } from '@agentx/core'
 import { cliError, type Values } from './auth'
-import { openChannel, type Channel } from './msg'
+import { openChannel, type Channel } from './channel'
 import { viewFor, type ListenMessage, type ListenView } from './listen-view'
 
 /** The stream's own Profile (realtime.md §9): the transport handshake is not a normative
