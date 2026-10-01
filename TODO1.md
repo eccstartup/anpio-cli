@@ -29,8 +29,12 @@
 
 ## B. `packages/cli` —— connectx
 
-- B1 从 `anp-sdk/packages/cli` 搬 `cli.ts` / `help/` / `commands/{auth,did,agent}.ts` / `identity/`
-- B2 删 `project.ts` / `generate/` / `template/` / `templates/`，清掉 `@clack/prompts` + `jiti` 依赖
+- ~~B1 从 `anp-sdk/packages/cli` 搬 `cli.ts` / `help/` / `commands/{auth,did,agent}.ts` / `identity/`~~（2026-10-01）
+- ~~B2 删 `project.ts` / `generate/` / `template/` / `templates/`，清掉 `@clack/prompts` + `jiti` 依赖~~（2026-10-01：连同 ZK
+  一起清干净——`--zk*` 五个旗标、`login-view.ts` 的 `ZkLoginOutcome` / `describeZkSession` / `protocol: 'zk'` 分支、
+  `auth.ts` 的整段 `runZkLogin` 与它的属性/描述符助手、`help/commands.ts` 的 Zero-knowledge 旗标组与 `project` 页。
+  `SessionWrite` 的 `uncacheable` 与 `LoginCard` 的 `note` / `identity.label` 随之删除：它们的唯一取值来源就是 ZK。
+  `packages/cli/package.json` 本就已是 `@agentx/cli` + 四个运行时依赖，无需再改）
 - B3 `help/commands.ts` 加 `msg` / `group` **两族**（页面数据，见 [cli.md](docs/design/cli.md) §3）
 - B4 `msg send`：发现 → 构造 → 签名 → POST → 报错，全链路
 - B5 `msg caps` / `msg inbox` / `msg show` / `msg read`
@@ -74,10 +78,11 @@
 
 - ~~E1 仓库脚手架~~（2026-10-01：workspace + 每包 `tsup` / `vitest` / `tsconfig`；
   `packages/service` 的 `engines` 定 `>=24.16.0`，见 [message-service.md](docs/design/message-service.md) §2）
-- E2 命令面门禁：把 `help.test.ts` 那两条不变量（「页面写出的旗标集合 ＝ 它接受的集合」
-  「页面声明的参数 ＝ 它的 usage 行」）一起搬过来
-- **远程未配**：本仓库只有本地 `git init`，`git push` 无处可去。需要一个 GitHub remote
-  （建仓是对外可见的动作，等用户定）
+- E2 命令面门禁：`help.test.ts` 已随 B1 一并搬来（两条不变量都在跑）。
+  **缺口**：原文件的第三条门禁读 `skill/connectx/SKILL.md`，而这份 skill 没有搬过来，已随删除
+  记录在此——要搬 skill 就把它一起恢复
+- **远程未配**（2026-10-01 用户裁定：**先不开远程，继续本地做 CLI**）。本地提交会累积，
+  CI 一次都没真跑过；要发版或想跑门禁时再回来开
 - E3 **加的评审清单**：CLI 与服务端里**不得出现 `isDid()` 之类的身份类型分支**
   （[vendored-core.md](docs/design/vendored-core.md) §6.3）
 - E4 端到端：`connectx msg send` → `AgentXAgent` → `connectx msg listen` 收到
