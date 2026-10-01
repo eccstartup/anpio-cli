@@ -53,14 +53,14 @@ describe('payloadOf', () => {
 describe('msg send argument validation', () => {
   it('refuses a text body sent as application/json', async () => {
     // application/json has a body shape, and it is `payload`, not `text` (§6.2.5 L266).
-    const err = await fails(() => runMsg(body({ text: 'hi', 'content-type': 'application/json' }), 'send', undefined))
+    const err = await fails(() => runMsg(body({ text: 'hi', 'content-type': 'application/json' }), 'send', []))
     expect(err.code).toBe('invalid_argument')
     expect(err.message).toContain('--body')
   })
 
   it('refuses an object body sent as text/plain', async () => {
     // The mirror image: text/plain has a body shape too, and it is `text` (§6.2.4 L262).
-    const err = await fails(() => runMsg(body({ body: '{}', 'content-type': 'text/plain' }), 'send', undefined))
+    const err = await fails(() => runMsg(body({ body: '{}', 'content-type': 'text/plain' }), 'send', []))
     expect(err.code).toBe('invalid_argument')
     expect(err.message).toContain('--text')
   })
@@ -68,27 +68,27 @@ describe('msg send argument validation', () => {
   it('refuses both spellings at once, and neither', async () => {
     // §6.3: exactly ONE of the three body fields. Two spellings of one field is the same
     // violation from the other side.
-    expect((await fails(() => runMsg(body({ text: 'hi', body: '{}' }), 'send', undefined))).code).toBe(
+    expect((await fails(() => runMsg(body({ text: 'hi', body: '{}' }), 'send', []))).code).toBe(
       'invalid_argument',
     )
-    expect((await fails(() => runMsg(body({}), 'send', undefined))).code).toBe('missing_flag')
+    expect((await fails(() => runMsg(body({}), 'send', []))).code).toBe('missing_flag')
   })
 
   it('refuses a --body that is not a JSON object', async () => {
     // `payload` is typed as a JSON object (§6.2.5 L266), so an array or a scalar has
     // nowhere to go: `text` is the field for a bare string.
     for (const raw of ['[1,2]', '"hi"', '3', 'null']) {
-      const err = await fails(() => runMsg(body({ body: raw }), 'send', undefined))
+      const err = await fails(() => runMsg(body({ body: raw }), 'send', []))
       expect(err.code, raw).toBe('invalid_argument')
     }
   })
 
   it('refuses an unparsable --body', async () => {
-    expect((await fails(() => runMsg(body({ body: '{"a":' }), 'send', undefined))).code).toBe('invalid_argument')
+    expect((await fails(() => runMsg(body({ body: '{"a":' }), 'send', []))).code).toBe('invalid_argument')
   })
 
   it('refuses a send with no recipient', async () => {
-    const err = await fails(() => runMsg({ text: 'hi' }, 'send', undefined))
+    const err = await fails(() => runMsg({ text: 'hi' }, 'send', []))
     expect(err.code).toBe('missing_flag')
     expect(err.message).toContain('--to')
   })
@@ -97,15 +97,15 @@ describe('msg send argument validation', () => {
     // Ordering, asserted rather than assumed: `payloadOf` runs second, so a refused body
     // is reported as a refusal even on a machine with no identity stored and no network.
     // Were the identity resolved first, this would come back as a store error instead.
-    const err = await fails(() => runMsg(body({ text: 'hi', body: '{}' }), 'send', undefined))
+    const err = await fails(() => runMsg(body({ text: 'hi', body: '{}' }), 'send', []))
     expect(err.code).toBe('invalid_argument')
   })
 })
 
 describe('msg caps argument validation', () => {
   it('refuses a probe with no DID', async () => {
-    expect((await fails(() => runMsg({}, 'caps', undefined))).code).toBe('missing_flag')
-    expect((await fails(() => runMsg({}, 'caps', ''))).code).toBe('missing_flag')
+    expect((await fails(() => runMsg({}, 'caps', []))).code).toBe('missing_flag')
+    expect((await fails(() => runMsg({}, 'caps', ['']))).code).toBe('missing_flag')
   })
 
   it('refuses an account id as the thing to probe, and says why', async () => {
@@ -113,13 +113,45 @@ describe('msg caps argument validation', () => {
     // endpoint anywhere, which is a different fact from "this DID document has no
     // ANPMessageService in it", and it is answered before any fetch is attempted. The
     // command layer never asks what kind of identifier it is holding.
-    const err = await fails(() => runMsg({}, 'caps', 'eip155:1:0x0000000000000000000000000000000000000001'))
+    const err = await fails(() => runMsg({}, 'caps', ['eip155:1:0x0000000000000000000000000000000000000001']))
     expect(err.code).toBe('caip10_has_no_ingress')
+  })
+})
+
+describe('msg show argument validation', () => {
+  it('refuses a show with no id', async () => {
+    const err = await fails(() => runMsg({}, 'show', []))
+    expect(err.code).toBe('missing_flag')
+    expect(err.message).toContain('message_id')
+  })
+})
+
+describe('msg inbox argument validation', () => {
+  it('refuses a --limit that is not a positive integer', async () => {
+    // Checked before the identity is resolved, so this is a refusal on a machine with no
+    // store rather than a store error — the same ordering `payloadOf` is asserted to have.
+    for (const limit of ['0', '-1', 'abc', '1.5', '']) {
+      const err = await fails(() => runMsg({ limit }, 'inbox', []))
+      expect(err.code, limit).toBe('invalid_argument')
+    }
+  })
+})
+
+describe('msg read argument validation', () => {
+  it('refuses an id and --all together, and neither', async () => {
+    // Both spellings name the same set, so passing both is a contradiction rather than a
+    // superset — and passing neither names nothing at all.
+    const both = await fails(() => runMsg({ all: true }, 'read', ['msg-1']))
+    expect(both.code).toBe('invalid_argument')
+    expect(both.message).toContain('--all')
+    const neither = await fails(() => runMsg({}, 'read', []))
+    expect(neither.code).toBe('missing_flag')
+    expect(neither.message).toContain('--all')
   })
 })
 
 describe('msg dispatch', () => {
   it('refuses a subcommand it does not have', async () => {
-    await expect(runMsg({}, 'inbox', undefined)).rejects.toThrow(/No subcommand "inbox"/)
+    await expect(runMsg({}, 'fetch', [])).rejects.toThrow(/No subcommand "fetch"/)
   })
 })

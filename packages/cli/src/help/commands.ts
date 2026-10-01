@@ -53,6 +53,11 @@ export interface ArgSpec {
    *  omitted. Presence is still reported by the command itself — this is what
    *  makes an EXTRA argument a rejection instead of a discard. */
   required: boolean
+  /** Spelled `<name>...`: this slot takes one or more values, so extra positionals are
+   *  consumed rather than rejected. Only the LAST argument may be variadic, because a
+   *  following slot would have no way to say which value was its own. The minimum still
+   *  applies, and is still the command's to report. */
+  variadic?: boolean
 }
 
 /** One page of help: an L1 command page, or an L2 subcommand page. */
@@ -557,6 +562,9 @@ export const COMMANDS: CommandSpec[] = [
     index: [
       { form: 'msg send', brief: 'deliver one message to a DID' },
       { form: 'msg caps <did>', brief: 'ask a message service what it supports' },
+      { form: 'msg inbox', brief: 'the messages waiting for the identity in use' },
+      { form: 'msg show <message_id>', brief: 'print one message in full' },
+      { form: 'msg read <message_id>...', brief: 'mark messages as read' },
     ],
     pages: [
       {
@@ -642,6 +650,91 @@ export const COMMANDS: CommandSpec[] = [
           { code: '1', meaning: 'failed: no message service found, refused, or a malformed answer' },
         ],
         examples: ['msg caps did:wba:example.com:user:bob:e1_xyz'],
+        see: 'cli/api/msg.md',
+      },
+      {
+        sub: 'inbox',
+        purpose: 'list what is waiting for the identity in use, from its own message service',
+        usage: ['msg inbox [options]'],
+        options: [
+          {
+            title: 'Inbox',
+            rows: [
+              { signature: '--limit <n>', summary: 'how many messages to ask for', fallback: 'default: 20' },
+              {
+                signature: '--include-read',
+                summary: 'include the messages already read',
+                fallback: 'default: off, so only unread ones are listed',
+              },
+            ],
+          },
+          KEY_CLI,
+          derivedHostPolicy('the signing DID'),
+          STORE,
+          OUTPUT,
+        ],
+        output: [
+          'A count of what came back, then each message as three lines: read or unread, when it arrived, the direction, and the other party; the body; and the id that `msg show` takes.',
+          'This reads the inbox of the identity in use, not of a peer: there is no --to, and the request goes to the message service of that identity, discovered from its own DID document.',
+          'The inbox methods are an implementation extension. The ANP message specification deliberately leaves history and read state out, so a service that implements only the specification answers unsupported_extension here, which says nothing about whether it can carry mail.',
+        ],
+        exits: [
+          { code: '0', meaning: 'printed' },
+          { code: '1', meaning: 'failed: no message service found, refused, or unsupported_extension' },
+        ],
+        examples: ['msg inbox', 'msg inbox --limit 50 --include-read'],
+        see: 'cli/api/msg.md',
+      },
+      {
+        sub: 'show',
+        purpose: 'print one message in full, by the id msg inbox printed',
+        usage: ['msg show <message_id> [options]'],
+        args: [{ name: 'message_id', required: true }],
+        options: [KEY_CLI, derivedHostPolicy('the signing DID'), STORE, OUTPUT],
+        output: [
+          'The message in the same shape msg inbox renders it, or a message_not_found error naming the id.',
+          'The id is the one msg inbox prints, not an identifier of the service own internal bookkeeping.',
+        ],
+        exits: [
+          { code: '0', meaning: 'printed' },
+          { code: '1', meaning: 'failed: no such message, refused, or unsupported_extension' },
+        ],
+        examples: ['msg show 3f2a1c9e-6b2e-4f0a-9c31-8e2b7d4a5c60'],
+        see: 'cli/api/msg.md',
+      },
+      {
+        sub: 'read',
+        purpose: 'mark messages as read, either the ones named or everything unread right now',
+        usage: ['msg read <message_id>... [options]', 'msg read --all [options]'],
+        args: [{ name: 'message_id', required: true, variadic: true }],
+        options: [
+          {
+            title: 'Read state',
+            rows: [
+              {
+                signature: '--all',
+                summary: 'mark every message that is unread as of now',
+                fallback: 'default: off, so the ids given are the ones marked',
+              },
+            ],
+            note:
+              'The messages to mark are listed first, then those ids are marked. A message that arrives ' +
+              'between the two steps stays unread rather than being marked unseen.',
+          },
+          KEY_CLI,
+          derivedHostPolicy('the signing DID'),
+          STORE,
+          OUTPUT,
+        ],
+        output: [
+          'How many messages were marked, and the time they were marked at.',
+          'Marking is idempotent per message: ids already read are left as they are, and are not counted.',
+        ],
+        exits: [
+          { code: '0', meaning: 'marked, or nothing was unread' },
+          { code: '1', meaning: 'failed: refused, or unsupported_extension' },
+        ],
+        examples: ['msg read 3f2a1c9e-6b2e-4f0a-9c31-8e2b7d4a5c60', 'msg read --all'],
         see: 'cli/api/msg.md',
       },
     ],
@@ -790,15 +883,34 @@ export function usageArgs(usage: string): ArgSpec[] {
   const out: ArgSpec[] = []
   for (const token of usage.split(/\s+/)) {
     if (token.startsWith('--')) break
-    const req = /^<([a-z][a-z0-9-]*)>$/.exec(token)
+    const req = /^<([a-z][a-z0-9_-]*)>(\.\.\.)?$/.exec(token)
     if (req !== null) {
-      out.push({ name: req[1], required: true })
+      out.push({ name: req[1], required: true, ...(req[2] === undefined ? {} : { variadic: true }) })
       continue
     }
-    const opt = /^\[([a-z][a-z0-9-]*)\]$/.exec(token)
-    if (opt !== null && opt[1] !== 'options') out.push({ name: opt[1], required: false })
+    const opt = /^\[([a-z][a-z0-9_-]*)\](\.\.\.)?$/.exec(token)
+    if (opt !== null && opt[1] !== 'options') {
+      out.push({ name: opt[1], required: false, ...(opt[2] === undefined ? {} : { variadic: true }) })
+    }
   }
   return out
+}
+
+/** How a page's positional slots bound the argument count. `fixed` is the number of slots
+ *  BEFORE a trailing variadic one, which is the count `cli.ts` slices the parsed
+ *  positionals at; `variadic` says the rest belong to the last slot rather than being
+ *  leftovers. A variadic slot's own minimum is the command's to report, the same way a
+ *  required single argument's presence always has been. */
+export function argSlots(page: PageSpec): { fixed: number; variadic: boolean } {
+  const args = acceptedArgs(page)
+  const variadic = args.length > 0 && args[args.length - 1].variadic === true
+  return { fixed: variadic ? args.length - 1 : args.length, variadic }
+}
+
+/** An argument as it is spelled on the command line, for the rejection's "takes:" list. */
+export function argSpelling(arg: ArgSpec): string {
+  const core = arg.required ? `<${arg.name}>` : `[${arg.name}]`
+  return arg.variadic === true ? `${core}...` : core
 }
 
 /** The positional arguments a page takes, in order. */

@@ -51,15 +51,39 @@ const CORE_BINDING = 'anp.core.binding.v1'
  *  "请求使用的 DID 已存在后继；调用方必须验证迁移、重建请求并重新签名". */
 const DID_SUPERSEDED = 'anp.did_superseded'
 
-/** `connectx msg show|inbox|read` and `listen` are NOT here yet: the extension surface
- *  they need is not a Profile, its argument shapes are the implementation's, and
- *  nothing above this line may guess at them (docs/design/cli.md §5). */
-export async function runMsg(v: Values, sub: string | undefined, positional: string | undefined): Promise<void> {
+/** The extension surface's own Profile (message-service.md §9.1). P1 §6.2.2 L277 makes
+ *  `meta.profile` MUST and calls it "本次请求的唯一解释 Profile", so a read request has
+ *  to name one — and no normative Profile interprets `inbox.get`. The `x_` prefix is the
+ *  namespace P1 §12 leaves for extensions, and it is what keeps this value out of the
+ *  `profiles[]` a service advertises as its spec conformance (message-service.md §13). */
+const EXTENSION_PROFILE = 'x_agentx.inbox.v1'
+
+/** message-service.md §9.3: the three extension methods the read commands call. */
+const INBOX_GET = 'inbox.get'
+const INBOX_MARK_READ = 'inbox.mark_read'
+const MESSAGE_GET_BATCH = 'message.get_batch'
+
+/** How many unread ids `msg read --all` asks for at a time. */
+const ALL_PAGE = 100
+
+/** JSON-RPC "no such method". */
+const METHOD_NOT_FOUND = -32601
+/** P1 §10.3: 1001 `anp.unsupported_profile`. On an `x_agentx.*` profile this says the
+ *  same thing `-32601` does — the peer does not implement this extension. */
+const UNSUPPORTED_PROFILE = 'anp.unsupported_profile'
+
+export async function runMsg(v: Values, sub: string | undefined, args: string[]): Promise<void> {
   switch (sub) {
     case 'send':
       return runSend(v)
     case 'caps':
-      return runCaps(v, positional)
+      return runCaps(v, args[0])
+    case 'inbox':
+      return runInbox(v)
+    case 'show':
+      return runShow(v, args[0])
+    case 'read':
+      return runRead(v, args)
     default:
       // cli.ts resolves the page first and answers an unknown subcommand itself.
       throw new Error(`No subcommand "${sub}" for \`connectx msg\``)
@@ -376,6 +400,233 @@ async function runCaps(v: Values, positional: string | undefined): Promise<void>
   field('content types:', joined(capabilities.supportedContentTypes))
   const limits = Object.entries(capabilities.limits)
   if (limits.length > 0) field('limits:', limits.map(([name, value]) => `${name}=${value}`).join(', '))
+}
+
+// ---- the extension surface (message-service.md §9) ---------------------------
+
+/** A read is addressed to the caller's OWN message service. There is no `--to`: the
+ *  owner of the inbox is `meta.sender_did`, so the DID whose document has to be fetched
+ *  for the service entry is the one we sign as. */
+interface Channel {
+  sender: Sender
+  target: AnpMessageServiceTarget
+  options: ResolveDidOptions
+}
+
+async function openChannel(v: Values): Promise<Channel> {
+  const sender = await senderFor(v)
+  const { target, options } = await discover(sender.did, v)
+  return { sender, target, options }
+}
+
+/** One extension call. Authenticated exactly like `direct.send` — `origin_proof` over
+ *  `{method, meta, body}`, no bearer token — because the CLI does not hold one and the
+ *  proof is the stronger answer anyway (cli.md §6).
+ *
+ *  `meta.target` is left out on purpose: `sender_did` already names the inbox, and a
+ *  target would be read as a recipient by anything that maps it (awiki's `normalize_params`
+ *  does exactly that), which a read has none of. */
+async function callExtension(channel: Channel, method: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const meta: AnpMeta = {
+    profile: EXTENSION_PROFILE,
+    security_profile: TRANSPORT_PROTECTED,
+    sender_did: channel.sender.did,
+    operation_id: randomUUID(),
+    created_at: new Date().toISOString(),
+  }
+  const auth = await buildOriginProofAuth({ method, meta, body, signer: channel.sender.signer })
+  const request = buildMessageRequest({ id: randomUUID(), method, meta, auth, body })
+  const response = await postMessage(channel.target.endpoint, request, channel.options)
+  if (isError(response)) throw extensionRejection(response, method, channel.sender.did)
+  return response.result
+}
+
+/** B8. A peer that has no extension surface is not a failure — it is an answer, and a
+ *  specific one. Both codes below say "I do not have this": `-32601` is what a JSON-RPC
+ *  service returns for a method it does not implement (awiki's `dispatch` returns it for
+ *  an unknown method or a mismatched surface), and `1001` is what a service returns for a
+ *  Profile it does not know.
+ *
+ *  No capabilities probe is made first: an extension Profile is not supposed to be in
+ *  `profiles[]` (message-service.md §13), so the probe could only ever confirm the
+ *  absence, at the price of a second round trip (cli.md §5). */
+function extensionRejection(response: AnpErrorResponse, method: string, identity: string): ConnectxError {
+  const anpCode = anpCodeOf(response)
+  if (response.error.code !== METHOD_NOT_FOUND && anpCode !== UNSUPPORTED_PROFILE) {
+    return rejection(response, method, identity)
+  }
+  const named = anpCode ?? `JSON-RPC error ${response.error.code}`
+  return new ConnectxError(
+    'unsupported_extension',
+    `${identity} does not implement ${method} (${named}): the inbox / history / read-state methods ` +
+      'are an implementation extension, not defined by the ANP message specification',
+    {
+      ...(anpCode !== undefined ? { serverCode: anpCode } : {}),
+      cause: { code: response.error.code, anpCode, data: response.error.data },
+    },
+  )
+}
+
+/** message-service.md §9.3: `inbox.get` takes `limit` (default 20), `skip`, `include_read`. */
+function limitOf(v: Values): number {
+  const raw = v.limit as string | undefined
+  if (raw === undefined) return 20
+  const parsed = Number(raw)
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw cliError('invalid_argument', `--limit must be a positive integer (got ${JSON.stringify(raw)})`)
+  }
+  return parsed
+}
+
+// ---- msg inbox / show / read -------------------------------------------------
+
+async function runInbox(v: Values): Promise<void> {
+  const body: Record<string, unknown> = { limit: limitOf(v) }
+  if (v['include-read'] === true) body.include_read = true
+  const result = await callExtension(await openChannel(v), INBOX_GET, body)
+  if (v.json === true) {
+    console.log(JSON.stringify(result, null, 2))
+    return
+  }
+  const rows = rowsOf(result, 'messages')
+  if (rows.length === 0) {
+    console.log(v['include-read'] === true ? 'no messages' : 'no unread messages; pass --include-read to see the rest')
+    return
+  }
+  console.log(summaryOf(rows, result))
+  for (const row of rows) console.log(renderMessage(row).join('\n'))
+}
+
+async function runShow(v: Values, id: string | undefined): Promise<void> {
+  if (id === undefined || id === '') {
+    throw cliError('missing_flag', 'missing required argument <message_id>')
+  }
+  const result = await callExtension(await openChannel(v), MESSAGE_GET_BATCH, { message_ids: [id] })
+  if (v.json === true) {
+    console.log(JSON.stringify(result, null, 2))
+    return
+  }
+  const rows = rowsOf(result, 'items').flatMap((item) => {
+    const message = asRow(item.message)
+    return message === undefined ? [] : [message]
+  })
+  // `unavailable` is the peer's list of ids it could not resolve, and it is why this is
+  // reported rather than rendered as an empty inbox — a message that does not exist and
+  // one that was asked for under the wrong id look identical otherwise.
+  if (rows.length === 0) throw new ConnectxError('message_not_found', `no message ${id} in this inbox`)
+  for (const row of rows) console.log(renderMessage(row).join('\n'))
+}
+
+async function runRead(v: Values, ids: string[]): Promise<void> {
+  const all = v.all === true
+  if (all && ids.length > 0) {
+    throw cliError('invalid_argument', '--all and <message_id> are two spellings of the same thing; pass one')
+  }
+  if (!all && ids.length === 0) {
+    throw cliError('missing_flag', 'missing required argument <message_id>, or --all')
+  }
+  const channel = await openChannel(v)
+  const messageIds = all ? await unreadIds(channel) : ids
+  if (messageIds.length === 0) {
+    if (v.json === true) console.log(JSON.stringify({ updated_count: 0, message_ids: [], read_at: null }, null, 2))
+    else console.log('nothing unread')
+    return
+  }
+  const result = await callExtension(channel, INBOX_MARK_READ, { message_ids: messageIds })
+  if (v.json === true) {
+    console.log(JSON.stringify(result, null, 2))
+    return
+  }
+  field('marked read:', typeof result.updated_count === 'number' ? result.updated_count : messageIds.length)
+  field('read at:', result.read_at)
+}
+
+/** Every unread id, paged. `--all` marks the ids that were LISTED, not "whatever is unread
+ *  when the write lands": a message arriving between the two calls is left unread, which is
+ *  the only reading of the flag that does not silently swallow one (message-service.md §9.3). */
+async function unreadIds(channel: Channel): Promise<string[]> {
+  const ids: string[] = []
+  let skip = 0
+  for (;;) {
+    const page = await callExtension(channel, INBOX_GET, { limit: ALL_PAGE, skip, include_read: false })
+    const rows = rowsOf(page, 'messages')
+    for (const row of rows) {
+      const id = idOf(row)
+      if (id !== undefined) ids.push(id)
+    }
+    // A page that contributes nothing under `has_more` would repeat forever, so an empty
+    // page ends the walk whatever the flag says.
+    if (page.has_more !== true || rows.length === 0) return ids
+    skip += rows.length
+  }
+}
+
+// ---- reading what came back --------------------------------------------------
+
+/** A peer's JSON, narrowed rather than trusted: everything below reads fields that a
+ *  different implementation may name differently, and a message with a field missing is
+ *  still worth printing. */
+type Row = Record<string, unknown>
+
+function asRow(value: unknown): Row | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Row) : undefined
+}
+
+function rowsOf(result: Row, key: string): Row[] {
+  const raw = result[key]
+  if (!Array.isArray(raw)) return []
+  return raw.flatMap((item) => {
+    const row = asRow(item)
+    return row === undefined ? [] : [row]
+  })
+}
+
+/** The identifier `msg show` takes. `id` is the same value under the name
+ *  `_direct_message_result` also publishes, so either spelling resolves. */
+function idOf(row: Row): string | undefined {
+  const id = row.message_id ?? row.id
+  return typeof id === 'string' && id !== '' ? id : undefined
+}
+
+function summaryOf(rows: Row[], result: Row): string {
+  const unread = rows.filter(isUnread).length
+  const more = result.has_more === true ? ' (more available)' : ''
+  return `${rows.length} message${rows.length === 1 ? '' : 's'}, ${unread} unread${more}`
+}
+
+function isUnread(row: Row): boolean {
+  return row.read_at === null || row.read_at === undefined
+}
+
+/** One message, as an IM client shows one: who and when on the opening line, the body
+ *  under it, the id last. Three lines rather than one because the id is the argument to
+ *  `msg show` and has to survive a copy — a truncated one is a broken command. */
+function renderMessage(row: Row): string[] {
+  const direction = typeof row.direction === 'string' ? row.direction : 'unknown'
+  const counterpart = direction === 'outgoing' ? row.recipient_did : row.sender_did
+  const peer = typeof counterpart === 'string' && counterpart !== '' ? counterpart : '(unknown peer)'
+  const at = typeof row.created_at === 'string' ? row.created_at : ''
+  const out = [`  ${isUnread(row) ? 'unread' : 'read  '}  ${at}  ${direction}  ${peer}`]
+  out.push(...contentOf(row).map((line) => `    ${line}`))
+  const id = idOf(row)
+  if (id !== undefined) out.push(`    id ${id}`)
+  return out
+}
+
+/** The body as it arrived. `text` and `payload` are P3 §6.2's two shapes and are printed
+ *  as they were sent; a P5/P6 payload stays opaque, because decrypting is the client's
+ *  job and this service never holds the key (message-service.md §11). */
+function contentOf(row: Row): string[] {
+  const body = asRow(row.body)
+  if (body !== undefined) {
+    if (typeof body.text === 'string') return body.text.split('\n')
+    if (body.payload !== undefined) return JSON.stringify(body.payload, null, 2).split('\n')
+    if (typeof body.payload_b64u === 'string') {
+      return [`(encrypted or binary payload, ${body.payload_b64u.length} base64url characters)`]
+    }
+  }
+  if (typeof row.content === 'string') return row.content.split('\n')
+  return ['(no content)']
 }
 
 // ---- reporting ---------------------------------------------------------------

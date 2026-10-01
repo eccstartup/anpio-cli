@@ -15,6 +15,7 @@ import {
   acceptedArgs,
   acceptedFlags,
   acceptedSignatures,
+  argSpelling,
   findCommand,
   findPage,
   flagNames,
@@ -337,7 +338,7 @@ export function renderExtraArgument(extra: string, path: string, page: PageSpec)
   const out = [`connectx: unexpected argument "${extra}" for \`${path}\``]
   const args = acceptedArgs(page)
   if (args.length === 0) out.push(`  \`${path}\` takes no arguments`)
-  else out.push(`  \`${path}\` takes: ${args.map((a) => (a.required ? `<${a.name}>` : `[${a.name}]`)).join(' ')}`)
+  else out.push(`  \`${path}\` takes: ${args.map(argSpelling).join(' ')}`)
   out.push(`  usage: connectx ${page.usage[0]}`)
   out.push(`  run \`connectx ${path} --help\``)
   return out.join('\n')

@@ -390,7 +390,7 @@ P5 §10.7 与 P6 同样排除，P8 也排除。**规范里不存在 `inbox.get`*
 
 `AgentXAgent` 必须补上这一半，否则消息只能发不能取。
 **设计选择：沿用 `awiki-open-server` 已有的方法名**（`messaging/core.py:2188` 的 `MESSAGE_HANDLERS`），
-这样同一个 `connectx` 对两个服务都能用：
+自造一套只会让客户端多一个兼容分支：
 
 ```
 direct.get_history
@@ -401,9 +401,80 @@ sync.bootstrap / sync.delta / sync.thread_after
 message.get_batch
 ```
 
-⚠ **这些方法不属任何 Profile，不得出现在 `anp.get_capabilities` 的 `profiles[]` 里。**
-它们要另开一个扩展标识（如 `x_agentx.inbox.v1`），否则就是在对客户端撒谎——
-一个只实现规范的服务会被误认为支持它们。
+### 9.1 扩展面自己的 Profile：`x_agentx.inbox.v1`
+
+**这六个方法不是"没有 Profile"的，而是有它们自己的一个。** P1 §6.2.2 L277 把
+`meta.profile` 定成 **MUST**，且说它是"本次请求的**唯一解释** Profile"——所以一个
+扩展方法在线上必须给出一个能解释它的 Profile 值，而这个值不可能是任何一个规范 Profile
+（那才是对客户端撒谎）。取值就是**扩展自己的标识符**，`x_` 前缀正是 P1 §12 给扩展留的命名空间。
+
+于是同一条扩展方法在线上长这样：
+
+```
+meta.profile            = "x_agentx.inbox.v1"
+meta.security_profile   = "transport-protected"
+meta.sender_did         = <读自己的收件箱的那个 DID>
+meta.operation_id       = <随机>
+meta.created_at         = <ISO 8601>
+body                    = <下面的参数>
+```
+
+**不得出现在 `anp.get_capabilities` 的 `profiles[]` 里**——那是"这个服务实现了哪些规范
+Profile"的答案，混进一个 `x_` 值就把它变成另一个问题了。扩展能力的自报位置见 §13
+（well-known 的 `x_agentx` 块）与 [realtime.md](realtime.md) §9（`stream.hello`）。
+客户端据此判定对端支不支持扩展；判不出来时按"不支持"处理（[cli.md](cli.md) §5）。
+
+### 9.2 认证：`origin_proof`，不是 bearer
+
+扩展面的读请求**和规范面的写请求走同一套认证**：`origin_proof` 签
+`{method, meta, body}`，`meta.sender_did` 是**被读的那个收件箱的主人**。
+服务端据 `origin_proof` 的 `keyid` 认人，不需要 bearer。
+
+这条是与 `awiki-open-server` 的**唯一实质分歧**，且它是必须的：awiki 的取件面
+（`protocol/registry.py` 里 `surfaces=("local",)` + `principal="local_bearer"`）要的是
+`Authorization: Bearer`，由 `user_compat/core.py:222` 的 `current_did(request)` 取出，
+缺了直接 `Unauthorized("missing_bearer_token")`；而且这些方法只挂在
+`POST /im/rpc` 上，那条路由（`app/routes.py`）以 `strict_anp=False` 直接
+`dispatch`，**不做任何信封校验**。
+
+结论：**`connectx` 的取件命令够不着 awiki 的取件面。** CLI 不持 bearer（见
+[cli.md](cli.md) §6：规范里 bearer 只是可选优化，且 MUST NOT 替代 `origin_proof`，
+所以 CLI 始终签名），而 awiki 只看 bearer。**沿用方法名的收益因此只剩"名字一致"**，
+不能再说成"同一个 `connectx` 对两个服务都能用"。方法名与参数形状以本文为准。
+
+### 9.3 方法与参数形状
+
+写在这里是因为两边都要实现它：`packages/service` 实现它，
+`packages/cli` 的 `msg inbox` / `show` / `read` 调用它。`params.body` 就是下表那一列。
+
+| 方法 | `body` | 结果 |
+|---|---|---|
+| `inbox.get` | `{limit?, skip?, include_read?}`，`limit` 默认 20 | `{messages: [...], total, has_more}` |
+| `inbox.mark_read` | `{message_ids: [...]}` | `{updated_count, message_ids, read_at}` |
+| `message.get_batch` | `{message_ids: [...]}`，≤ 100 且不重复 | `{items: [{message_id, message}], unavailable: [...]}` |
+| `direct.get_history` | `{peer_did, since_seq?, limit?}` | `{messages: [...], has_more}` |
+
+`inbox.get` 的每一行就是 `direct.send` 的 `body` 加上投递元数据，并**必须**带：
+
+```
+message_id         # 与 `id` 同值；`message.get_batch` 收的就是它
+sender_did / recipient_did
+content_type
+direction          # "incoming" / "outgoing"，按 sender_did 与会话主人的关系算
+created_at
+read_at            # 未读为 null
+```
+
+**`message.get_batch` 收 `message_ids`，不是 awiki 的 `event_ids`。** 这一处是**故意**偏离：
+`event_id` 是服务端同步日志的内部标识符，`inbox.get` 从不返回它，于是
+`connectx msg show <id>` 拿 `msg inbox` 打印出来的 id 根本调不动 awiki 那个形状——
+一个命令的第一个参数取不到第二个命令给的输出，这不是兼容性差异，是断链。
+改收 `message_id` 之后，`msg show` 的参数就是 `msg inbox` 打出来的那个 `id`。
+
+**`--all` 不是一个新的参数形状。** `connectx msg read --all` 的语义是"把此刻未读的全部
+标为已读"，实现是先 `inbox.get`（`include_read=false`）翻页取齐，再把这些 id 交给
+`inbox.mark_read`。这样"标记"这一步永远作用在**明确列举过的 id** 上，
+落在两次调用之间的新消息不会被静默吞掉。
 
 P5 的 **Mailbox** 不是这条路。Mailbox 是范围为 `(recipient_did, recipient_device_id)` 的
 **不透明密文队列**，不持有 Ratchet 状态，**不是群/私聊历史**。
@@ -491,6 +562,11 @@ Profile 与安全模式——把 `inbox.*` / `sync.*` / 订阅流塞进去，就
 （一个只实现规范的服务会被误认为支持它们）。扩展能力另走一处，
 由 `GET /.well-known/anp-message-service.json` 的一个 `x_agentx` 块自报，
 并在订阅握手的 `stream.hello` 里再报一次（见 [realtime.md](realtime.md) §9）。
+块里放的正是 §9.1 那个 Profile 名：
+
+```json
+{ "x_agentx": { "profiles": ["x_agentx.inbox.v1"], "methods": ["inbox.get", "inbox.mark_read", ...] } }
+```
 
 ## 14. 配置
 

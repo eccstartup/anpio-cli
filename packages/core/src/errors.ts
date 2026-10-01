@@ -85,7 +85,8 @@ export type ConnectxErrorCode =
   | 'message_invalid' // the envelope/message we built, parsed, or were handed is not spec-shaped (ANP-09 P1 §4–§6)
   | 'message_service_not_found' // the target DID document exposes no single usable `ANPMessageService` (P2 §7.1, §9.1)
   | 'message_send_failed' // the peer rejected a message operation (non-2xx, or a JSON-RPC error object)
-  | 'unsupported_extension' // the peer does not implement the requested extension method — it is NOT a Profile, and MUST NOT be advertised as one
+  | 'message_not_found' // the peer holds no message under the id that was asked for
+  | 'unsupported_extension' // the peer does not implement the extension method — the inbox / history / read-state surface is not defined by the spec, so a service may simply not have it
   // The CAIP-10 door (docs/design/vendored-core.md §6): a wallet account id has no
   // ingress of its own, so it cannot be a message address. Raised BY THE LOCATOR,
   // never by a call site guessing at the identity's shape.

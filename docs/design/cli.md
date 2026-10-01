@@ -78,9 +78,9 @@ connectx anp sign  --target <uri> [--method <verb>]
 connectx msg send --to <did> (--text <s> | --body <json>) [--content-type <type>]
 connectx msg caps <did>
 connectx msg listen [--device <id>] [--since <seq>] [--ack] [--once]
-connectx msg inbox [--since <cursor>]              # 扩展面
-connectx msg show <message_id>                     # 扩展面
-connectx msg read <message_id> | --all             # 扩展面
+connectx msg inbox [--limit <n>] [--include-read]        # 扩展面
+connectx msg show <message_id>                           # 扩展面
+connectx msg read <message_id>... | --all                # 扩展面
 ```
 
 **`msg send` 是本仓库最重要的一条命令。** 它一条命令走完规范要求的全部步骤：
@@ -196,22 +196,35 @@ connectx anp login --wallet web3 --provider <module> --address 0x… --chain-id 
 是 `awiki-open-server` 自己的扩展（`MESSAGE_HANDLERS`，`messaging/core.py:2188`）。
 
 `AgentXAgent` 也必须提供这一半，否则消息只能发不能取。**设计选择：沿用同一套方法名**，
-不另起一套——
+不另起一套——自造命名只会让客户端多一套兼容分支。**方法名、参数形状、Profile 名、
+认证方式，全部以 [message-service.md](message-service.md) §9 为准**，那里是两边共同
+实现的接口定义。
 
-```
-direct.get_history
-inbox.get
-inbox.mark_read
-read_state.mark_read
-sync.bootstrap / sync.delta / sync.thread_after
-message.get_batch
-```
-
-这样 `connectx` 的 `msg inbox` / `show` / `read` **对 `awiki-open-server` 和 `AgentXAgent`
-都能用**。自造命名只会让客户端多一套兼容分支，换不来任何东西。
+**这个接口有一处与 `awiki-open-server` 实质不同，必须记下来**：awiki 的取件面是
+`principal="local_bearer"`（`protocol/registry.py`），靠
+`Authorization: Bearer` 认人（`user_compat/core.py:222` 的 `current_did`），
+且只挂在 `POST /im/rpc` 上、以 `strict_anp=False` 直接 `dispatch`（`app/routes.py`），
+**不做信封校验**。而 CLI **不持 bearer**——规范里 bearer 只是可选优化，
+且 **MUST NOT** 替代 `origin_proof`（P3 §9.5），所以 CLI 始终签名（第 6 节）。
+两条路不相交：**`msg inbox` / `show` / `read` 够不着 awiki 的取件面。**
+沿用方法名的收益因此只剩"名字一致"，不能再说成"同一个 `connectx` 对两个服务都能用"。
+扩展面读请求发的是 `meta.profile = "x_agentx.inbox.v1"` +
+`meta.sender_did` = 收件箱主人，用 `origin_proof` 认证，不带 bearer。
 
 ⚠ 由此产生的一条纪律：`msg inbox` 等命令在**对端不支持该扩展**时，必须报
 `unsupported_extension` 并说明"这是实现扩展，规范未定义"，**不能**把它当成规范能力宣传。
+
+**判定方式：不用额外探测，读对端的答复。** 两条都是"我没有这个东西"：
+
+| 对端返回 | 含义 |
+|---|---|
+| `-32601` `method_not_found` | 这个方法不在它的方法面上（awiki 的 `dispatch` 对未知方法或 surface 不匹配就是这一条） |
+| `1001` `anp.unsupported_profile`，且请求的 Profile 是 `x_agentx.*` | 它不认这个扩展 Profile |
+
+多打一次 `anp.get_capabilities` 换不来更好的信息——`profiles[]` 里本来就不该有扩展
+（[message-service.md](message-service.md) §13），查它只能证明"没有"，与直接调一次的
+代价相同而信息更少。错误信息只写清一句：**这是实现扩展，规范未定义**，
+所以一个只实现规范的对端在这里回什么都对，问题在客户端挑错了对端。
 
 ## 6. 不做的事（明确记录）
 

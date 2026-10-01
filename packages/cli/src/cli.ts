@@ -5,7 +5,7 @@ import { runDidStore, runAnp } from './commands/auth'
 import { runDid } from './commands/did'
 import { runMsg } from './commands/msg'
 import { cliVersion } from './version'
-import { acceptedArgs, acceptedFlags, findCommand, findPage } from './help/commands'
+import { acceptedFlags, argSlots, findCommand, findPage } from './help/commands'
 import {
   commandPath,
   renderCommandIndex,
@@ -54,6 +54,12 @@ const OPTIONS = {
   body: { type: 'string' },
   'content-type': { type: 'string' },
   'operation-id': { type: 'string' },
+  // msg inbox / read — the extension surface's own options. `--limit` is the page size,
+  // `--include-read` widens `inbox.get` past its unread-only default, and `--all` is the
+  // "everything unread, as of now" spelling of `msg read` (message-service.md §9.3).
+  limit: { type: 'string' },
+  'include-read': { type: 'boolean', default: false },
+  all: { type: 'boolean', default: false },
   // session store — the token cache written by `login`. On by default, so declared as
   // `--no-save-session`; `--save-session` is unknown.
   'no-save-session': { type: 'boolean', default: false },
@@ -211,8 +217,13 @@ async function main(argv: string[]): Promise<number> {
   // then the page's own arguments; anything past that was parsed, dispatched, and
   // dropped — `connectx agent show bob` answered about the current agent as if
   // `bob` had never been typed. Same reason to reject as an unknown flag.
+  //
+  // A trailing variadic slot (`msg read <message_id>...`) consumes the rest by
+  // definition, so there is nothing left over to reject; its own minimum is the
+  // command's to report, the same way a required single argument's presence is.
   const consumed = page.sub === undefined ? 1 : 2
-  const extra = positionals.slice(consumed + acceptedArgs(page).length)
+  const slots = argSlots(page)
+  const extra = slots.variadic ? [] : positionals.slice(consumed + slots.fixed)
   if (extra.length > 0) {
     console.error(renderExtraArgument(extra[0], commandPath(positionals), page))
     return 1
@@ -237,8 +248,9 @@ async function main(argv: string[]): Promise<number> {
       return await runDid(v, sub, positionals[2])
     case 'msg':
       // The message layer's own client. The page layer has already rejected any flag or
-      // extra argument this family does not take, so `runMsg` sees only its own.
-      await runMsg(v, sub, positionals[2])
+      // extra argument this family does not take, so `runMsg` sees only its own — and it
+      // takes them as a list because `msg read` accepts more than one id.
+      await runMsg(v, sub, positionals.slice(2))
       return 0
     case 'agent':
       // The store's current agent: which id the other commands act as when neither

@@ -39,17 +39,23 @@
   `SessionWrite` 的 `uncacheable` 与 `LoginCard` 的 `note` / `identity.label` 随之删除：它们的唯一取值来源就是 ZK。
   `packages/cli/package.json` 本就已是 `@agentx/cli` + 四个运行时依赖，无需再改）
 - B3 `help/commands.ts` 加 `msg` / `group` **两族**（页面数据，见 [cli.md](docs/design/cli.md) §3）。
-  2026-10-01：`msg` 族按子命令逐条落地，`send` / `caps` 两页已随之进来；**`group` 一族随 B6**
+  2026-10-01：`msg` 族按子命令逐条落地，`send` / `caps` / `inbox` / `show` / `read` 五页
+  已随之进来（`listen` 随 B9）；**`group` 一族随 B6**
 - ~~B4 `msg send`：发现 → 构造 → 签名 → POST → 报错，全链路~~（2026-10-01。含 P1 §10.3 L726 与
   P3 §5.5 L206–208 要求的 `anp.did_superseded` 重试）
-- B5 `msg caps` 已做（匿名探测，`meta` 按 P1 §8.2.1 L524–539 的例子给）。
-  **`msg inbox` / `show` / `read` 未做**：扩展面 `params` 的形状是实现的，不是规范的
-  （`message.get_batch` 收 `event_ids` 而非 `message_ids`，`inbox.get` 收 `limit`/`skip`/`include_read`），
-  要与 B8 的 `unsupported_extension` 判定合成一遍
+- ~~B5 取件三命令 `msg inbox` / `show` / `read`~~（2026-10-01。扩展面的接口定义落进
+  [message-service.md](docs/design/message-service.md) §9——之前只有方法名，参数形状要去
+  另一个仓库反推，这是断链的根因。定下：扩展面有自己的 Profile `x_agentx.inbox.v1`
+  （P1 §6.2.2 L277 要求 `profile` 是 MUST 且是"唯一解释"，规范 Profile 解释不了它）；
+  认证走 `origin_proof`；`message.get_batch` 收 `message_ids` 而非 awiki 的 `event_ids`。
+  **awiki 的取件面够不着**（它要 bearer，CLI 不持 bearer），cli.md §5 的说法已随之更正）
 - B6 `group` 六条命令
 - ~~B7 `msg` 族拒绝账户 id，错误码 `caip10_has_no_ingress`~~（2026-10-01：拒绝点确在
   `DidServiceLocator.locate()`，命令层无判断；`caps` 侧有测试钉住）
-- B8 对端不支持扩展面时报 `unsupported_extension`（不是模糊失败）
+- ~~B8 对端不支持扩展面时报 `unsupported_extension`~~（2026-10-01：读对端的答复判定，
+  `-32601 method_not_found` 与 `1001 anp.unsupported_profile`（Profile 是 `x_agentx.*` 时）
+  都映射过去。不先探 `anp.get_capabilities`——扩展本来就不该出现在 `profiles[]` 里，
+  探它只能证明"没有"却多一次往返）
 - B9 **`msg listen`**：WebSocket 连接 + 补齐 + 实时渲染 + 重连退避
   （契约全在 [realtime.md](docs/design/realtime.md) §7）
 - B10 `msg listen` 的两套渲染器：TTY 人类可读 / 非 TTY 或 `--json` 出 NDJSON，
