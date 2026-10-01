@@ -243,6 +243,12 @@ KeyPackage 的 reserved / consumed 状态由本服务管。
 **不新增方法。** 它是 payload 语义扩展：`mentions` 顶层数组。
 服务端 **MUST NOT** 做 mention 专属授权或展开 selector，只执行外层 Profile 的校验。
 
+### P8 联邦
+
+**同样不新增方法**（§3.1 L61–68：**SHOULD** 直接复用原业务方法，不新增 Relay 包装方法）。
+它约束的是上面那些方法**跨域时**怎么走：外层 `serviceDid` 身份、caller anchor、
+以及发送侧到底转发什么。见 [federation.md](federation.md)。
+
 ### 4.1 错误码段
 
 | 段 | 归属 |
@@ -320,6 +326,9 @@ P1 §10.3 L706 只有 `anp.unauthorized`（1005），P3 §11 L599–600 把它�
 
 这个函数就是 §5.1 的 `callerAnchor`——同一份判断服务两处检查：业务层的 proof 归属
 （§5.1）与这里跨域外层服务的 `serviceDid` 归属。两处各写一遍，就回来了。
+
+外层那一路要做到什么程度（§6.2.2 的八步、重放缓存、以及"什么算跨域"的判断），
+见 [federation.md](federation.md) §2。
 
 ### 5.3 CAIP-10 调用者
 
@@ -776,22 +785,27 @@ E2EE 会话里的取件走 Mailbox，明文历史走 `inbox.get`。两者别混�
 ## 10. 联邦（P8）
 
 **没有中继协议。** P8 §3.1 明确：发送方域**直接复用原业务方法**，不新增 Relay 方法。
-发送方域按 `target.kind` 路由到目标域，把**原始** `direct.send` POST 到对方入口服务。
+发送方域按 `target.kind` 路由到目标域，把**原始**方法 POST 到对方入口服务。
 
 本服务作为**接收侧**要做的：
 
-1. 用发送方 `serviceDid` 验外层 HTTP 认证
+1. 用发送方 `serviceDid` 验外层 HTTP 认证（§6.2.2 L374–383 的八步）
 2. 按 §5.2 调 caller anchor
 3. 直接进入正常处理流程——跨域与同域在业务语义上**没有区别**
 
-本服务作为**发送侧**（`group.incoming` 要推给别的域的成员）要做的：
-用**自己的** `serviceDid` 签外层请求，业务层的 `origin_proof` 原样带上。
+本服务作为**发送侧**要做的：解析目标公开的 `ANPMessageService`，**不是自己**就用
+**自己的** `serviceDid` 签外层请求，把**原始**方法发过去，业务层的 `origin_proof`
+原样带上。
 
 失败与重试：复用原业务幂等语义；重试**保持** `operation_id` / `message_id`，
 负载语义等价，设备 selector 不变。内部 trace / attempt 字段**不得**替代幂等键。
 
 **DID 停用**：应用处理前可返 HTTP 409；进入应用处理后返 `anp.did_superseded`。
 同一请求 **MUST NOT** 两层都返。
+
+全部决策、依据与三处偏离（外层认证失败回 401 而非 200；`direct.incoming` 不是跨域
+消息、跨域转发的是原始 `direct.send`；**请求同步转发 / 通知异步 outbox** 的二分）见
+[federation.md](federation.md)。
 
 ## 11. E2EE 对本服务的硬约束
 
@@ -912,6 +926,11 @@ AGENTX_DID_DEV_HOSTS      联调放宽：这些域可以解析私有地址、可
 `DID_DEV_HOSTS` 是给本地联调用的，它同时把域名加进白名单、并允许私有地址与明文 http。
 两者都要求**逐个点名**，所以没有哪个取值能让解析变成无界的。
 
+**代价**：接收跨域请求要解析对端的 DID 文档（caller anchor 与 `serviceDid` 各一份），
+所以跨域接收在默认配置下**跑不起来**，必须把对端域加进 `ALLOWED_DID_HOSTS`。
+关掉开关比放松白名单危险得多，所以这条不改，写清楚见
+[federation.md](federation.md) §2.5。
+
 ## 15. 实现顺序
 
 **v1（先跑通规范面）**
@@ -929,7 +948,8 @@ AGENTX_DID_DEV_HOSTS      联调放宽：这些域可以解析私有地址、可
    —— 语义见 [groups.md](groups.md)
 8. P7 附件数据面 —— 三平面、Grant 在承载消息被接受时才出现、数据面两条路由
    —— 决策见 [attachments.md](attachments.md)
-9. P8 跨域（`serviceDid` 外层认证 + caller anchor）
+9. P8 跨域：`serviceDid` 外层认证（八步 + 重放缓存）、请求同步转发 / 通知异步 outbox
+   的二分——决策见 [federation.md](federation.md)
 
 **v3**
 
