@@ -21,6 +21,32 @@ import { ACCEPTED_CONTENT_TYPES } from './rpc/payload'
  *  `x_` 打头（realtime.md §9）；"哪些是本服务的扩展"这个判断因此只有这一处。 */
 const EXTENSION_PREFIX = 'x_'
 
+/**
+ * 实现了、但**不得对外声明为稳定 Profile** 的那些。
+ *
+ * 今天只有 P6 一条，依据是它自己的规范：§6.3.1 L430 说本草案为
+ * `anp_did_wba_device_binding` 暂定的 MLS `ExtensionType` `0xF0A1` **不是** IANA 分配，
+ * 且"ANP 在发布 v2 前 **MUST** 公布稳定的注册 code point"；§20 L2457 把那条注册列为后续
+ * 版本 **SHOULD** 建立的注册表之一。
+ *
+ * 也就是说：**协议本体还没定稿**。把它列进 `supported_profiles` 是让一个标准客户端按
+ * §8.3 L591–593 把它当成"对端已实现、可以发"的运行时权威，而对方发出的 KeyPackage 里
+ * 那个 extension 值明天就可能变。所以实现照做、声明留白——`lookupMethod` 仍然认这两条方法，
+ * 直接发过来是能受理的（§6.3.1 L431 说该值"**MUST** 仅在显式协商 `anp.group.e2ee.v2` 后
+ * 使用"，显式协商就是调用方自己写明 `meta.profile`，不是靠这份清单）。
+ *
+ * 与此并列的一条后果：官方 Rust 参考实现把同一件事做成了显式门禁
+ * `ErrP6V2PublicReleaseBlocked`（`rust/src/group_e2ee/v2_errors.rs:84`）。上游公布稳定
+ * codepoint 之后，删掉这一项即可，方法表不用改。
+ */
+const WITHHELD_PROFILES: ReadonlySet<string> = new Set(['anp.group.e2ee.v2'])
+
+/** 上面那一份，导出给测试用。
+ *
+ *  它不是"实现细节"：`capabilities.test.ts` 钉住的正是**这份清单被改动**这件事——每多扣留
+ *  一条 Profile，都要有人在那个测试里说明依据，而不是让它跟着方法表悄悄改变对外承诺。 */
+export const WITHHELD_PROFILE_LIST: readonly string[] = [...WITHHELD_PROFILES]
+
 export interface ServiceCapabilities {
   /** 规范定义的 Profile。可以进 `.well-known` 的 `profiles` 与 `anp.get_capabilities`
    *  的 `supported_profiles`。 */
@@ -38,7 +64,13 @@ export function serviceCapabilities(): ServiceCapabilities {
   const extensionMethods = new Set<string>()
   for (const spec of allMethods()) {
     const extension = isExtension(spec)
-    for (const profile of spec.profiles) (extension ? extensionProfiles : profiles).add(profile)
+    for (const profile of spec.profiles) {
+      if (WITHHELD_PROFILES.has(profile)) continue
+      ;(extension ? extensionProfiles : profiles).add(profile)
+    }
+    // 安全模式**不**做同一件事：`transport-protected` 是 P1 的公共值、P7 与 P5 也在用它，
+    // 少列一个只是少说一句真话。而 withheld 的那条 Profile 今天带来的唯一新值
+    // `group-e2ee` 只由 P6 的四条控制方法使用——那四条还没进方法表，所以这里也不会漏报。
     for (const security of spec.securityProfiles) securityProfiles.add(security)
     if (extension) extensionMethods.add(spec.name)
   }

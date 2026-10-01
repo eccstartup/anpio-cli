@@ -261,15 +261,25 @@
 - C13 P6 群组 E2EE：KeyPackage 状态机 + Device Delivery Queue
   - ~~设计~~（2026-10-01：[e2ee-group.md](docs/design/e2ee-group.md)。定下的是几个规范没
     说话的地方——**Host 侧唯一的"群状态"是一份不含任何可运算材料的公开投影**（§11.10.3
-    L1372），MLS 全在 owner 客户端；Device Delivery Queue 与 P5 的 Mailbox **是同一张表同一
-    个键**，别建两张；队列内四种顺序规则（§12.6 L1512）选"把已入队的应用信封投完再发最终
-    通知"；`group.e2ee.leaf_not_current`(5013) 的判定序是先 `group.not_member` → 再 core
-    设备码 → 最后 5013，**MUST NOT** 折叠（§13.3 L1625）。§12.6 L1500 那句"Host 无法为
-    离线设备重新生成信封"是队列不建在历史服务上的全部理由）
-  - 还剩：六条方法进方法表（三档 `targetMode`）+ KeyPackage 三态柜子（`group_key_packages`
-    的 `state` 列已在 v3）+ `group_leaves` 投影 + Device Delivery Queue 与队列内排序 +
-    `group_did_updates` 的暂停/串行化 + 最终 Remove 通知的有界收尾 + `origin_context` 的
-    原样保留（§13.6）
+    L1372），MLS 全在 owner 客户端；队列内四种顺序规则（§12.6 L1512）选"把已入队的应用
+    信封投完再发最终通知"；`group.e2ee.leaf_not_current`(5013) 的判定序是先 `group.not_member`
+    → 再 core 设备码 → 最后 5013，**MUST NOT** 折叠（§13.3 L1625）。§12.6 L1500 那句"Host
+    无法为离线设备重新生成信封"是队列不建在历史服务上的全部理由。**§6 曾把 Device Delivery
+    Queue 与 P5 的 Mailbox 说成同一张表，那是错的**，两张表的理由见 §6 的更正）
+  - ~~KeyPackage 三态柜子 + `group_leaves` 投影 + `device_envelopes` 队列 + `origin_context`
+    的原样保留~~（2026-10-01：v9 的三张表与 14 个访问器，见 [e2ee-group.md](docs/design/e2ee-group.md)
+    §11。`consumed` 的触发者是本服务自己——`group.e2ee.add` 把 KeyPackage 内联带着，
+    Host 因此能按 `key_package_id` 定位到行）
+  - ~~两条 KeyPackage 方法进方法表（`publish_key_package` / `get_key_package`）~~
+    （2026-10-01：`service-scoped`、`anp.group.e2ee.v2`、`transport-protected`；§7.3 形状
+    与 §6.3 绑定在**发布与领取两侧**都验（§8.2.4 L767 那个窗口）。5001／5002 的分派、
+    §6.4 第 6 项的读法、`require_fresh` 的处置、`auth` 的两不管，七条都在
+    [e2ee-group.md](docs/design/e2ee-group.md) §4.1。**能力清单扣留 P6**（D2）落在
+    `capabilities.ts` 的 `WITHHELD_PROFILES`，`capabilities.test.ts` 钉住"只有这一条"。
+    service 523）
+  - 还剩：四条控制面方法进方法表（`create` / `add` / `remove` / `send`，`group-e2ee` 那一档）
+    + 队列内排序与最终 Remove 通知的有界收尾 + `group_did_updates` 的暂停/串行化
+    （`send` 返回 5004）
   - **动手前先留列**：与 C12 同一条缝（`deliveries` 没有设备列、C7 按 `owner_did` 路由）
   - **挡住 v1 的**：`0xF0A1` 还是草案私有值，规范说 ANP **在发布 v2 前 MUST 公布稳定
     注册 code point**（§6.3.1 L430、§20 L2457）——**决定 P6 能不能对外声明**

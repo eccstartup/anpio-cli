@@ -50,6 +50,7 @@ import {
   publishPrekeyBundle,
   type KeyContext,
 } from './keys'
+import { GET_KEY_PACKAGE, PUBLISH_KEY_PACKAGE, getKeyPackage, publishKeyPackage } from './groupE2ee'
 import { callerKeyOf, createRateLimiter } from './rateLimit'
 import { GROUP_HANDLERS } from './groups'
 import { ATTACHMENT_HANDLERS } from './attachments'
@@ -190,6 +191,13 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
         return publishPrekeyBundle(keyContext(input))
       case GET_PREKEY_BUNDLE:
         return getPrekeyBundle(keyContext(input))
+      // P6 §8 那两条（C13）。与上面一对共用 `keyContext`：上下文要的四件（`storage` /
+      // `serviceDid` / `meta` / `body` / `acceptedAt` / `devices`）恰好一样，而 `devices`
+      // 的**顺序**读法也相同（[0] 是调用方，领取时的 [1] 是正文点名的目标设备）。
+      case PUBLISH_KEY_PACKAGE:
+        return publishKeyPackage(keyContext(input))
+      case GET_KEY_PACKAGE:
+        return getKeyPackage(keyContext(input))
       case INBOX_GET:
         return readInbox(deps.storage, meta, body)
       case MESSAGE_GET_BATCH:

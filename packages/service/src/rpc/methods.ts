@@ -32,6 +32,15 @@ import {
   validateGetBundleBody,
   validatePublishBody,
 } from './keys'
+import {
+  GET_KEY_PACKAGE,
+  GROUP_E2EE_DEVICE,
+  GROUP_E2EE_KEY_SECURITY_PROFILE,
+  GROUP_E2EE_PROFILE,
+  PUBLISH_KEY_PACKAGE,
+  validateGetKeyPackageBody,
+  validatePublishKeyPackageBody,
+} from './groupE2ee'
 import type { DeviceAddressed, DevicePair } from './eligibility'
 import {
   ATTACHMENT_ABORT_OBJECT,
@@ -631,12 +640,92 @@ const GET_PREKEY_BUNDLE_SPEC = keySpec({
   targetScope: (meta, body) => `${serviceTargetDid(meta, GET_PREKEY_BUNDLE)}/${bodyString(body, 'target_did')}`,
 })
 
+/**
+ * P6 的两条 KeyPackage 方法（§8，C13）。
+ *
+ * 与上面 P5 那一对同形——`service-scoped`、要 `sender_did` / `sender_device_id` /
+ * `operation_id`、`requiresOriginProof` 恒假——但**不是同一档安全模式**：§4.3 L272 把这两条
+ * 连同 `group.e2ee.notice` 定在 `transport-protected`，`group-e2ee` 留给四条控制方法
+ * （L273）。Profile 也换成了 `anp.group.e2ee.v2`：§4.3 L264 要求 P6 请求的 `meta.profile`
+ * **MUST** 等于它，所以这两条与 P4 那九个不共用 Profile，尽管目标建模与它们相邻。
+ *
+ * ## 为什么不写 `validateParams`（与 P5 那两条的差别）
+ *
+ * P5 §7.1 L472 与 §7.2 L548 都逐字写着未协商扩展时 `params.auth` **MUST** 缺省，
+ * 所以那一对在 `keyMethodParams` 里把它拒掉。**P6 §8 没有这句话**：§8.1.2 与 §8.2.2 的
+ * 字段清单里没有 `auth`，认证约束一节只说"v2 不要求为该方法额外定义新的业务层
+ * `origin_proof`"（§8.1.2 L706）。
+ *
+ * 两句合起来是：这里既不要求它、也不禁止它。自造一条禁令会拒掉规范允许的请求，而规范在
+ * 这一处没有给过禁令（P1 §10.3 L724 那条 1003 说的是私聊 Base 自己的字段）。
+ *
+ * ## `targetScope` 两档不同，与 P5 同理
+ *
+ * §8.2 的幂等键元组比 §8.1 多一个 `target_did`——领取的地址里多一个"问谁要"。
+ * `target_device_id` 已经由设备段承载（`deviceSelector`），所以这里只差 `target_did`。
+ */
+function groupE2eeKeySpec(input: KeySpecInput): MethodSpec {
+  return {
+    name: input.name,
+    targetMode: 'service-scoped',
+    profiles: [GROUP_E2EE_PROFILE],
+    securityProfiles: [GROUP_E2EE_KEY_SECURITY_PROFILE],
+    requiredMeta: ['sender_did', 'sender_device_id', 'operation_id'],
+    forbiddenMeta: [],
+    // §8.1.2 L706 逐字。§8.2.2 L739 另说"匿名获取 KeyPackage 不属于 v2 MTI"，但 L740
+    // 把最小互通定在 hop / service 级认证——同域明文没有那一跳时，这条方法剩下的认证是
+    // 目标设备的资格（下面的 `deviceAddressed`）。缺口与 P5 同源，记在 e2ee-group.md。
+    requiresOriginProof: () => false,
+    // 到不了（`requiresOriginProof` 恒假）。填一个合规的值只是方法表的完整性要求。
+    authCodes: P1_AUTH_CODES,
+    validateBody: (body) => input.validateBody(body),
+    deviceAddressed: (meta, body) => input.deviceAddressed(meta, body),
+    targetScope: (meta, body) => input.targetScope(meta, body),
+  }
+}
+
+const PUBLISH_KEY_PACKAGE_SPEC = groupE2eeKeySpec({
+  name: PUBLISH_KEY_PACKAGE,
+  validateBody: validatePublishKeyPackageBody,
+  // §8.1.2 L697：点名的设备**只有发布方自己一台**——`meta.target.did` 是服务的 DID。
+  deviceAddressed: (meta) => ({
+    pairs: [senderPair(meta, PUBLISH_KEY_PACKAGE)],
+    requirement: GROUP_E2EE_DEVICE,
+  }),
+  // §8.1 的键元组：`meta.target.did` 就是那个 `target.did`。
+  targetScope: (meta) => serviceTargetDid(meta, PUBLISH_KEY_PACKAGE),
+})
+
+const GET_KEY_PACKAGE_SPEC = groupE2eeKeySpec({
+  name: GET_KEY_PACKAGE,
+  validateBody: validateGetKeyPackageBody,
+  // 两台：调用方自己，以及正文里的目标设备（§8.2.2 L734–735 要求 `sender_device_id` 标识
+  // 合格设备，§8.1.2/§8.2.4 L767 要求返回前按当前 Manifest 重验**目标**设备）。顺序与规范
+  // 一致：`pairs[0]` 是调用方，`pairs[1]` 是被问的那台。
+  deviceAddressed: (meta, body) => ({
+    pairs: [
+      senderPair(meta, GET_KEY_PACKAGE),
+      { identity: bodyString(body, 'target_did'), deviceId: bodyString(body, 'target_device_id') },
+    ],
+    requirement: GROUP_E2EE_DEVICE,
+    // §8.2.4 L767：设备一旦失去资格，MUST 停止**返回**它的 KeyPackage 材料。这条 MUST 说的
+    // 是"返回前"，所以重放也要重判——与 `get_prekey_bundle` 同一档，理由写在
+    // `DeviceAddressed.recheckOnReplay`。
+    recheckOnReplay: true,
+  }),
+  // §8.2 的键元组比 §8.1 多一个 `target_did`。`meta.target.did` 对被受理的请求是常量
+  // （§8.2.2 L732 要求它等于 `serviceDid`），所以这里只有一个变量，`/` 分隔不可能歧义。
+  targetScope: (meta, body) => `${serviceTargetDid(meta, GET_KEY_PACKAGE)}/${bodyString(body, 'target_did')}`,
+})
+
 /** `POST /anp-im/rpc` 认得的方法。两个传输方法**不在其中**——理由写在 `stream.ts`。 */
 const METHODS: readonly MethodSpec[] = [
   GET_CAPABILITIES_SPEC,
   DIRECT_SEND_SPEC,
   PUBLISH_PREKEY_BUNDLE_SPEC,
   GET_PREKEY_BUNDLE_SPEC,
+  PUBLISH_KEY_PACKAGE_SPEC,
+  GET_KEY_PACKAGE_SPEC,
   GROUP_CREATE_SPEC,
   GROUP_GET_INFO_SPEC,
   GROUP_JOIN_SPEC,
