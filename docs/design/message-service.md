@@ -234,6 +234,11 @@ OPK 分配"**原子**完成（§7.2 L581），同一键重试 **MUST** 拿回同
 通知 `group.e2ee.notice`，并重载 `group.incoming`。
 KeyPackage 的 reserved / consumed 状态由本服务管。
 
+目标建模**三档**（§4.4）：前三条与 `create` 是 service-scoped，`add`/`remove`/`send` 是
+group-addressed，两条通知是 agent-addressed（**不定义** `target.kind = "device"`，§4.4.3 L320）。
+本服务在这条链上**只当见证者**：排序、持有一份 `(DID, device)`→leaf 的**公开投影**、
+以及两台柜子；MLS 的 create/add/remove 全在 owner 客户端，见 [e2ee-group.md](e2ee-group.md)。
+
 ### P7 附件 — `anp.attachment.v1`
 
 全部 **service-scoped**，走 `target.did = serviceDid`：
@@ -827,7 +832,16 @@ E2EE 会话里的取件走 Mailbox，明文历史走 `inbox.get`。两者别混�
   这条缝的完整说明在 [e2ee-direct.md](e2ee-direct.md) §4，C6 / C7 要先留出那一列。
 - **§11.5 的两类状态一边一半**：外层幂等记录归服务端（就是 §6 那张表，键多两个设备段），
   init replay 记录归客户端（键含 `session_id`，是 DH 产物）。
-- Device Delivery Queue 只持久化**公开元数据 + 不可读密文**（P6 §1508）。
+- Device Delivery Queue 只持久化**公开元数据 + 不可读密文**（P6 §1508）。它与 P5 的
+  Mailbox **是同一张表、同一个键**（`(recipient_did, recipient_device_id)`），别建两张。
+- **P6 里 Host 不是控制者、不是成员、也不做最终 MLS 有效性判断**（§3.6 L199–204、
+  §11.11 L1386）。它权威地知道的只有一份 `(DID, device)`→leaf 的**公开投影**
+  （§11.10.3 L1372，不含任何能参与运算的材料），以及排序位置。
+- `group.e2ee.leaf_not_current`（5013）是**强制的稳定错误**，且判定序固定：
+  先 `group.not_member`（DID 不在 P4 `active`）→ 再 core 设备码 → 最后 5013，
+  **MUST NOT** 折叠（§13.3 L1625）。它是"仅 leaf 被移除"时设备唯一的拉取式终态信号。
+- DID 更新编排期间 Host **MUST** 串行化控制动作并**暂停**该群新的 `group.e2ee.send`
+  （§10.5 L1092、L1094）；但**设备级撤销不暂停**（§10.4 L1074）。
 - 群成员变更时，**历史密钥材料不得回溯分发**——`group.e2ee.add` 只给
   `commit_b64u` / `welcome_b64u` / `ratchet_tree_b64u`，本服务原样转发。
 - P6 的历史 / 重放 API **不得**声明为 P6 能力（§1525）。
@@ -972,7 +986,8 @@ AGENTX_DID_DEV_HOSTS      联调放宽：这些域可以解析私有地址、可
 
 10. P5 E2EE（prekey bundle + Mailbox）——钥匙柜与邮箱、OPK 池只出不进、
     Mailbox 加设备维度——决策见 [e2ee-direct.md](e2ee-direct.md)
-11. P6 群组 E2EE（KeyPackage 状态机 + Device Delivery Queue）
+11. P6 群组 E2EE（KeyPackage 三态柜子 + Device Delivery Queue + 公开投影 + DID 更新暂停）
+    ——决策见 [e2ee-group.md](e2ee-group.md)
 
 **发布前置条件**（不是本仓库的活，但会挡住 P6）：P6 仍是候选状态，
 MLS `ExtensionType 0xF0A1` 待 IANA 注册（`README.md:10,34`；`06:98`）。

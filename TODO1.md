@@ -228,10 +228,30 @@
     焊死成唯一路由键**，加一列比事后拆键便宜
   - **挡住 v1 的**：无。两条 Key 方法同域即可跑，跨域部分随 C11
 - C13 P6 群组 E2EE：KeyPackage 状态机 + Device Delivery Queue
+  - ~~设计~~（2026-10-01：[e2ee-group.md](docs/design/e2ee-group.md)。定下的是几个规范没
+    说话的地方——**Host 侧唯一的"群状态"是一份不含任何可运算材料的公开投影**（§11.10.3
+    L1372），MLS 全在 owner 客户端；Device Delivery Queue 与 P5 的 Mailbox **是同一张表同一
+    个键**，别建两张；队列内四种顺序规则（§12.6 L1512）选"把已入队的应用信封投完再发最终
+    通知"；`group.e2ee.leaf_not_current`(5013) 的判定序是先 `group.not_member` → 再 core
+    设备码 → 最后 5013，**MUST NOT** 折叠（§13.3 L1625）。§12.6 L1500 那句"Host 无法为
+    离线设备重新生成信封"是队列不建在历史服务上的全部理由）
+  - 还剩：六条方法进方法表（三档 `targetMode`）+ KeyPackage 三态柜子（`group_key_packages`
+    的 `state` 列已在 v3）+ `group_leaves` 投影 + Device Delivery Queue 与队列内排序 +
+    `group_did_updates` 的暂停/串行化 + 最终 Remove 通知的有界收尾 + `origin_context` 的
+    原样保留（§13.6）
+  - **动手前先留列**：与 C12 同一条缝（`deliveries` 没有设备列、C7 按 `owner_did` 路由）
+  - **挡住 v1 的**：`0xF0A1` 还是草案私有值，规范说 ANP **在发布 v2 前 MUST 公布稳定
+    注册 code point**（§6.3.1 L430、§20 L2457）——**决定 P6 能不能对外声明**
+    （`anp.get_capabilities` 里不得作为稳定 Profile 出现）；群 DID 文档未发布（同 C11）
 
 ## D. 待用户裁定
 
-- D2 P6 发布前置：MLS `ExtensionType 0xF0A1` 的 IANA 注册（不在本仓库，但会挡住 P6）
+- D2 P6 发布前置：MLS `ExtensionType 0xF0A1` 的 IANA 注册（不在本仓库，但会挡住 P6）。
+  §6.3.1 L430 把话说得很重——**ANP 在发布 v2 前 MUST 公布稳定的注册 code point**，
+  改这个草案值属于 breaking draft revision；§20 L2457 把它列为待建注册表第 5 项。
+  **它决定 P6 能不能在 `anp.get_capabilities` 里作为稳定 Profile 出现**，
+  与 C13 的代码无关（代码可以先写，声明不能先给）。见
+  [e2ee-group.md](docs/design/e2ee-group.md) §13
 - D4 客户端侧的密码学库放哪（C12 就已经有影响——P5 的 X3DH-like 与 Double Ratchet 同样
   在设备侧；C13 的 MLS 更重）。规范不点名实现，只要求
   MLS 1.0 语义 + 套件 `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`；服务端一行不碰
@@ -239,6 +259,12 @@
   napi / wasm 绑进 Node）；**(b)** 另起一个本地进程/库持有密码学状态，`connectx` 只收发。
   区别是"设备私钥 + 会话/Ratchet 状态"是一处落盘还是两处。取舍另见
   [e2ee-direct.md](docs/design/e2ee-direct.md) §9.1
+
+- D5 被移除 leaf 队列里**已入队的应用信封**：§12.6 L1512 给了两个都合规的选项——
+  **(a)** 按序投完（被移除设备仍持有那些信封的 epoch 密钥，能读到被移除前最后几条）；
+  **(b)** 按部署策略取消全部，立即投最终通知。设计选了 (a)，因为对用户更诚实；
+  改 (b) 只动队列收尾逻辑。**这是产品取舍，不是技术限制**，见
+  [e2ee-group.md](docs/design/e2ee-group.md) §14.2
 
 ~~D1 包名：`@agentx/*`~~（2026-10-01 定：`@agentx/core` / `@agentx/cli` / `@agentx/service`，用户说后面可改）
 
