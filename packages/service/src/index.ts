@@ -17,6 +17,9 @@ export type { ParseResult, ParsedRequest } from './rpc/envelope'
 export { authenticate, callerAnchor, DIRECT_AUTH_CODES, P1_AUTH_CODES } from './rpc/auth'
 export type { AuthErrorCodes, AuthResult, AuthenticateInput, ProfileCode } from './rpc/auth'
 
+export { acceptOperation } from './rpc/accept'
+export type { Acceptance, AcceptInput } from './rpc/accept'
+
 export { openStorage } from './storage/sqlite'
 export type { OpenStorageOptions } from './storage/sqlite'
 export { SCHEMA, SCHEMA_VERSION } from './storage/schema'

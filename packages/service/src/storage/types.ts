@@ -26,8 +26,12 @@
 export interface IdempotencyRow {
   key: string
   fingerprint: string
-  /** The response that was sent the first time, stored as the JSON that went on the wire.
-   *  A repeat is answered with this exact object (C4). */
+  /** The OPERATION'S RESULT as JSON — not the JSON-RPC envelope that carried it.
+   *  A retry is a different request with its own `id`, so replaying a stored envelope
+   *  would answer the retry under the first request's `id`; the envelope is rebuilt around
+   *  this result with the retry's own. §9.1 L630 says the service returns the same or an
+   *  equivalent *result* and says nothing about the transport's id, which is where the
+   *  distinction comes from. */
   responseJson: string
   createdAt: string
 }
@@ -69,6 +73,14 @@ export interface OutboxEntry {
 }
 
 export interface Storage {
+  /** Run `body` as one transaction, committing when it returns and rolling back when it
+   *  throws. Re-entrant: a call already inside a transaction joins the enclosing one, and
+   *  only the outermost commits. That matters because the unit of atomicity is the
+   *  OPERATION (message row + deliveries + the idempotency record, §8.1) while the
+   *  individual accessors below also need a transaction of their own when called alone —
+   *  SQLite refuses a nested `BEGIN`, so the depth has to be tracked here. */
+  transaction<T>(body: () => T): T
+
   /** The record for this key, or `undefined` if the operation has not run. The key comes
    *  from core's `idempotencyKey(scope)`. */
   idempotentRow(key: string): IdempotencyRow | undefined

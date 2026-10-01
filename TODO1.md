@@ -105,7 +105,16 @@
   `profileRejection`；`VerifyOriginProofInput.auth` 改成可选——函数体本来就写着
   `input.auth?.scheme`，缺 `auth` 是 `scheme_unsupported`（P3 L390 与"无效"同码），
   不是调用方的类型错误）
-- C4 幂等（事务内写消息 + 幂等记录），含 DID 取代时的精确重放
+- ~~C4 幂等（事务内写消息 + 幂等记录），含 DID 取代时的精确重放~~（2026-10-01。
+  `rpc/accept.ts` 的 `acceptOperation()`：查表 → 干活 → 记结果，全在一个事务里；
+  判定用 core 的 `idempotencyVerdict`。**`perform` 只在未命中时被调用**，
+  于是 §9.1 L641 的"以 DID 已被替代拒绝之前先查旧 DID 记录"变成结构性保证，
+  不靠调用方记性。`Storage` 加了可重入的 `transaction()`（SQLite 不许嵌套 `BEGIN`，
+  而原子单位是"一次操作"、访问器各自又要能单独用），`busy_timeout` 从 node:sqlite
+  默认的 0 改成 5 秒——抢不到锁立刻报错的话，`BEGIN IMMEDIATE` 的串行化就是空的。
+  另把幂等记录存的东西说清楚：存**操作结果**不存信封（重试带自己的 `id`）。
+  11 个测试。同一批把 core 幂等模块里那串**过期的行号**修了——它引的是旧版 P1 §9，
+  最大一处把 L641 写成"L646–648"，而那里是 §9.2 的重试清单一角）
 - C5 `direct.send` 全流程 + `direct.incoming` 异步推送 + `outbox` 退避重试
   （含 C2 挪过来的两行：target 建模模式 §6.2.5.1 L382、§7.3 L491–499 计数器；
   含 C3 挪过来的**方法表 + 解析器接线**：哪些方法要求 `origin_proof`（P3 §4.3 L161 还有

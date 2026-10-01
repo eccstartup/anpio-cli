@@ -313,11 +313,25 @@ P1 §10.3 L706 只有 `anp.unauthorized`（1005），P3 §11 L599–600 把它�
 - E2EE 的幂等键**必须**含设备 selector
 
 **DID 已被取代时**（`anp.did_superseded`）：返回错误**之前**，
-必须先按旧 DID 查**精确**幂等记录，命中就回原结果（P1 / P3 §5.5）。
+必须先按旧 DID 查**精确**幂等记录，命中就回原结果。P1 §9.1 L641 是那条通则
+（"以 DID 已被替代为由拒绝之前"），P3 §5.5 L208 是这条拒绝本身（`meta.target.did`
+已被替代 → **MUST** 返回 `anp.did_superseded`，不得静默改写目标）。
 否则一个重试会被当成新消息，而它其实早就被处理过了。
+L641 同行还划了另一半：**后继 DID 签的请求不是旧 DID 请求的精确重放**，跨 DID 去重要由
+Profile 另行定义，本服务不做。
+
+这条规则的落地方式是**结构性**的，不靠调用方记性：`acceptOperation()` 只在**查表未命中**
+时才调用它的 `perform()`。想"拒掉"就写在 `perform` 里抛出来，于是拒绝必然发生在查表
+之后；任何在调用 `acceptOperation()` **之前**就返回错误的写法都会让这条失效。测试里
+"旧 DID 的精确重放不会被取代检查拦掉"钉的就是这一点（`perform` 断言没被调用）。
 
 **先落库、后响应**：幂等记录与消息在**同一个事务**里写。规范没要求，
-但不这么做就没有任何东西能保证"重试得到同一结果"。
+但不这么做就没有任何东西能保证"重试得到同一结果"——一半落库的中间态会让这句话落空。
+事务边界落在 `Storage.transaction()`，`acceptOperation()` 是它唯一的组装者。
+
+**存的是操作的结果，不是 JSON-RPC 信封**：重试是**另一次请求**、带自己的 `id`，
+回放一个存下来的信封会把首个请求的 `id` 答给重试。§9.1 L630 说"返回同一结果或等价
+结果"，说的是结果；信封由调用方拿这次请求的 `id` 重新包。
 
 ## 7. 存储
 
@@ -327,6 +341,7 @@ P1 §10.3 L706 只有 `anp.unauthorized`（1005），P3 §11 L599–600 把它�
 -- 幂等台账：先查这张表，再谈其他
 -- 键是 core `idempotencyKey()` 的字符串，不是列的分解——§9.1 的 scope 里含
 -- Profile 定义的 target_scope 与可变长的设备 selector 列表，拆成固定列就表达不了。
+-- `response_json` 存的是**操作的结果**，不是 JSON-RPC 信封：重试带自己的 id。
 CREATE TABLE idempotency (
   key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL,
   response_json TEXT NOT NULL, created_at TEXT NOT NULL
@@ -409,6 +424,16 @@ CREATE TABLE outbox (
 );
 ```
 
+**事务**：`Storage` 上有一个 `transaction()`，**可重入**——已经在事务里再进来就是加入
+外层，只有最外层提交。理由是两个粒度的错位：§8.1 要求的原子单位是**一次操作**
+（`messages` + `deliveries` + `idempotency`），而每个访问器被单独调用时也要自己成事务
+（`appendDelivery` 要读 `MAX(seq)` 再写，不能裸着）。SQLite 不允许嵌套 `BEGIN`
+（实测报 `cannot start a transaction within a transaction`），所以深度只能在这一层记。
+
+`BEGIN IMMEDIATE` 在**开始**就拿写锁，这才是并发下"两个发送方不能拿到同一个序号"的依据。
+`node:sqlite` 的 `busy_timeout` 默认是 **0**（实测），也就是抢不到锁立刻 `SQLITE_BUSY`
+而不等待——串行化只有在失败方肯等的时候才成立，所以打开时设成 5 秒。
+
 **刻意不建的**：任何记录"内部队列数 / 副本数 / 设备数 / 工作流节点"的线协议字段。
 P3 §5.4 规定这些 **MUST NOT** 成为线协议语义——它们可以存在于内部表里，
 但绝不能出现在**响应**里。
@@ -423,6 +448,11 @@ P3 §5.4 规定这些 **MUST NOT** 成为线协议语义——它们可以存在
 2. **一个事务**内写 `messages` + `idempotency` +（群消息时）`group_events`
 3. 回 `accepted=true` 的响应
 4. **异步**投递 `direct.incoming` 到收件人端点
+
+第 1、2 步已经是现成的接缝：`parseRequestText`（§3）→ `authenticate`（§5）→
+`acceptOperation`（§6），第 2 步的写入即 `acceptOperation` 的 `perform()`。
+C5 要做的只剩下方法表（`target_scope`、要哪一对错误码、要不要 `origin_proof`）
+与第 4 步。
 
 第 4 步失败**不改变**第 3 步已经发出的成功语义——这正是 §1 那条"成功语义被切小"的用法。
 失败的推送进 `outbox`，按退避重试。

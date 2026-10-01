@@ -116,6 +116,8 @@ function toOutbox(row: Row): OutboxEntry {
 class SqliteStorage implements Storage {
   private readonly db: DatabaseSync
   private readonly statements = new Map<string, StatementSync>()
+  /** How many `transaction()` frames are open. 0 means no transaction is active. */
+  private depth = 0
 
   constructor(db: DatabaseSync) {
     this.db = db
@@ -133,14 +135,31 @@ class SqliteStorage implements Storage {
 
   /** Run `body` in one immediate transaction. `BEGIN IMMEDIATE` takes the write lock at
    *  the start rather than at the first write, which is what makes the read-modify-write
-   *  in `appendDelivery` safe against a second process. */
-  private transaction<T>(body: () => T): T {
+   *  in `appendDelivery` safe against a second process.
+   *
+   *  Re-entrant, because the unit of atomicity is an OPERATION (several accessors) while
+   *  each accessor must also work on its own, and SQLite refuses a nested `BEGIN`
+   *  ("cannot start a transaction within a transaction"). An inner failure propagates to
+   *  the outermost frame, which rolls the whole thing back — there are no partial
+   *  commits, which is the point. */
+  transaction<T>(body: () => T): T {
+    if (this.depth > 0) {
+      this.depth += 1
+      try {
+        return body()
+      } finally {
+        this.depth -= 1
+      }
+    }
     this.db.exec('BEGIN IMMEDIATE')
+    this.depth = 1
     try {
       const result = body()
+      this.depth = 0
       this.db.exec('COMMIT')
       return result
     } catch (err) {
+      this.depth = 0
       this.db.exec('ROLLBACK')
       throw err
     }
@@ -284,6 +303,10 @@ export function openStorage(options: OpenStorageOptions): Storage {
   // accepted send). A memory database has no journal file to put in WAL mode, and
   // asking for it there is an error rather than a no-op.
   if (options.path !== ':memory:') db.exec('PRAGMA journal_mode = WAL')
+  // `node:sqlite` leaves busy_timeout at 0, so a second process holding the write lock
+  // makes `BEGIN IMMEDIATE` fail with SQLITE_BUSY at once instead of waiting. The
+  // serialization the row layer relies on is only correct if the loser waits.
+  db.exec('PRAGMA busy_timeout = 5000')
   db.exec('PRAGMA foreign_keys = ON')
   applySchema(db)
   return new SqliteStorage(db)
