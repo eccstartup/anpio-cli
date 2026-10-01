@@ -16,6 +16,9 @@ import type {
   InboxRow,
   OutboxEntry,
   Storage,
+  StoredGroup,
+  StoredGroupEvent,
+  StoredGroupMember,
   StoredMessage,
 } from './types'
 
@@ -32,6 +35,13 @@ function maybeText(value: unknown): string | undefined {
 
 function int(value: unknown): number {
   return typeof value === 'number' ? value : Number(value)
+}
+
+/** `undefined` for a NULL column, a number otherwise. A SQLite NULL is what "this row has
+ *  no value here" looks like, and `Number(null)` is 0 — a column that means "absent" must
+ *  not be read as the number zero. */
+function maybeInt(value: unknown): number | undefined {
+  return value === null || value === undefined ? undefined : int(value)
 }
 
 /** The file's schema version, from SQLite's own `user_version`. */
@@ -87,6 +97,23 @@ function migrateV1ToV2(db: DatabaseSync): void {
 }
 
 /**
+ * Add a column to a table that may be missing it — and skip the table entirely when it does
+ * not exist yet.
+ *
+ * `ADD COLUMN` is the one schema change SQLite can make in place, so it needs no
+ * version-gated rebuild the way v1→v2 did. It does need to be idempotent twice over: a
+ * version-0 file gets its columns from `SCHEMA` (which runs after this), and older files
+ * may or may not have the table at all — `PRAGMA table_info` on a missing table answers
+ * with no rows rather than an error, which is what makes the two cases one branch.
+ */
+function addColumnIfMissing(db: DatabaseSync, table: string, column: string, type: string): void {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Row[]
+  if (columns.length === 0) return
+  if (columns.some((row) => text(row.name) === column)) return
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`)
+}
+
+/**
  * A file written by a newer build is refused instead of opened: this build would read
  * the tables it knows and silently ignore a column the newer one depends on. A fresh
  * file (version 0) gets the schema; a file at the current version is left alone.
@@ -108,6 +135,14 @@ function applySchema(db: DatabaseSync): void {
   db.exec('BEGIN IMMEDIATE')
   try {
     if (version === 1) migrateV1ToV2(db)
+    // v4. P4 §7.2 L379–380: both are part of the `group_member` object `group.get_info`
+    // returns, and neither was in the table before C9 needed to answer with it.
+    addColumnIfMissing(db, 'group_members', 'joined_at', 'TEXT')
+    addColumnIfMissing(db, 'group_members', 'added_by', 'TEXT')
+    // v4. P4 §8.9.4 L868–875 + §10.3 L1046–1052: a replayed `group.send` answers with the
+    // position the message was accepted at, which only the row can still know.
+    addColumnIfMissing(db, 'messages', 'group_event_seq', 'INTEGER')
+    addColumnIfMissing(db, 'messages', 'group_state_version', 'INTEGER')
     for (const statement of SCHEMA) db.exec(statement)
     // `user_version` takes a literal, so the constant is interpolated rather than bound.
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
@@ -135,6 +170,10 @@ function toMessage(row: Row): StoredMessage {
   if (recipientDeviceId !== undefined) message.recipientDeviceId = recipientDeviceId
   const conversationId = maybeText(row.conversation_id)
   if (conversationId !== undefined) message.conversationId = conversationId
+  const groupEventSeq = maybeInt(row.group_event_seq)
+  if (groupEventSeq !== undefined) message.groupEventSeq = groupEventSeq
+  const groupStateVersion = maybeInt(row.group_state_version)
+  if (groupStateVersion !== undefined) message.groupStateVersion = groupStateVersion
   return message
 }
 
@@ -147,6 +186,25 @@ function toDelivery(row: Row): DeliveryRecord {
     paramsJson: text(row.params_json),
     acceptedAt: text(row.accepted_at),
   }
+}
+
+/** `group_member` (P4 §7.2). The two optional columns are omitted rather than set to
+ *  `undefined`, so a caller doing `{...row, role: 'admin'}` keeps the distinction. */
+function toGroupMember(row: Row): StoredGroupMember {
+  const member: StoredGroupMember = {
+    groupDid: text(row.group_did),
+    memberDid: text(row.member_did),
+    // §7.2 L384: an absent role is read as `member`. Normalized on the way IN as well, so
+    // the column is never the place where "absent" and "member" mean different things.
+    role: text(row.role),
+    membershipStatus: text(row.membership_status),
+    stateVersion: int(row.state_version),
+  }
+  const joinedAt = maybeText(row.joined_at)
+  if (joinedAt !== undefined) member.joinedAt = joinedAt
+  const addedBy = maybeText(row.added_by)
+  if (addedBy !== undefined) member.addedBy = addedBy
+  return member
 }
 
 function toOutbox(row: Row): OutboxEntry {
@@ -290,8 +348,9 @@ class SqliteStorage implements Storage {
     this.stmt(
       `INSERT INTO messages
          (message_id, sender_did, target_did, profile, security_profile, content_type, body_json,
-          sender_device_id, recipient_device_id, conversation_id, accepted_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          sender_device_id, recipient_device_id, conversation_id, accepted_at,
+          group_event_seq, group_state_version)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       message.messageId,
       message.senderDid,
@@ -304,6 +363,8 @@ class SqliteStorage implements Storage {
       message.recipientDeviceId ?? null,
       message.conversationId ?? null,
       message.acceptedAt,
+      message.groupEventSeq ?? null,
+      message.groupStateVersion ?? null,
     )
   }
 
@@ -465,6 +526,123 @@ class SqliteStorage implements Storage {
         LIMIT ?`,
     ).all(ownerDid, limit) as Row[]
     return rows.map(toOutgoingRow)
+  }
+
+  group(groupDid: string): StoredGroup | undefined {
+    const row = this.stmt('SELECT * FROM groups WHERE group_did = ?').get(groupDid) as Row | undefined
+    if (row === undefined) return undefined
+    return {
+      groupDid: text(row.group_did),
+      hostServiceDid: text(row.host_service_did),
+      groupStateVersion: int(row.group_state_version),
+      groupEventSeq: int(row.group_event_seq),
+      groupProfileJson: text(row.group_profile_json),
+      groupPolicyJson: text(row.group_policy_json),
+      createdAt: text(row.created_at),
+      creatorDid: text(row.creator_did),
+    }
+  }
+
+  insertGroup(group: StoredGroup): void {
+    // A plain INSERT, like `rememberIdempotent`: two builds accepting the same `group_did`
+    // at once is a collision in the id space, not something to paper over by overwriting
+    // one group with another.
+    this.stmt(
+      `INSERT INTO groups
+         (group_did, host_service_did, group_state_version, group_event_seq,
+          group_profile_json, group_policy_json, created_at, creator_did)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      group.groupDid,
+      group.hostServiceDid,
+      group.groupStateVersion,
+      group.groupEventSeq,
+      group.groupProfileJson,
+      group.groupPolicyJson,
+      group.createdAt,
+      group.creatorDid,
+    )
+  }
+
+  updateGroupProfile(groupDid: string, profileJson: string): void {
+    this.stmt('UPDATE groups SET group_profile_json = ? WHERE group_did = ?').run(profileJson, groupDid)
+  }
+
+  updateGroupPolicy(groupDid: string, policyJson: string): void {
+    this.stmt('UPDATE groups SET group_policy_json = ? WHERE group_did = ?').run(policyJson, groupDid)
+  }
+
+  /** One statement, so the two counters cannot be read under one operation and written
+   *  under another. `UPDATE … RETURNING` needs no round trip back through the caller. */
+  advanceGroupCounters(
+    groupDid: string,
+    advanceStateVersion: boolean,
+  ): { groupStateVersion: number; groupEventSeq: number } {
+    const row = this.stmt(
+      `UPDATE groups
+          SET group_state_version = group_state_version + ?,
+              group_event_seq     = group_event_seq + 1
+        WHERE group_did = ?
+        RETURNING group_state_version, group_event_seq`,
+    ).get(advanceStateVersion ? 1 : 0, groupDid) as Row | undefined
+    if (row === undefined) {
+      // The caller looked the group up in the same transaction, so this is a code error and
+      // not a request error — silently returning 0/0 would put a wrong sequence in a
+      // receipt that the group then signs.
+      throw new Error(`no group ${groupDid} to advance`)
+    }
+    return { groupStateVersion: int(row.group_state_version), groupEventSeq: int(row.group_event_seq) }
+  }
+
+  groupMember(groupDid: string, memberDid: string): StoredGroupMember | undefined {
+    const row = this.stmt('SELECT * FROM group_members WHERE group_did = ? AND member_did = ?').get(
+      groupDid,
+      memberDid,
+    ) as Row | undefined
+    return row === undefined ? undefined : toGroupMember(row)
+  }
+
+  groupMembers(groupDid: string): StoredGroupMember[] {
+    const rows = this.stmt('SELECT * FROM group_members WHERE group_did = ? ORDER BY member_did').all(
+      groupDid,
+    ) as Row[]
+    return rows.map(toGroupMember)
+  }
+
+  upsertGroupMember(member: StoredGroupMember): void {
+    this.stmt(
+      `INSERT INTO group_members
+         (group_did, member_did, role, membership_status, state_version, joined_at, added_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (group_did, member_did) DO UPDATE SET
+         role              = excluded.role,
+         membership_status = excluded.membership_status,
+         state_version     = excluded.state_version,
+         joined_at         = excluded.joined_at,
+         added_by          = excluded.added_by`,
+    ).run(
+      member.groupDid,
+      member.memberDid,
+      member.role,
+      member.membershipStatus,
+      member.stateVersion,
+      member.joinedAt ?? null,
+      member.addedBy ?? null,
+    )
+  }
+
+  countActiveMembers(groupDid: string): number {
+    const row = this.stmt(
+      "SELECT COUNT(*) AS total FROM group_members WHERE group_did = ? AND membership_status = 'active'",
+    ).get(groupDid) as Row
+    return int(row.total)
+  }
+
+  appendGroupEvent(event: StoredGroupEvent): void {
+    this.stmt(
+      `INSERT INTO group_events (group_did, event_seq, event_type, payload_json, occurred_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run(event.groupDid, event.eventSeq, event.eventType, event.payloadJson, event.occurredAt)
   }
 
   enqueueOutbox(draft: Omit<OutboxEntry, 'seq' | 'attempts' | 'lastError'>): number {

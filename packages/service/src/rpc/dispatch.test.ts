@@ -158,7 +158,9 @@ describe('malformed input', () => {
 
   it('answers a method it does not have with -32601', async () => {
     const h = harness()
-    const envelope = { ...(await signed()), method: 'group.create' }
+    // P4 §8.12 L934：`group.member_did_update` 是保留的 Host 动作标识，不是 JSON-RPC 方法
+    // ——正因为它像方法、又不该是可调用的，拿它当"表里没有"的例子最贴题。
+    const envelope = { ...(await signed()), method: 'group.member_did_update' }
     const outcome = await h.call(envelope)
     expect(outcome.json?.error?.code).toBe(JSON_RPC_ERROR.METHOD_NOT_FOUND)
   })
@@ -594,7 +596,7 @@ describe('capability discovery (P1 §8.2)', () => {
     expect(outcome.json?.error).toBeUndefined()
     expect(outcome.json?.result).toMatchObject({
       service_did: 'did:web:127.0.0.1%3A8787',
-      supported_profiles: ['anp.core.binding.v1', 'anp.direct.base.v1'],
+      supported_profiles: ['anp.core.binding.v1', 'anp.direct.base.v1', 'anp.group.base.v2'],
       supported_security_profiles: ['transport-protected'],
     })
   })
@@ -605,7 +607,11 @@ describe('capability discovery (P1 §8.2)', () => {
     // §8.2.2 L570–573 + §7.3 L491: counting values are strings, so a client that does
     // arithmetic on them has to say so.
     expect(result?.limits).toEqual({ max_request_bytes: '1048576', max_message_bytes: '1048576' })
-    expect(result?.supported_content_types).toEqual(['text/plain', 'application/json'])
+    expect(result?.supported_content_types).toEqual([
+      'text/plain',
+      'application/json',
+      'application/anp-attachment-manifest+json',
+    ])
   })
 
   it('agrees with the static hint the well-known document hands out', async () => {
@@ -632,7 +638,7 @@ describe('capability discovery (P1 §8.2)', () => {
     const h = harness()
     const outcome = await h.call({
       ...anonymous,
-      params: { ...anonymous.params, meta: { ...anonymous.params.meta, profile: 'anp.group.base.v2' } },
+      params: { ...anonymous.params, meta: { ...anonymous.params.meta, profile: 'anp.nonexistent.v9' } },
     })
     expect(outcome.json?.error?.code).toBe(1001)
     expect(outcome.json?.error?.data?.anp_code).toBe('anp.unsupported_profile')
@@ -672,5 +678,129 @@ describe('an unexpected failure', () => {
     // …and nothing went to the outbox either: a push for a message that was never stored
     // would deliver a payload the accept path has no record of.
     expect(h.storage.dueOutbox(NOW.toISOString(), 10)).toEqual([])
+  })
+})
+
+// ---- C9：群组 -----------------------------------------------------------------
+//
+// 处理器本身在 `groups.test.ts` 里逐个验；这里验的是**接线**——方法表认得它们、目标建模
+// 那一关、以及处理器在事务里抛出的拒绝要变成它自己那个码，而不是 -32603。
+
+const SERVICE_DID = 'did:web:127.0.0.1%3A8787'
+
+/** §7.1 L347–358 的最小合法策略。 */
+const GROUP_POLICY = {
+  admission_mode: 'open-join',
+  permissions: {
+    send: 'member',
+    add: 'admin',
+    remove: 'admin',
+    update_profile: 'admin',
+    update_policy: 'owner',
+  },
+}
+
+function groupMeta(overrides: Partial<AnpMeta> = {}): AnpMeta {
+  return {
+    profile: 'anp.group.base.v2',
+    security_profile: 'transport-protected',
+    sender_did: sender.did,
+    target: { kind: 'group', did: `${SERVICE_DID}:g:placeholder` },
+    operation_id: 'op-group',
+    ...overrides,
+  }
+}
+
+/** 创建一个群，返回它的 `group_did`。`group.create` 的目标是**服务**（§8.1.2 L626）。 */
+async function mintGroup(h: Harness, profile: Record<string, unknown> = {}): Promise<string> {
+  const envelope = await signed({
+    method: 'group.create',
+    meta: groupMeta({ target: { kind: 'service', did: SERVICE_DID } }),
+    body: { group_policy: GROUP_POLICY, ...(Object.keys(profile).length > 0 ? { group_profile: profile } : {}) },
+  })
+  const outcome = await h.call(envelope)
+  const groupDid = outcome.json?.result?.group_did
+  if (typeof groupDid !== 'string') throw new Error(`group.create failed: ${JSON.stringify(outcome.json)}`)
+  return groupDid
+}
+
+describe('group.* over the wire (P4)', () => {
+  it('creates a group, and replays the same operation idempotently', async () => {
+    const h = harness()
+    const meta = groupMeta({ target: { kind: 'service', did: SERVICE_DID } })
+    const body = { group_policy: GROUP_POLICY }
+    const first = await h.call(await signed({ method: 'group.create', meta, body }))
+
+    expect(first.json?.error).toBeUndefined()
+    expect(first.json?.result?.group_receipt).toMatchObject({ subject_method: 'group.create' })
+
+    const retry = await h.call(await signed({ method: 'group.create', meta, body }))
+    // §9.1 L630：同一个 `operation_id` 回同一个结果，不建第二个群。
+    expect(retry.json?.result).toEqual(first.json?.result)
+  })
+
+  it('refuses a target that is not this service with 1014', async () => {
+    const h = harness()
+    const outcome = await h.call(
+      await signed({
+        method: 'group.create',
+        meta: groupMeta({ target: { kind: 'service', did: 'did:web:elsewhere.example' } }),
+        body: { group_policy: GROUP_POLICY },
+      }),
+    )
+    expect(outcome.json?.error?.data?.anp_code).toBe('anp.invalid_target_binding')
+  })
+
+  it('answers a non-member of group.send with 3000, not -32603', async () => {
+    const h = harness()
+    const groupDid = await mintGroup(h)
+    const outcome = await h.call(
+      await signed({
+        method: 'group.send',
+        meta: groupMeta({
+          target: { kind: 'group', did: groupDid },
+          // 签名的是 `second`，所以 `sender_did` 也得是他——两者不一致会先撞上 3009。
+          sender_did: second.did,
+          operation_id: 'op-send',
+          message_id: 'm-1',
+          content_type: 'text/plain',
+        }),
+        body: { text: 'hello' },
+        signer: second,
+      }),
+    )
+    expect(outcome.json?.error?.code).toBe(3000)
+    expect(outcome.json?.error?.data?.anp_code).toBe('group.not_member')
+  })
+
+  it('requires a proof from a caller that names itself, and none from a caller that does not', async () => {
+    const h = harness()
+    const groupDid = await mintGroup(h, { discoverability: 'public' })
+    const target = { kind: 'group' as const, did: groupDid }
+
+    // 带上 `sender_did` 而不带 proof：不能拿一个未经验证的身份去读（groups.md §5）。
+    const claiming = buildMessageRequest({
+      id: 'req-claim',
+      method: 'group.get_info',
+      meta: groupMeta({ target }),
+      body: {},
+    })
+    const refused = await h.call(claiming)
+    expect(refused.json?.error?.code).toBe(3008)
+    expect(refused.json?.error?.data?.anp_code).toBe('group.invalid_origin_proof')
+
+    // 匿名（§8.2.2 L658）：`public` 群只给资料快照。
+    const anonymous = buildMessageRequest({
+      id: 'req-anon',
+      method: 'group.get_info',
+      meta: { profile: 'anp.group.base.v2', security_profile: 'transport-protected', target },
+      body: {},
+    })
+    const outcome = await h.call(anonymous)
+    expect(outcome.json?.result).toEqual({
+      group_did: groupDid,
+      group_state_version: '1',
+      group_profile: { discoverability: 'public' },
+    })
   })
 })

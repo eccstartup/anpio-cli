@@ -45,8 +45,10 @@ export type { DispatchDeps } from './rpc/dispatch'
 export { checkMethod, lookupMethod, targetBindingHolds, DIRECT_SEND, GET_CAPABILITIES } from './rpc/methods'
 export type { MetaField, MethodSpec, TargetMode } from './rpc/methods'
 
-export { storeDirectMessage, incomingParams, validateDirectBody, DIRECT_INCOMING } from './rpc/direct'
+export { storeDirectMessage, incomingParams, DIRECT_INCOMING } from './rpc/direct'
 export type { IncomingParamsInput, StoreDirectInput } from './rpc/direct'
+
+export { validatePayloadBody, ACCEPTED_CONTENT_TYPES, PAYLOAD_FIELDS } from './rpc/payload'
 
 export {
   EXTENSION_PROFILE,
@@ -64,6 +66,26 @@ export {
   validateMarkReadBody,
 } from './rpc/inbox'
 
+export {
+  GROUP_ADD,
+  GROUP_CREATE,
+  GROUP_GET_INFO,
+  GROUP_HANDLERS,
+  GROUP_INCOMING,
+  GROUP_JOIN,
+  GROUP_LEAVE,
+  GROUP_PROFILE,
+  GROUP_REMOVE,
+  GROUP_SECURITY_PROFILE,
+  GROUP_SEND,
+  GROUP_STATE_CHANGED,
+  GROUP_UPDATE_POLICY,
+  GROUP_UPDATE_PROFILE,
+} from './rpc/groups'
+export type { GroupContext, GroupHandler } from './rpc/groups'
+export { AnpRefusal, refusal } from './rpc/refusal'
+export { groupMethodNames } from './rpc/methods'
+
 export { createDeliveryWorker } from './delivery/worker'
 export type { DeliveryOptions, DeliveryWorker } from './delivery/worker'
 
@@ -77,5 +99,8 @@ export type {
   InboxRow,
   OutboxEntry,
   Storage,
+  StoredGroup,
+  StoredGroupEvent,
+  StoredGroupMember,
   StoredMessage,
 } from './storage/types'

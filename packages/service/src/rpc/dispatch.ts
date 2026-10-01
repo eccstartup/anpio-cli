@@ -30,6 +30,8 @@ import { acceptOperation } from './accept'
 import { authenticate, callerAnchor } from './auth'
 import { DIRECT_SEND, GET_CAPABILITIES, lookupMethod, checkMethod, type MethodSpec } from './methods'
 import { storeDirectMessage } from './direct'
+import { GROUP_HANDLERS } from './groups'
+import { AnpRefusal } from './refusal'
 import { INBOX_GET, INBOX_MARK_READ, MESSAGE_GET_BATCH, SYNC_DELTA, markRead, readBatch, readDelta, readInbox } from './inbox'
 import { errorResponse, failureId, noResponse, parseRequestText, successResponse } from './envelope'
 
@@ -81,6 +83,7 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
     params: AnpParams,
     acceptedAt: string,
     pending: DeliveryRecord[],
+    requestDigest: string,
   ): Record<string, unknown> {
     const { meta, body, auth } = params
     switch (spec.name) {
@@ -106,9 +109,29 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
         return readDelta(deps.storage, meta, body)
       case INBOX_MARK_READ:
         return markRead(deps.storage, meta, body, acceptedAt)
-      default:
-        // 方法表里有它、这里没分支：两张表不一致，是代码错，不是请求错。
-        throw new Error(`no handler for ${spec.name}`)
+      default: {
+        // `group.*` 那一族不在这里枚举：它们的处理器按方法名查（`groups.ts`），因为九个
+        // 方法在这一层完全同形，逐个写一个 `case` 只是把同一段构造抄九遍，而漏抄一个的
+        // 表现是"某个群方法莫名 500"。查不到才是不一致——方法表里有它，处理器表里没有。
+        const group = GROUP_HANDLERS[spec.name]
+        if (group === undefined) {
+          // 方法表里有它、这里两处都没有分支：两张表不一致，是代码错，不是请求错。
+          throw new Error(`no handler for ${spec.name}`)
+        }
+        return group({
+          storage: deps.storage,
+          serviceDid: deps.config.serviceDid,
+          meta,
+          body,
+          ...(auth !== undefined ? { auth } : {}),
+          acceptedAt,
+          // 与幂等指纹是**同一个**摘要：`group_receipt.payload_digest` 要证明的就是
+          // "这次被受理的请求是这一份"，而 §9.1 的指纹要判的也是同一件事。各算一次除了
+          // 多一趟哈希，还留下两处会各自漂移的定义。
+          requestDigest,
+          onDelivery: (record) => pending.push(record),
+        })
+      }
     }
   }
 
@@ -166,10 +189,17 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
       if (bodyRefusal !== undefined) return errorResponse(envelope.id, bodyRefusal)
 
       const acceptedAt = at.toISOString()
+      // A.3 L1044–1050：SRO 只含 method / meta / body，所以重新签过一次、`auth` 换了、
+      // `id` 换了的重试，摘要仍与原请求相同——那正是 §9.1 L630 要的"语义等价"。
+      //
+      // 算一次、两处用：幂等与冲突判定的指纹，以及 `group_receipt.payload_digest`。无状态
+      // 方法（取件面、`group.get_info`）用不上它，代价是多算一趟哈希——换来的是"被受理的
+      // 是哪一份请求"只有一个定义。
+      const requestDigest = await contentDigestOf(signedRequestObject({ method: spec.name, meta, body }))
       // §8.1: what this request delivered. Filled by `perform`, and empty on every path
       // that did not create one (a replay, and every method but `direct.send`).
       const pending: DeliveryRecord[] = []
-      const run = (): Record<string, unknown> => perform(spec, envelope.params, acceptedAt, pending)
+      const run = (): Record<string, unknown> => perform(spec, envelope.params, acceptedAt, pending, requestDigest)
 
       // 这个方法不改状态：没有幂等作用域，也就没有要记的操作，直接跑（P1 §9.1 L628 的
       // 四段键里 operation_id 的语义是"重试同一次操作"，无状态调用没有这个东西）。
@@ -180,10 +210,7 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
         // 键按**请求里写的** `sender_did` 算（§9.1 L641 的另一半：DID 被替代时，重试要用
         // 旧 DID 才查得到；`idempotency.ts` 里有完整的说明）。
         key: idempotencyKey(idempotencyScopeFromMeta({ meta, targetScope: spec.targetScope(meta, body), method: spec.name })),
-        // 指纹取 Signed Request Object 的摘要：A.3 L1044–1050 让它只含 method / meta / body，
-        // 所以重新签过一次、`auth` 换了、`id` 换了的重试，指纹仍与原请求相同——那正是
-        // §9.1 L630 要的"语义等价"。
-        fingerprint: await contentDigestOf(signedRequestObject({ method: spec.name, meta, body })),
+        fingerprint: requestDigest,
         perform: run,
       })
 
@@ -193,6 +220,9 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
       publish(pending)
       return successResponse(envelope.id, outcome.response)
     } catch (err) {
+      // Profile 处理器在事务里拒绝一次调用（权限、成员状态、群在不在）。事务已经回滚，
+      // 该回的是它自己那个码，不是 500。
+      if (err instanceof AnpRefusal) return errorResponse(envelope.id, err.rejection)
       // 到这里还没有回应的，只剩"代码错了"这一种：每个已知的拒绝理由都在上面就地回了。
       // 回 -32603（§10.1 L669–675：这类形状 SHOULD 用 JSON-RPC 标准码）而不是把栈发给
       // 对端；栈进日志。

@@ -6,7 +6,7 @@ import { allMethods } from './rpc/methods'
 describe('serviceCapabilities', () => {
   it('files each profile by its namespace, and keeps the two apart', () => {
     const capabilities = serviceCapabilities()
-    expect(capabilities.profiles).toEqual(['anp.core.binding.v1', 'anp.direct.base.v1'])
+    expect(capabilities.profiles).toEqual(['anp.core.binding.v1', 'anp.direct.base.v1', 'anp.group.base.v2'])
     expect(capabilities.securityProfiles).toEqual(['transport-protected'])
     expect(capabilities.extensionProfiles).toEqual(['x_agentx.inbox.v1', 'x_agentx.stream.v1'])
     expect(capabilities.extensionMethods).toEqual([
@@ -47,10 +47,10 @@ describe('capabilitiesResult', () => {
     const config = loadConfig({ AGENTX_SERVICE_DID: 'did:web:agentx.example', AGENTX_MAX_BODY: '2048' })
     expect(capabilitiesResult(config)).toEqual({
       service_did: 'did:web:agentx.example',
-      supported_profiles: ['anp.core.binding.v1', 'anp.direct.base.v1'],
+      supported_profiles: ['anp.core.binding.v1', 'anp.direct.base.v1', 'anp.group.base.v2'],
       supported_security_profiles: ['transport-protected'],
       limits: { max_request_bytes: '2048', max_message_bytes: '2048' },
-      supported_content_types: ['text/plain', 'application/json'],
+      supported_content_types: ['text/plain', 'application/json', 'application/anp-attachment-manifest+json'],
     })
   })
 

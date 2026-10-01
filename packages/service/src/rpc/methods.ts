@@ -16,8 +16,29 @@ import {
   type AnpTarget,
   type AnpTargetKind,
 } from '@agentx/core'
-import { DIRECT_AUTH_CODES, P1_AUTH_CODES, type AuthErrorCodes } from './auth'
-import { validateDirectBody } from './direct'
+import { DIRECT_AUTH_CODES, GROUP_AUTH_CODES, P1_AUTH_CODES, type AuthErrorCodes } from './auth'
+import {
+  GROUP_ADD,
+  GROUP_CREATE,
+  GROUP_GET_INFO,
+  GROUP_JOIN,
+  GROUP_LEAVE,
+  GROUP_PROFILE,
+  GROUP_REMOVE,
+  GROUP_SECURITY_PROFILE,
+  GROUP_SEND,
+  GROUP_UPDATE_POLICY,
+  GROUP_UPDATE_PROFILE,
+  validateAddBody,
+  validateCreateBody,
+  validateGetInfoBody,
+  validateJoinBody,
+  validateLeaveBody,
+  validateRemoveBody,
+  validateSendBody,
+  validateUpdatePolicyBody,
+  validateUpdateProfileBody,
+} from './groups'
 import {
   EXTENSION_PROFILE,
   INBOX_GET,
@@ -30,6 +51,7 @@ import {
   validateMarkReadBody,
 } from './inbox'
 import { STREAM_ACK, STREAM_AUTH, STREAM_PROFILE, validateStreamAckBody, validateStreamAuthBody } from './stream'
+import { validatePayloadBody } from './payload'
 
 /**
  * P1 §6.2.5.1 L361–378 的四种模式，加上本服务给取件面自定的第五种。
@@ -129,7 +151,8 @@ const DIRECT_SEND_SPEC: MethodSpec = {
   // 判断保持写在这一处。
   requiresOriginProof: (meta) => meta.profile !== 'anp.direct.e2ee.v2',
   authCodes: DIRECT_AUTH_CODES,
-  validateBody: (body, meta) => validateDirectBody(body, meta.content_type ?? ''),
+  // P3 §6 的负载互斥规则与 P4 §7.6 逐字相同，所以两个 Profile 共用一份（`payload.ts`）。
+  validateBody: (body, meta) => validatePayloadBody(body, meta.content_type ?? ''),
   // P3 §8.2 L437–442：`(sender_did, target.did, method, operation_id)`。
   targetScope: (meta) => {
     const target = meta.target
@@ -219,15 +242,164 @@ const STREAM_ACK_SPEC: MethodSpec = {
   validateBody: (body) => validateStreamAckBody(body),
 }
 
+/**
+ * 群组（P4 `anp.group.base.v2`，C9）。
+ *
+ * 九个方法在这一层几乎同形：同一个 Profile、只认 `transport-protected`、要 proof、认证
+ * 失败回 P4 §12 L1162–1163 那一对码、目标建模是群。差异只有三处，正是下面每个条目写的
+ * 那三处：目标建模、必带的 `meta`、正文规则，以及是否进幂等台账。
+ *
+ * `group_did` **就是**幂等键的第二段（§9.1 L635 的 `target_scope` + §10.4）：同一次
+ * `operation_id` 只有落在同一个群下才算重放。`group.create` 取 `meta.target.did` 而不是
+ * 去要一个 `serviceDid`——那条路要求方法表在构造时就知道配置，而 `group.create` 的处理器
+ * 已经强制 `meta.target.did` 等于本服务的 `serviceDid`，凡是被受理的创建，两者就是同一个
+ * 值；被拒绝的创建不落幂等行（`acceptOperation` 里 `perform` 抛出即回滚）。
+ */
+function groupScope(meta: AnpMeta): string {
+  const target = meta.target
+  if (target === undefined) throw new ConnectxError('message_invalid', 'group methods require meta.target')
+  return target.did
+}
+
+interface GroupSpecInput {
+  name: string
+  targetMode: TargetMode
+  requiredMeta: readonly MetaField[]
+  validateBody: (body: Record<string, unknown>, meta: AnpMeta) => AnpRejection | undefined
+  /** 缺省要 proof。`group.get_info` 是唯一一个匿名可达的，所以它自己给一个。 */
+  requiresOriginProof?: (meta: AnpMeta) => boolean
+  /** 不给就不进幂等台账——只有 `group.get_info` 是这样（它不改任何状态）。 */
+  targetScope?: (meta: AnpMeta) => string
+}
+
+function groupSpec(input: GroupSpecInput): MethodSpec {
+  return {
+    name: input.name,
+    targetMode: input.targetMode,
+    profiles: [GROUP_PROFILE],
+    securityProfiles: [GROUP_SECURITY_PROFILE],
+    requiredMeta: input.requiredMeta,
+    // 没有一条规范 MUST 禁止群方法带设备 selector：P4 §7.5 给 `group.send` 留了 P5 的
+    // Overlay 路，而 §10.4 的幂等作用域里也含设备维度。P3 那条 `forbiddenMeta` 是私聊
+    // Base 自己的事（P1 §10.3 L724），照搬过来会拒掉规范允许的请求。
+    forbiddenMeta: [],
+    requiresOriginProof: input.requiresOriginProof ?? (() => true),
+    authCodes: GROUP_AUTH_CODES,
+    validateBody: input.validateBody,
+    ...(input.targetScope !== undefined ? { targetScope: input.targetScope } : {}),
+  }
+}
+
+/** §8.1.2 L626：目标是**服务**（`meta.target` 必须指向本服务），不是群——群还没有。 */
+const GROUP_CREATE_SPEC = groupSpec({
+  name: GROUP_CREATE,
+  targetMode: 'service-scoped',
+  requiredMeta: ['sender_did', 'operation_id'],
+  validateBody: (body) => validateCreateBody(body),
+  targetScope: groupScope,
+})
+
+/**
+ * §8.2：**匿名可读**（`public` / `listed`），所以这里没有一条必带的 `meta`。
+ *
+ * 而 `requiresOriginProof` 取值不该是 `false`：匿名省掉的是 `sender_did`，不是"带上
+ * `sender_did` 时就可以不验签"。取 `false` 会留下一条缝——一个没有 proof 的请求声称
+ * `meta.sender_did` 是某个成员，方法表照样放行，`group.get_info` 随后用那个**未被验证**
+ * 的 DID 去查成员关系，把 `private` 群的资料与成员列表发出去。规范在这里只有一句
+ * "`private` 的群 MUST 要求身份"（L658–659），怎么执行是这一层的事：有 `sender_did`
+ * 就必须有 proof，没有 `sender_did` 就是匿名，由处理器按 `discoverability` 决定给多少。
+ *
+ * 没有 `targetScope`：它一个字节都不写。
+ */
+const GROUP_GET_INFO_SPEC = groupSpec({
+  name: GROUP_GET_INFO,
+  targetMode: 'group-addressed',
+  requiredMeta: [],
+  validateBody: (body) => validateGetInfoBody(body),
+  requiresOriginProof: (meta) => meta.sender_did !== undefined,
+})
+
+const GROUP_JOIN_SPEC = groupSpec({
+  name: GROUP_JOIN,
+  targetMode: 'group-addressed',
+  requiredMeta: ['sender_did', 'operation_id'],
+  validateBody: (body) => validateJoinBody(body),
+  targetScope: groupScope,
+})
+
+const GROUP_ADD_SPEC = groupSpec({
+  name: GROUP_ADD,
+  targetMode: 'group-addressed',
+  requiredMeta: ['sender_did', 'operation_id'],
+  validateBody: (body) => validateAddBody(body),
+  targetScope: groupScope,
+})
+
+const GROUP_REMOVE_SPEC = groupSpec({
+  name: GROUP_REMOVE,
+  targetMode: 'group-addressed',
+  requiredMeta: ['sender_did', 'operation_id'],
+  validateBody: (body) => validateRemoveBody(body),
+  targetScope: groupScope,
+})
+
+const GROUP_LEAVE_SPEC = groupSpec({
+  name: GROUP_LEAVE,
+  targetMode: 'group-addressed',
+  requiredMeta: ['sender_did', 'operation_id'],
+  validateBody: (body) => validateLeaveBody(body),
+  targetScope: groupScope,
+})
+
+const GROUP_UPDATE_PROFILE_SPEC = groupSpec({
+  name: GROUP_UPDATE_PROFILE,
+  targetMode: 'group-addressed',
+  requiredMeta: ['sender_did', 'operation_id'],
+  validateBody: (body) => validateUpdateProfileBody(body),
+  targetScope: groupScope,
+})
+
+const GROUP_UPDATE_POLICY_SPEC = groupSpec({
+  name: GROUP_UPDATE_POLICY,
+  targetMode: 'group-addressed',
+  requiredMeta: ['sender_did', 'operation_id'],
+  validateBody: (body) => validateUpdatePolicyBody(body),
+  targetScope: groupScope,
+})
+
+/** §8.9.3 L856–862：`content_type` 与 `message_id` 与私聊同样必带——前者决定负载字段，
+ *  后者是 §10.3 L1046–1052 消息级重复识别三元组里的那一段。 */
+const GROUP_SEND_SPEC = groupSpec({
+  name: GROUP_SEND,
+  targetMode: 'group-addressed',
+  requiredMeta: ['sender_did', 'operation_id', 'message_id', 'content_type'],
+  validateBody: (body, meta) => validateSendBody(body, meta),
+  targetScope: groupScope,
+})
+
 /** `POST /anp-im/rpc` 认得的方法。两个传输方法**不在其中**——理由写在 `stream.ts`。 */
 const METHODS: readonly MethodSpec[] = [
   GET_CAPABILITIES_SPEC,
   DIRECT_SEND_SPEC,
+  GROUP_CREATE_SPEC,
+  GROUP_GET_INFO_SPEC,
+  GROUP_JOIN_SPEC,
+  GROUP_ADD_SPEC,
+  GROUP_REMOVE_SPEC,
+  GROUP_LEAVE_SPEC,
+  GROUP_UPDATE_PROFILE_SPEC,
+  GROUP_UPDATE_POLICY_SPEC,
+  GROUP_SEND_SPEC,
   INBOX_GET_SPEC,
   INBOX_MARK_READ_SPEC,
   MESSAGE_GET_BATCH_SPEC,
   SYNC_DELTA_SPEC,
 ]
+
+/** 方法表里 `group.*` 那一族。分发与测试都从这里问"哪些是群方法"，不再各写一份名单。 */
+export function groupMethodNames(): readonly string[] {
+  return METHODS.filter((spec) => spec.profiles.includes(GROUP_PROFILE)).map((spec) => spec.name)
+}
 
 /** 两张表的全部方法，不分传输。
  *

@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import type { AnpMeta } from '@agentx/core'
-import { DIRECT_SEND, GET_CAPABILITIES, checkMethod, lookupMethod, lookupStreamMethod, targetBindingHolds } from './methods'
+import { DIRECT_SEND, GET_CAPABILITIES, checkMethod, groupMethodNames, lookupMethod, lookupStreamMethod, targetBindingHolds } from './methods'
 import type { MethodSpec } from './methods'
+import { GROUP_HANDLERS } from './groups'
 import { STREAM_AUTH } from './stream'
 
 const spec = (): MethodSpec => {
@@ -24,11 +25,21 @@ function meta(overrides: Partial<AnpMeta> = {}): AnpMeta {
 }
 
 describe('lookupMethod', () => {
-  it('knows the two spec methods and nothing else', () => {
+  it('knows the spec methods and nothing else', () => {
     expect(lookupMethod(DIRECT_SEND)?.name).toBe('direct.send')
     expect(lookupMethod(GET_CAPABILITIES)?.name).toBe('anp.get_capabilities')
     expect(lookupMethod('direct.sendx')).toBeUndefined()
-    expect(lookupMethod('group.create')).toBeUndefined()
+    // P4 §8.12 L934：`group.member_did_update` 是保留的 Host 动作标识，**不是** JSON-RPC
+    // 方法；调用它 MUST 收到 -32601，而这一层就是 -32601 的来源。
+    expect(lookupMethod('group.member_did_update')).toBeUndefined()
+  })
+
+  it('has a handler for every group method it declares', () => {
+    // 群方法在分发层是按名字查处理器的（`groups.ts` 的 `GROUP_HANDLERS`），所以"方法表里
+    // 有、处理器表里没有"这件事不会在编译期红，只会在运行时变成一个 500。
+    for (const name of groupMethodNames()) {
+      expect(GROUP_HANDLERS[name]).toBeTypeOf('function')
+    }
   })
 
   it('does not hand a stream method to the control plane', () => {

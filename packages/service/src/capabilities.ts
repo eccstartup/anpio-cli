@@ -15,7 +15,7 @@
 
 import type { Config } from './config'
 import { allMethods, type MethodSpec } from './rpc/methods'
-import { ACCEPTED_CONTENT_TYPES } from './rpc/direct'
+import { ACCEPTED_CONTENT_TYPES } from './rpc/payload'
 
 /** 扩展所在的命名空间。P1 §6.2.2 L277 要求 `meta.profile` 是一个标识，本服务的扩展用
  *  `x_` 打头（realtime.md §9）；"哪些是本服务的扩展"这个判断因此只有这一处。 */

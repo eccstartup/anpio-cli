@@ -1,84 +1,17 @@
-// P3 私聊：`direct.send` 的body 校验与落库。
+// P3 私聊：`direct.send` 的落库。
 //
-// 分两层看：`validateDirectBody` 是"这条消息能不能收"，`storeDirectMessage` 是"收下之后
-// 写什么"。两者都不看信封、不验签——那些是 §3 与 §5 的事，这里拿到的已经是解析过、
-// 认证过的东西。
+// 分两件事看：正文能不能收（`validatePayloadBody`，与群消息共用，见 `payload.ts`）与收下
+// 之后写什么（`storeDirectMessage`）。两者都不看信封、不验签——那些是 §3 与 §5 的事，
+// 这里拿到的已经是解析过、认证过的东西。
 //
 // 写库发生在 `acceptOperation` 的 `perform` 里，所以这里**不得**自己开事务、
 // 也不得在写之前做任何可能失败的 I/O（一次网络往返会让并发写在锁里等）。
 
-import { anpRejection, buildMessageNotification, type AnpAuth, type AnpMeta, type AnpParams, type AnpRejection } from '@agentx/core'
+import { buildMessageNotification, type AnpAuth, type AnpMeta, type AnpParams } from '@agentx/core'
 import type { DeliveryRecord, Storage } from '../storage/types'
 
-/** P3 §6.3 L281–285 里的三个负载字段。 */
-const PAYLOAD_FIELDS = ['text', 'payload', 'payload_b64u'] as const
-
-/** 每个字段对应的内容类型（P3 §6.2.4 L262 / §6.2.5 L268）。`payload_b64u` 是二进制或
- *  私有扩展（§6.2.6 L274），Profile 没有给它定内容类型，所以不在这张表里。 */
-const CONTENT_TYPE_OF = {
-  text: 'text/plain',
-  payload: 'application/json',
-} as const
-
-/**
- * 本服务接受的内容类型，供 `anp.get_capabilities` 的 `supported_content_types` 自报
- * （P1 §8.2.2 L574，那里说这个字段 SHOULD 尽量给）。
- *
- * 从上面那张表**推**出来，而不是另写一份清单：那张表就是"哪些内容类型会被接受"的判据
- * （`validateDirectBody` 按它拒），另写一份迟早与它对不上，而对不上的方向是"报了却不认"
- * ——客户端照着自己看到的清单发，收到一个 1003。
- *
- * `payload_b64u` 的私有扩展对象用的是发送方自定义的内容类型（§6.2.6 L274），枚举不出来，
- * 所以不在这里；它们照样能被受理，只是没法提前声明。
- */
-export const ACCEPTED_CONTENT_TYPES: readonly string[] = [...new Set(Object.values(CONTENT_TYPE_OF))]
-
-function isUnpaddedBase64Url(value: string): boolean {
-  // P3 §6.2.6 L276：无填充 base64url。`=` 出现在这里就是填充；长度模 4 余 1 是任何
-  // base64 都不可能产生的形态。
-  return /^[A-Za-z0-9_-]+$/.test(value) && value.length % 4 !== 1
-}
-
-/**
- * `direct.send` 的 `body` 是否合规（P3 §6.3 L281–285）。
- *
- * 三选一的规则是 MUST-reject，且要**恰好**一个：多一个少一个都拒。§6.2.4 L262 与
- * §6.2.5 L268 再要求负载字段与 `content_type` 对上——`content_type` 说 json 却给了
- * `text`，错的是 body 不是内容类型，所以这里也用 1003。
- *
- * 回 1003（`anp.invalid_params_shape`）是**本实现的选择**：§7.1.4 L386–387 把"内容类型
- * 不被支持"与"请求体不符合互斥规则"列成两条拒绝理由，却没给后者配码，而 1003 是公共段
- * 里唯一说"params 结构不符合要求"的那个。1009 留给真正不认识的内容类型。
- */
-export function validateDirectBody(body: Record<string, unknown>, contentType: string): AnpRejection | undefined {
-  const present = PAYLOAD_FIELDS.filter((field) => body[field] !== undefined)
-  if (present.length !== 1) {
-    return anpRejection(
-      'anp.invalid_params_shape',
-      `body must carry exactly one of ${PAYLOAD_FIELDS.join(', ')} (got ${present.length})`,
-    )
-  }
-
-  const field = present[0]
-  if (field === undefined) return undefined
-  const expected = CONTENT_TYPE_OF[field as keyof typeof CONTENT_TYPE_OF]
-  if (expected !== undefined && contentType !== expected) {
-    return anpRejection('anp.invalid_params_shape', `body.${field} requires content_type ${expected}`)
-  }
-  if (field === 'payload_b64u') {
-    const value = body.payload_b64u
-    if (typeof value !== 'string' || !isUnpaddedBase64Url(value)) {
-      return anpRejection('anp.invalid_params_shape', 'body.payload_b64u must be unpadded base64url')
-    }
-  }
-  if (field === 'text' && typeof body.text !== 'string') {
-    return anpRejection('anp.invalid_params_shape', 'body.text must be a string')
-  }
-  if (field === 'payload' && (typeof body.payload !== 'object' || body.payload === null || Array.isArray(body.payload))) {
-    return anpRejection('anp.invalid_params_shape', 'body.payload must be a JSON object')
-  }
-  return undefined
-}
+// `direct.send` 的正文规则就是 P3 §6.3 那条负载互斥规则，与 P4 §7.6 逐字相同，所以它住在
+// `payload.ts` 里，两个 Profile 共用一份。
 
 /**
  * `direct.incoming` 的 `params`（P3 §7.2.3 L409–422）。

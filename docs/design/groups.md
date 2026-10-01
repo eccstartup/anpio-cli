@@ -84,9 +84,10 @@ v1 同域调用不需要解析它，所以这条缺口不挡 C9；它挡的是�
 立规矩（同 [message-service.md](message-service.md) §5.1 对年龄上限的处理）。代价是写出群
 可能失去 `update_policy` 的授权者——这是规范留白，记在这里，而不是偷偷补一个 3003。
 
-**存储**：`group_members` 现在缺 §7.2 L379–380 的 `joined_at` / `added_by` 两列，而它们是
-`group_member` 对象的一部分（`group.get_info` 返回它）。C9 随一次 v3 迁移补上，`ALTER TABLE
-ADD COLUMN` 加可空列不需要重建表。
+**存储**：`group_members` 原有列里缺 §7.2 L379–380 的 `joined_at` / `added_by`，而它们是
+`group_member` 对象的一部分（`group.get_info` 返回它），C9 随一次迁移补上——`ALTER TABLE
+ADD COLUMN` 加可空列不需要重建表。这次迁移的版本号是 **v4**：v3 已经被 `message_reads` 用掉了
+（[message-service.md](message-service.md) §7）。
 
 ## 4. 权限判定
 
@@ -128,8 +129,15 @@ ADD COLUMN` 加可空列不需要重建表。
 - 除 `group.get_info` 外全部要 `auth.origin_proof`（§8 L590–594、§7.7 L455），锚点是
   `meta.sender_did`，即 `callerAnchor()` 的普通请求那一栏（[message-service.md](message-service.md) §5.1）。
 - `group.get_info` 是**第一个 proof 可选、由群状态决定**的方法：§8.2.2 L658 允许
-  `public` / `listed` 群匿名读。所以它的 `requiresOriginProof` 返回 `false`，"私有群必须有
-  身份"落到 handler——这一条判不进方法表，因为它取决于库里的那一行。
+  `public` / `listed` 群匿名读，所以它的 `requiresOriginProof` 取 `(meta) =>
+  meta.sender_did !== undefined`——**不是** `false`。
+
+  取 `false` 会留一条缝：匿名省掉的是 `sender_did`，不是"带着 `sender_did` 就可以不验签"。
+  在 `false` 下，一个没有 proof 的请求可以随手声称 `meta.sender_did` 是某个成员，方法表照样
+  放行，随后 handler 用那个**从未被验证**的 DID 去查成员关系——`private` 群的资料与成员列表
+  就这么发出去了。规范在这里只有一句"`private` 的群 **MUST** 要求身份"（L658–659），怎么执行
+  是这一层的事：有 `sender_did` 就必须有 proof，没有 `sender_did` 才是匿名。
+  "私有群必须有身份"仍然落在 handler，因为给多少取决于库里的那一行。
   匿名省的是**身份**，不是**定址**：它的 `meta.target` 仍然必填（§8.2.2 L648–649），
   `kind` 仍然是 `group`。
 - 认证失败的码走 P4 自己那对：3008 `group.invalid_origin_proof` / 3009
@@ -178,6 +186,17 @@ ADD COLUMN` 加可空列不需要重建表。
 `deliveries` 里那些**已经投递过**的历史行不属于"投递状态"：它们是收件箱内容，按 owner 自己
 的策略清理，与成员资格无关。删成员时顺手清空他的收件箱，等于用一次治理动作抹掉他自己的历史。
 
+**`group.create` 不产生事件、也不发通知**（**这是本实现的选择**）。§7.10.2 L585–591 的标准
+事件类型里没有"群被建了出来"，§7.10.1 L566–573 把 `member-activated` 映射到 `group.join` /
+`group.add` 两条方法，都不含 `group.create`；§8.1 那一节对创建要求的十一条 **MUST** 里也没有
+一条提到通知。于是创建连同它的 `initial_members` 算**一次**状态变更：`group_state_version` 与
+`group_event_seq` 都停在 1（§6.2 L237、§15.1 L1315–1316 的示例就是 1/1），那批成员以 v1 落成
+`active`，通过 `group.get_info` 看到花名册。
+
+另一条路是给每个 `initial_members` 条目发一个 `member-activated`+`group.state_changed`，代价是
+创建一个带 N 个成员的群立刻要用掉 N+1 个事件序号（而 §15.1 的示例里 `group_event_seq` 是 1），
+并且要为它发明一个 `subject_method` 取值。规范两处都没说要做，所以取不做的这一条。
+
 `group_receipt.proof` **v1 不签**。§7.9 L516 只在回执会离开 Host 所在域并被别的域依赖时才
 **MUST** 有 proof，§8 开头 L598–599 把这条与跨域绑在一起。同域 v1 的回执**字段齐全、`proof`
 缺席**：它证明的是排序位置，而那个位置在同域内没有第二个验证方。要签它需要 `group_did` 的
@@ -198,17 +217,33 @@ ADD COLUMN` 加可空列不需要重建表。
 
 `group_profile_patch` 同理，但 §7.4 的字段全是 MAY，没有可违反的结构。
 
+**除了 `group.send`，每个群方法都只认它那一段规范点名过的正文字段，多一个即 1003**
+（**这是本实现的选择**）。对 `group.join` / `group.add` 不是风格问题：§8.3.2 L681 与
+§8.4.2 L698 都写着正文 **MUST NOT** 包含名称、稳定主体字段或其它成员标识，而"其它成员标识"
+没有可枚举的内容——只有一张白名单能把这条 **MUST NOT** 真的执行下去，否则它是一句谁也不查的
+话。规则与 [message-service.md](message-service.md) §9 对扩展面用的是同一条。
+
+`group.send` 是例外：它的正文是应用层负载，§8.9.3 L856–862 的四个字段是"可包含"而不是"仅
+包含"，P3 §6.2.6 L274 还允许发送方自定义内容类型，那类消息的字段只有发送方自己认得。往这里加
+白名单，拒掉的会是规范允许的请求。
+
 ## 9. 幂等
 
 §10.3 L1037–1044 给的键是 `(sender_did, group_did, method, operation_id)`，正是 core
-`idempotencyKey()` 的形状，`target_scope` 取 `meta.target.did`：
+`idempotencyKey()` 的形状，`target_scope` 取 `meta.target.did`：面向既有群的操作用它拿到的就是
+`group_did`；`group.create` 用它拿到的是 `serviceDid`，因为 §8.1.2 L626 要求 `meta.target.did`
+**MUST** 等于目标服务的 `serviceDid`，而处理器强制了那一条。**这一处是本实现的读法**，规范没为
+创建这个情形给形状；取 `meta.target.did` 还有一个好处是方法表不必在构造时就知道配置。
 
-- 面向既有群的操作用 `group_did`；
-- `group.create` 取 `serviceDid`——那时群还不存在，而 §10.3 的四元组显然假定它存在。**这一处
-  是本实现的读法**，规范没为它给形状。
+被拒绝的操作不落幂等行——`perform` 抛出即回滚整个事务——所以"被受理的创建里两者相等"就够
+支撑这个键，不需要为未受理的请求也编一个作用域。
 
-`group.send` 的**消息级**重复识别（§10.3 L1046–1052）由 `messages` 的三元组主键兜住，与
-`direct.send` 完全同形。
+`group.send` 的**消息级**重复识别（§10.3 L1046–1052）由 `messages` 的三元组主键
+`(sender_did, target_did = group_did, message_id)` 兜住，与 `direct.send` 同形，但**多两列**：
+§8.9.4 L868–875 让消息级重放的响应 **MUST** 带 `group_event_seq` 与 `group_state_version`，
+而 §6.2 L239 规定后者是"该消息被接受时所属的群状态快照"——重放那一刻两个量都已经往前走了，
+事后再算必然算成当前的。所以受理时把它们写进 `messages` 行（`group_event_seq` /
+`group_state_version`，只由 `group.send` 写，私聊消息为 NULL）。
 
 **DID 更新后旧 DID 的重放**（§14.15 L1202 要求"在旧 DID 被拒绝前返回其精确幂等重放结果"）
 不需要额外代码：C4 的 `acceptOperation()` 先查幂等台账、命中就不进 `perform`，而"旧 DID 被拒"
@@ -218,6 +253,11 @@ ADD COLUMN` 加可空列不需要重建表。
 
 §12 L1153–1164 那一段（**无 3004**，[message-service.md](message-service.md) §4.1 已记）。
 它不在 P1 那张公共表里，所以走 `profileRejection(code, anpCode, …)` 而不是 `anpRejection`。
+
+C9 会发的是 3000 / 3001 / 3003 / 3005 / 3008 / 3009。其余四个里，3002 的理由在 §4；3006 是
+C13 的（§12 下方的 E2EE 一条）；3007 `group.host_unavailable` 与 3010
+`group.invalid_group_receipt` 在本服务里**没有产生路径**——本服务自己就是 Host，同域 v1 也
+收不到别家签的回执。留着一个发不出去的码，比造一个场景去用它诚实。
 
 ## 11. 能力清单不用手写
 

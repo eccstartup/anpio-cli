@@ -17,8 +17,14 @@
  *  v3: `message_reads` is new. It needs no migration step of its own — an
  *  `IF NOT EXISTS` table is exactly what the top-up pass in `applySchema` is for — but
  *  the version still has to move: without it a file written by v2 would return early
- *  from `applySchema` and never get the table. */
-export const SCHEMA_VERSION = 3
+ *  from `applySchema` and never get the table.
+ *
+ *  v4: `group_members` gains `joined_at` / `added_by` (P4 §7.2 L379–380 — they are part of
+ *  the `group_member` object `group.get_info` returns), and `messages` gains the two
+ *  position columns a group message has to be able to report (see the table below). All
+ *  four are nullable, so `ALTER TABLE ADD COLUMN` is enough and no table has to be
+ *  rebuilt. */
+export const SCHEMA_VERSION = 4
 
 export const SCHEMA: readonly string[] = [
   // ---- idempotency -----------------------------------------------------------
@@ -47,6 +53,12 @@ export const SCHEMA: readonly string[] = [
   // 那个标识是发送方自己起的（P1 §6.2.7 L402），两个发送方撞上同一个是合法的；P5
   // L1398 更让一条逻辑消息对每台接收设备各带一个外层 `message_id`。只拿它当主键，
   // 第二次插入就会被约束拒掉——一个本该正常受理的请求变成 500。
+  //
+  // 末尾两列只有群消息写：`group.send` 的**消息级**重复识别（P4 §10.3 L1046–1052）要
+  // 把一条早已收下的消息报回去，而那个响应 **MUST** 带 `group_event_seq` 与
+  // `group_state_version`（§8.9.4 L868–875），且后者是"该消息被接受时所属的群状态快照"
+  // （§6.2 L239）——不是重放那一刻的。快照只能从受理那一刻存下来，事后再算必然算成
+  // 当前的。私聊消息两列为 NULL。
   `CREATE TABLE IF NOT EXISTS messages (
      message_id          TEXT NOT NULL,
      sender_did          TEXT NOT NULL,
@@ -59,6 +71,8 @@ export const SCHEMA: readonly string[] = [
      recipient_device_id TEXT,
      conversation_id     TEXT,
      accepted_at         TEXT NOT NULL,
+     group_event_seq     INTEGER,
+     group_state_version INTEGER,
      PRIMARY KEY (sender_did, target_did, message_id)
    )`,
   `CREATE INDEX IF NOT EXISTS messages_target ON messages (target_did, accepted_at)`,
@@ -130,6 +144,8 @@ export const SCHEMA: readonly string[] = [
      role               TEXT,
      membership_status  TEXT NOT NULL,
      state_version      INTEGER NOT NULL,
+     joined_at          TEXT,
+     added_by           TEXT,
      PRIMARY KEY (group_did, member_did)
    )`,
   // group.state_changed 的可重放来源。

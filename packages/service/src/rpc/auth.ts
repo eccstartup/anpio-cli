@@ -82,6 +82,12 @@ export const DIRECT_AUTH_CODES: AuthErrorCodes = {
   anchorMismatch: { code: 2006, anpCode: 'direct.origin_did_mismatch' },
 }
 
+/** P4 §12 L1162–1163 —— 同一种拆分，`group.*` 的码段。 */
+export const GROUP_AUTH_CODES: AuthErrorCodes = {
+  invalidProof: { code: 3008, anpCode: 'group.invalid_origin_proof' },
+  anchorMismatch: { code: 3009, anpCode: 'group.origin_did_mismatch' },
+}
+
 export interface AuthenticateInput {
   envelope: AnpRequest
   /** {@link callerAnchor} 的结果。`undefined` 也算失败——见那个函数的说明。 */

@@ -49,6 +49,17 @@ export interface StoredMessage {
   recipientDeviceId?: string
   conversationId?: string
   acceptedAt: string
+  /**
+   * Where the message landed in its group, for a group message: the `group_event_seq` the
+   * Host assigned it and the `group_state_version` that was current when it was accepted
+   * (P4 §10.2 L1028–1032).
+   *
+   * Stored rather than derived because a message-level replay has to answer with the
+   * ORIGINAL acceptance's snapshot and sequence, and by then both have moved on. Absent for
+   * every direct message.
+   */
+  groupEventSeq?: number
+  groupStateVersion?: number
 }
 
 /** One recipient's copy of a message, with the position it occupies in that recipient's
@@ -61,6 +72,53 @@ export interface DeliveryRecord {
   method: string
   paramsJson: string
   acceptedAt: string
+}
+
+/**
+ * One group, as the Host keeps it (P4 §6.2–§6.3).
+ *
+ * The two counters are the whole reason this row exists: §10.1 L1015 requires one linear
+ * order per `group_did`, and an order assembled from two reads is not an order. They move
+ * inside the same transaction as the members and events they describe.
+ *
+ * `groupStateVersion` / `groupEventSeq` are integers here and decimal STRINGS on the wire
+ * (§6.2 L236 says the version is opaque, §6.3 L249 says the sequence is a decimal string).
+ * Storing the number is what makes "monotonic" enforceable; the string is a rendering.
+ */
+export interface StoredGroup {
+  groupDid: string
+  hostServiceDid: string
+  groupStateVersion: number
+  groupEventSeq: number
+  /** `group_profile` as it was last written, serialized (P4 §7.4). */
+  groupProfileJson: string
+  /** `group_policy` as it was last written, serialized (P4 §7.1). */
+  groupPolicyJson: string
+  createdAt: string
+  creatorDid: string
+}
+
+/** `role` is `owner` | `admin` | `member` and defaults to `member` when absent
+ *  (§7.2 L384); `membershipStatus` is `active` | `left` | `removed` (§6.5). */
+export interface StoredGroupMember {
+  groupDid: string
+  memberDid: string
+  role: string
+  membershipStatus: string
+  /** The `group_state_version` this membership row was last written at. */
+  stateVersion: number
+  joinedAt?: string
+  addedBy?: string
+}
+
+/** One `group.state_changed` event, as it will be replayed (§7.10). */
+export interface StoredGroupEvent {
+  groupDid: string
+  eventSeq: number
+  eventType: string
+  /** The event object itself, serialized — it is what `group.state_changed.body` carries. */
+  payloadJson: string
+  occurredAt: string
 }
 
 export interface OutboxEntry {
@@ -159,6 +217,45 @@ export interface Storage {
   /** Mark messages read. Returns the ids that were not read before — an id the owner
    *  does not hold is skipped rather than recorded. */
   markRead(ownerDid: string, messageIds: readonly string[], readAt: string): string[]
+
+  /** The group row, or `undefined` if this service hosts no such group. */
+  group(groupDid: string): StoredGroup | undefined
+  /** Write a new group. The counters are given rather than derived: `group.create` starts
+   *  them at 1/1 (§6.2 L237), and that is a decision of the operation, not of the store. */
+  insertGroup(group: StoredGroup): void
+  /** Replace the stored `group_profile` / `group_policy`. The caller has already merged the
+   *  patch and validated the RESULT (groups.md §8), so this writes a finished object. */
+  updateGroupProfile(groupDid: string, profileJson: string): void
+  updateGroupPolicy(groupDid: string, policyJson: string): void
+  /**
+   * Take the next `group_event_seq`, and the next `group_state_version` when the caller says
+   * this operation is a state change.
+   *
+   * One accessor for both because the two are always written together and always inside the
+   * operation's transaction: read-modify-write across two calls would let a concurrent
+   * operation slip between them and produce two events sharing a sequence number.
+   * §6.2 L238 is why `advanceStateVersion` is a parameter: a group MESSAGE advances the
+   * sequence and must NOT advance the version.
+   */
+  advanceGroupCounters(
+    groupDid: string,
+    advanceStateVersion: boolean,
+  ): { groupStateVersion: number; groupEventSeq: number }
+
+  groupMember(groupDid: string, memberDid: string): StoredGroupMember | undefined
+  /** Every member row of a group, in a stable order (by member DID). */
+  groupMembers(groupDid: string): StoredGroupMember[]
+  /** Insert or replace one membership row. A re-activation overwrites `joinedAt` /
+   *  `addedBy` — they are properties of THIS membership, not of the DID (groups.md §3). */
+  upsertGroupMember(member: StoredGroupMember): void
+  /** How many DIDs are currently `active`. §7.1 L370 counts DIDs, not devices. */
+  countActiveMembers(groupDid: string): number
+
+  /** Append one `group.state_changed` event. `eventSeq` is the value
+   *  {@link Storage.advanceGroupCounters} just returned, which is what makes the events
+   *  table an ordered replay source even though its sequence numbers are not contiguous
+   *  (group messages take numbers without leaving an event row). */
+  appendGroupEvent(event: StoredGroupEvent): void
 
   enqueueOutbox(draft: Omit<OutboxEntry, 'seq' | 'attempts' | 'lastError'>): number
   /** Entries due at or before `now`, oldest first. */
