@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import { ConnectxError } from '../errors'
 import type { ResolveDidOptions } from '../crypto/resolveDid'
-import { buildMessageRequest, type AnpMeta, type AnpResponse } from './envelope'
-import { anpCodeOf, postMessage } from './rpc'
+import { buildMessageRequest, buildMessageNotification, type AnpMeta, type AnpResponse } from './envelope'
+import { anpCodeOf, postMessage, postNotification } from './rpc'
 
 const ENDPOINT = 'https://peer.example/anp-im'
 
@@ -144,5 +144,67 @@ describe('postMessage', () => {
     ).catch((e: unknown) => e)
     expect(err).toBeInstanceOf(ConnectxError)
     expect(err).toMatchObject({ code: 'message_send_failed', status: 403 })
+  })
+})
+
+describe('postNotification', () => {
+  const NOTIFICATION = buildMessageNotification({ method: 'direct.incoming', meta: META })
+
+  it('POSTs the envelope with no id', async () => {
+    let seen: { url: string; init: RequestInit } | undefined
+    await postNotification(
+      ENDPOINT,
+      NOTIFICATION,
+      options(async (url, init) => {
+        seen = { url, init }
+        return new Response('', { status: 200 })
+      }),
+    )
+    expect(seen?.url).toBe(ENDPOINT)
+    expect(seen?.init.method).toBe('POST')
+    expect(seen?.init.body).toBe(JSON.stringify(NOTIFICATION))
+    expect(seen?.init.body).not.toContain('"id"')
+  })
+
+  it('accepts an empty body as a delivered push', async () => {
+    // §5.6 L199 says every REQUEST gets a Response; a Notification is not one, so a bare
+    // 200 is a normal answer. Parsing it as JSON would turn a success into a retry.
+    await expect(
+      postNotification(ENDPOINT, NOTIFICATION, options(async () => new Response('', { status: 200 }))),
+    ).resolves.toBeUndefined()
+  })
+
+  it('does not demand a JSON content type', async () => {
+    await expect(
+      postNotification(
+        ENDPOINT,
+        NOTIFICATION,
+        options(async () => new Response('<html>ok</html>', { status: 200, headers: { 'content-type': 'text/html' } })),
+      ),
+    ).resolves.toBeUndefined()
+  })
+
+  it('still refuses a non-2xx', async () => {
+    await expect(
+      postNotification(ENDPOINT, NOTIFICATION, options(async () => new Response('', { status: 503 }))),
+    ).rejects.toMatchObject({ code: 'message_send_failed', status: 503 })
+  })
+
+  it('applies the same network policy as a request', async () => {
+    let called = false
+    await expect(
+      postNotification(
+        ENDPOINT,
+        NOTIFICATION,
+        options(
+          async () => {
+            called = true
+            return new Response('', { status: 200 })
+          },
+          { allowedHosts: ['other.example'] },
+        ),
+      ),
+    ).rejects.toMatchObject({ code: 'message_send_failed', blockedReason: 'host_not_allowlisted' })
+    expect(called).toBe(false)
   })
 })

@@ -12,6 +12,7 @@
 
 import { ConnectxError } from '@agentx/core'
 import { loadConfig } from './config'
+import { createDeliveryWorker } from './delivery/worker'
 import { createServer } from './http/server'
 import { createDispatch } from './rpc/dispatch'
 import { openStorage } from './storage/sqlite'
@@ -23,6 +24,9 @@ async function main(): Promise<void> {
 
   const handleRpc: RpcHandler = createDispatch({ config, storage })
   const server = createServer({ config, handleRpc })
+  // Outbound `direct.incoming` pushes. Started only after the socket is up: a startup
+  // that fails should exit without a background timer having already spent attempts.
+  const delivery = createDeliveryWorker({ config, storage })
 
   try {
     await server.listen()
@@ -31,6 +35,7 @@ async function main(): Promise<void> {
     storage.close()
     throw err
   }
+  delivery.start()
 
   process.stdout.write(`AgentXAgent listening on http://${server.address.host}:${server.address.port}\n`)
   process.stdout.write(`  service did   ${config.serviceDid}\n`)
@@ -49,6 +54,7 @@ async function main(): Promise<void> {
     if (closing) return
     closing = true
     process.stdout.write(`\n${signal}: shutting down\n`)
+    delivery.stop()
     void server.close().then(() => {
       storage.close()
       process.exit(0)

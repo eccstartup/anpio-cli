@@ -721,6 +721,15 @@ function subjectQueryTarget(document: Record<string, unknown>, did: string): str
 }
 
 /**
+ * 一次受控交换里"响应体怎么读"。
+ *
+ * 读取必须是**这一层**的回调，而不是把 `Response` 交出去让调用方自己读：超时定时器
+ * 要活到**读完**为止。返回 `Response` 再清定时器，等于给对端一个慢速 body 就能越过
+ * `timeoutMs` 的口子——而这里的对端地址来自对端自己的文档。
+ */
+type ResponseConsumer = (res: Response, current: string, maxBytes: number) => Promise<unknown>
+
+/**
  * Fetch a JSON document under the `ResolveDidOptions` network policy: allowlist and
  * resolved-address check on EVERY redirect hop, optionally a connect pinned to the
  * validated address (closing the DNS-rebinding TOCTOU), a byte cap, a timeout and a
@@ -737,12 +746,14 @@ function subjectQueryTarget(document: Record<string, unknown>, did: string): str
  * silently drop the body and read the peer's answer to a different question as if it
  * answered this one.
  */
-export async function fetchControlledJson(
-  url: string,
-  options: ResolveDidOptions,
-  codes: FetchErrorCodes,
-  request?: ControlledRequest,
-): Promise<unknown> {
+async function exchangeControlled(input: {
+  url: string
+  options: ResolveDidOptions
+  codes: FetchErrorCodes
+  request?: ControlledRequest
+  consume: ResponseConsumer
+}): Promise<unknown> {
+  const { options, codes, request } = input
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
   const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES
   const allowRedirects = options.allowRedirects ?? false
@@ -774,7 +785,7 @@ export async function fetchControlledJson(
     // just the first and last — passes the allowlist + resolved-address policy. A
     // single `redirect: 'follow'` would let an allowlisted host bounce through an
     // internal/private address (SSRF) while only the final URL got re-checked.
-    let current = url
+    let current = input.url
     for (let hop = 0; ; hop++) {
       const hopUrl = new URL(current)
       const host = hopUrl.hostname
@@ -864,6 +875,28 @@ export async function fetchControlledJson(
           status: res.status,
         })
       }
+      return await input.consume(res, current, maxBytes)
+    }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * Fetch a JSON document under {@link exchangeControlled}'s policy.
+ */
+export function fetchControlledJson(
+  url: string,
+  options: ResolveDidOptions,
+  codes: FetchErrorCodes,
+  request?: ControlledRequest,
+): Promise<unknown> {
+  return exchangeControlled({
+    url,
+    options,
+    codes,
+    ...(request !== undefined ? { request } : {}),
+    consume: async (res, current, maxBytes) => {
       assertDocumentContentType(res, current, codes)
       const text = await readCapped(res, maxBytes, codes)
       try {
@@ -871,10 +904,34 @@ export async function fetchControlledJson(
       } catch (err) {
         throw new ConnectxError(codes.invalidDocument, `${codes.subject} from ${current} is not valid JSON`, { cause: err })
       }
-    }
-  } finally {
-    clearTimeout(timer)
-  }
+    },
+  })
+}
+
+/**
+ * 同一条网络策略下的一次交换，**不看响应体**。
+ *
+ * 存在的理由是 Notification：P1 §5.6 L199 的"每个 Request 必须回一个 Response"不覆盖
+ * 它，对端完全可以只回 200 与一个空 body——按 JSON 去解析就等于把一次成功的投递当失败
+ * 重试。注意正文 `consume` 那一层仍然**读**（按 `maxBytes`）：不读的 body 会让连接停在
+ * 半开状态，而不设上限地读，就是让一个回 4 GiB 的对端把内存吃掉。
+ */
+export function fetchControlledDiscardingBody(
+  url: string,
+  options: ResolveDidOptions,
+  codes: FetchErrorCodes,
+  request?: ControlledRequest,
+): Promise<void> {
+  return exchangeControlled({
+    url,
+    options,
+    codes,
+    ...(request !== undefined ? { request } : {}),
+    consume: async (res, _current, maxBytes) => {
+      await readCapped(res, maxBytes, codes)
+      return undefined
+    },
+  }).then(() => undefined)
 }
 
 async function fetchDidDocument(url: string, options: ResolveDidOptions): Promise<DidDocument> {

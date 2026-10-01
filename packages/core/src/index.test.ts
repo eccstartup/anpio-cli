@@ -115,6 +115,7 @@ const MAIN = [
   'parseEnvelope',
   'isNotification',
   'buildMessageRequest',
+  'buildMessageNotification',
   // P1 附录 A 的原发者证明：签与验共用 `message/sro.ts` 的全部规范化
   'signOriginProof',
   'buildOriginProofAuth',
@@ -125,6 +126,7 @@ const MAIN = [
   'originProofFreshness',
   // P1 §5–§6 的出站半边：POST + 响应形状判定。与信封构造分开，服务端只 import 前者
   'postMessage',
+  'postNotification',
   'anpCodeOf',
   // 身份解析的口子（vendored-core §6）：调用点只认 locator / resolver，不判身份类型
   'DidServiceLocator',

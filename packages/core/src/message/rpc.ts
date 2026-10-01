@@ -12,9 +12,15 @@
 // 把两者分开，是为了让服务端能只 import 前者。
 
 import { ConnectxError } from '../errors'
-import { fetchControlledJson } from '../crypto/resolveDid'
+import { fetchControlledDiscardingBody, fetchControlledJson } from '../crypto/resolveDid'
 import type { FetchErrorCodes, ResolveDidOptions } from '../crypto/resolveDid'
-import type { AnpErrorResponse, AnpRequest, AnpResponse, AnpSuccessResponse } from './envelope'
+import type {
+  AnpErrorResponse,
+  AnpNotification,
+  AnpRequest,
+  AnpResponse,
+  AnpSuccessResponse,
+} from './envelope'
 import { JSONRPC_VERSION } from './envelope'
 
 /**
@@ -111,6 +117,30 @@ export async function postMessage(
     )
   }
   return raw as AnpErrorResponse
+}
+
+/**
+ * POST 一个 Notification 给 ANP Endpoint，只关心"送到了没有"。
+ *
+ * 与 {@link postMessage} 的差别只有一处，而那一处是规范定的：Notification **没有
+ * `id`，也就没有响应可以对**（§5.6 L199 的"每个 Request MUST 回一个 Response"不
+ * 覆盖它）。所以这里既不解析 JSON、也不比对 id——对端回 200 加一个空 body 是完全
+ * 正常的，按 JSON 去读就会把一次成功的投递当失败重发。
+ *
+ * 没有返回值的另一半理由：§5.3 L162–173 只允许通知承载"异步推送 / 无需确认的提示"，
+ * 它的语义里本来就没有"对端接受了什么"这一档。业务上是否收到，靠的是收件人在它自己的
+ * 入口服务里留下了什么（P3 §7.2.3），不是靠这次 HTTP 的回复。
+ */
+export async function postNotification(
+  endpoint: string,
+  notification: AnpNotification,
+  options: ResolveDidOptions = {},
+): Promise<void> {
+  await fetchControlledDiscardingBody(endpoint, options, MESSAGE_FETCH_CODES, {
+    method: 'POST',
+    headers: JSON_RPC_HEADERS,
+    body: JSON.stringify(notification),
+  })
 }
 
 /**

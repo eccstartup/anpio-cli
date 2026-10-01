@@ -480,12 +480,8 @@ export function isNotification(
   return !Object.prototype.hasOwnProperty.call(envelope, 'id')
 }
 
-/** {@link buildMessageRequest} 的全部输入。 */
-export interface BuildMessageRequestInput {
-  /** 本次交换的 id（§5.2 L157：非空字符串）。与 `operation_id` 是两件事：这个让
-   *  **一次请求/响应**可对账，那个让**一次业务操作**幂等（P3 §8.2）。重试同一条消息
-   *  时 `operation_id` 不变，`id` 应当换一个新的。 */
-  id: string
+/** 出站信封里 Request 与 Notification 共有的部分。 */
+interface BuildOutboundInput {
   /** 方法名（§5.5 L183–188：字符串、不以 `rpc.` 开头）。 */
   method: string
   meta: AnpMeta
@@ -495,21 +491,17 @@ export interface BuildMessageRequestInput {
   auth?: AnpAuth
 }
 
-/**
- * 装配一个出站 Request（§4.1 L125–127、§5.1 L151、§6.1 L224–230）。
- *
- * 它存在的理由不是省几行，而是**出站信封只能有一处**：签名要绑的 `meta` / `body`
- * 与实际发出去的必须是同一份字节，两处各拼一次就是"签的和你发的不是一回事"这一类
- * 漏洞的入口。校验也只做**无条件**的那几条——`meta.target`、`auth` 是否必需由各
- * Profile 决定，在这里硬塞等于把 P3 的规则写进 P1。
- *
- * 不变量是它自己的输出必须能过 {@link parseEnvelope}：同一个包既发出站请求又解析
- * 入站请求，两份形状判断分家的代价是"自己发的自己收不了"。
- */
-export function buildMessageRequest(input: BuildMessageRequestInput): AnpRequest {
-  if (typeof input.id !== 'string' || input.id.length === 0) {
-    throw new ConnectxError('message_invalid', 'Request id MUST be a non-empty string (P1 §5.2 L157)')
-  }
+/** {@link buildMessageRequest} 的全部输入。 */
+export interface BuildMessageRequestInput extends BuildOutboundInput {
+  /** 本次交换的 id（§5.2 L157：非空字符串）。与 `operation_id` 是两件事：这个让
+   *  **一次请求/响应**可对账，那个让**一次业务操作**幂等（P3 §8.2）。重试同一条消息
+   *  时 `operation_id` 不变，`id` 应当换一个新的。 */
+  id: string
+}
+
+/** 出站信封**无条件**校验 + `params` 装配。Request 与 Notification 只差一个 `id`，
+ *  抽取出来是为了让"未知 meta 字段必须拒"这类规则只有一处写法。 */
+function buildOutbound(input: BuildOutboundInput): AnpParams {
   if (typeof input.method !== 'string' || input.method.length === 0) {
     throw new ConnectxError('message_invalid', 'method MUST be a non-empty string (P1 §5.5 L183)')
   }
@@ -531,11 +523,45 @@ export function buildMessageRequest(input: BuildMessageRequestInput): AnpRequest
 
   // 顺序照 §6.1 L224–230 写的 `{meta, auth, body}`。JSON 不关心键序，但让线上的
   // 字节与规范里那份例子同形，才看得出"这就是那个信封"。
-  const params: AnpParams = {
+  return {
     meta: input.meta,
     ...(input.auth !== undefined ? { auth: input.auth } : {}),
     body: input.body ?? {},
   }
+}
 
-  return { jsonrpc: JSONRPC_VERSION, id: input.id, method: input.method, params }
+/**
+ * 装配一个出站 Request（§4.1 L125–127、§5.1 L151、§6.1 L224–230）。
+ *
+ * 它存在的理由不是省几行，而是**出站信封只能有一处**：签名要绑的 `meta` / `body`
+ * 与实际发出去的必须是同一份字节，两处各拼一次就是"签的和你发的不是一回事"这一类
+ * 漏洞的入口。校验也只做**无条件**的那几条——`meta.target`、`auth` 是否必需由各
+ * Profile 决定，在这里硬塞等于把 P3 的规则写进 P1。
+ *
+ * 不变量是它自己的输出必须能过 {@link parseEnvelope}：同一个包既发出站请求又解析
+ * 入站请求，两份形状判断分家的代价是"自己发的自己收不了"。
+ */
+export function buildMessageRequest(input: BuildMessageRequestInput): AnpRequest {
+  if (typeof input.id !== 'string' || input.id.length === 0) {
+    throw new ConnectxError('message_invalid', 'Request id MUST be a non-empty string (P1 §5.2 L157)')
+  }
+  return { jsonrpc: JSONRPC_VERSION, id: input.id, method: input.method, params: buildOutbound(input) }
+}
+
+/** {@link buildMessageNotification} 的输入：Request 的输入**去掉 `id`**。 */
+export type BuildMessageNotificationInput = Omit<BuildMessageRequestInput, 'id'>
+
+/**
+ * 装配一个出站 Notification（§5.3 L162–173、§6.1 L224–230）。
+ *
+ * **没有 `id`**，这是它与 Request 的全部差别，且这个差别是规范强制的：§5.6 L201、
+ * L204 把"要回响应"绑在 `id` 上，所以带 `id` 就不再是一次通知。输入对象上就算有
+ * `id` 也不会被搬过去——`buildOutbound` 只往外写 `method` / `meta` / `body`。
+ *
+ * 用途被 §5.3 L162–173 限得很窄：异步推送、无需确认的提示。**改状态的操作与需要
+ * 幂等确认的发送 MUST NOT 用**——那些要的正是那个响应（§5.6 L199）。`direct.send`
+ * 因此不是它，投递给收件人的 `direct.incoming` 才是（P3 §7.2.3 L409）。
+ */
+export function buildMessageNotification(input: BuildMessageNotificationInput): AnpNotification {
+  return { jsonrpc: JSONRPC_VERSION, method: input.method, params: buildOutbound(input) }
 }

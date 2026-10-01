@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { ConnectxError } from '../errors'
 import {
   buildMessageRequest,
+  buildMessageNotification,
   isNotification,
   parseEnvelope,
   profileRejection,
@@ -92,6 +93,56 @@ describe('buildMessageRequest', () => {
 
     const extension = { ...meta(), x_agentx_retry: 1 } as unknown as AnpMeta
     expect(() => buildMessageRequest({ id: 'r', method: 'direct.send', meta: extension })).not.toThrow()
+  })
+})
+
+describe('buildMessageNotification', () => {
+  it('produces a notification our own parser accepts, unchanged', () => {
+    const notification = buildMessageNotification({
+      method: 'direct.incoming',
+      meta: meta(),
+      body: { text: 'hi' },
+    })
+    const parsed = parseEnvelope(JSON.parse(JSON.stringify(notification)))
+    expect(parsed.ok).toBe(true)
+    expect(parsed.ok && isNotification(parsed.value)).toBe(true)
+  })
+
+  it('carries no id, even when the input object has one', () => {
+    // §5.6 L201/L204 hang "the peer must answer" on `id`, so an envelope that has one is
+    // a Request and this builder's whole job is to not be one. `buildOutbound` only ever
+    // writes method / meta / body, which is what makes that structural rather than a
+    // convention a spread could break.
+    const withId = { id: 'req-1', method: 'direct.incoming', meta: meta(), body: {} }
+    const notification = buildMessageNotification(withId)
+    expect('id' in notification).toBe(false)
+    expect(Object.keys(notification)).toEqual(['jsonrpc', 'method', 'params'])
+  })
+
+  it('carries the origin proof through unchanged', () => {
+    // P3 §7.2.3 L420: the intermediary forwards the ORIGINAL business proof. It is not
+    // this builder's business to check that — only to not be a place that drops it.
+    const auth = {
+      scheme: 'anp-rfc9421-origin-proof-v1',
+      origin_proof: { contentDigest: 'sha-256=:a:', signatureInput: 'sig1=("@method")', signature: 'sig1=:b:' },
+    }
+    const notification = buildMessageNotification({ method: 'direct.incoming', meta: meta(), auth })
+    expect(notification.params.auth).toEqual(auth)
+  })
+
+  it('applies the same unconditional checks as a request', () => {
+    expect(() => buildMessageNotification({ method: 'rpc.discover', meta: meta() })).toThrow(
+      /reserved "rpc\." prefix/,
+    )
+    const bad = { ...meta(), bogus: 1 } as unknown as AnpMeta
+    expect(() => buildMessageNotification({ method: 'direct.incoming', meta: bad })).toThrow(
+      /Unknown core meta field "bogus"/,
+    )
+  })
+
+  it('defaults an absent body to an empty object, like a request does', () => {
+    const notification = buildMessageNotification({ method: 'anp.get_capabilities', meta: meta() })
+    expect(notification.params.body).toEqual({})
   })
 })
 

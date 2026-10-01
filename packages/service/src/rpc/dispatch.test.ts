@@ -206,6 +206,64 @@ describe('accepting a direct message', () => {
     expect(h.storage.headSeq(receiver.did)).toBe(1)
   })
 
+  it('queues the outbound push as the notification P3 §7.2.3 describes', async () => {
+    const h = harness()
+    await h.call(await signed())
+
+    const due = h.storage.dueOutbox(NOW.toISOString(), 10)
+    expect(due).toHaveLength(1)
+    expect(due[0]?.recipientDid).toBe(receiver.did)
+    // Due immediately: accepting and pushing are the same moment; backoff only starts
+    // after the first failure.
+    expect(due[0]?.nextAttemptAt).toBe(NOW.toISOString())
+
+    const notification = JSON.parse(due[0]?.payloadJson ?? '{}') as {
+      jsonrpc: string
+      id?: unknown
+      method: string
+      params: { meta: Record<string, unknown>; auth?: unknown; body: Record<string, unknown> }
+    }
+    expect(notification.jsonrpc).toBe('2.0')
+    // §5.3 L162: a push is a Notification, so it carries no id and asks for no answer.
+    expect('id' in notification).toBe(false)
+    expect(notification.method).toBe('direct.incoming')
+    expect(notification.params.body).toEqual({ text: 'hello' })
+    // §7.2.3 L411–418: exactly these seven, and meta.target is the RECIPIENT.
+    expect(notification.params.meta).toEqual({
+      profile: 'anp.direct.base.v1',
+      security_profile: 'transport-protected',
+      sender_did: sender.did,
+      target: { kind: 'agent', did: receiver.did },
+      operation_id: 'op-1',
+      message_id: 'msg-1',
+      content_type: 'text/plain',
+    })
+    // L421: device selectors MUST NOT appear, even as undefined-valued keys.
+    expect(Object.keys(notification.params.meta)).not.toContain('sender_device_id')
+    expect(Object.keys(notification.params.meta)).not.toContain('recipient_device_id')
+  })
+
+  it('forwards the original origin proof rather than signing its own (P3 §7.2.3 L420)', async () => {
+    const h = harness()
+    const request = await signed()
+    await h.call(request)
+    const notification = JSON.parse(h.storage.dueOutbox(NOW.toISOString(), 1)[0]?.payloadJson ?? '{}') as {
+      params: { auth?: unknown }
+    }
+    expect(notification.params.auth).toEqual(request.params.auth)
+  })
+
+  it('queues no second push when the operation is replayed', async () => {
+    const h = harness()
+    await h.call(await signed())
+    const retry = await h.call({ ...(await signed()), id: 'req-2' })
+    expect(retry.json?.result?.accepted).toBe(true)
+    // Two rows here would mean two identical pushes to the peer, which §8.4 tolerates
+    // but which the accept path has no reason to cause.
+    const stored = h.storage.dueOutbox(NOW.toISOString(), 10)
+    expect(stored).toHaveLength(1)
+  })
+
   it('carries conversation_id through to the result when the body has one', async () => {
     const h = harness()
     const outcome = await h.call(await signed({ body: { text: 'hi', conversation_id: 'conv-1' } }))
@@ -317,5 +375,8 @@ describe('an unexpected failure', () => {
     // The whole operation rolled back, so a later retry is not answered from a record
     // for an operation that never completed.
     expect(h.storage.idempotentRow('message:op-1')).toBeUndefined()
+    // …and nothing went to the outbox either: a push for a message that was never stored
+    // would deliver a payload the accept path has no record of.
+    expect(h.storage.dueOutbox(NOW.toISOString(), 10)).toEqual([])
   })
 })

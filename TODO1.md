@@ -128,11 +128,18 @@
   给消息级重复识别定的三元组才是键——那个标识是发送方自己起的（P1 §6.2.7 L402），撞名合法，
   旧主键会把本该正常受理的第二次发送变成 500。同批 `outbox.endpoint_uri` → `recipient_did`
   （重试必须重新解析，钉住的 endpoint 可能已失效），两者合一个 v2 迁移。148 个测试）
-- C5b `direct.incoming` 异步推送 + `outbox` 退避重试
-  （**§7.3 L491–499** 是**按字段种类**立的十进制字符串规矩，`direct.send` 没有这类字段——
-  第一个实例是 C9 的 `group_state_version` / `group_event_seq`，挪给 C9；
-  **P3 §5.5 L208** 的"target 已被替代"要先有**连续性来源**：本服务不是 DID 权威、手上没有
-  更新链，现在做等于每次受理挂一次不缓存的出站链查询。`perform()` 抛出的接缝已留好）
+- ~~C5b `direct.incoming` 异步推送 + `outbox` 退避重试~~（2026-10-01。受理路径只在
+  `outbox` 落一行，推送归 `delivery/worker.ts`——事务里不能有网络往返。core 补
+  `buildMessageNotification()`（**没有 `id`**，§5.3 L162 让通知不能是 Request）与
+  `postNotification()`；两者共用 `resolveDid.ts` 抽出的一条受控交换，**读体仍在超时
+  定时器之内**（返回 `Response` 再清定时器，等于给对端一个慢速 body 就能越过
+  `timeoutMs`）。推送目标每次重新解析（`recipient_did` 而不是钉住的 endpoint）；
+  解析出来就是本服务端点时**不作 HTTP**——`deliveries` 那行已经持久，C7 会交出去。
+  退避数值是本实现的选择，依据 P3 §8.4 L477。§7.3 L491–499 的十进制字符串仍留给 C9；
+  §5.5 L208 的"target 已被替代"仍缺连续性来源。一处**规范内部张力**记进
+  §8.2：A.3 L1046 让 SRO 只含 `method`，而 §7.2.3 要求转发后除 `method` 外逐字段相同，
+  A.6 L1136 又要求按**当前请求的** `method` 重建——本服务按 §7.2.3 与 A.8 转发逐字节
+  不变的原证明，验证留给收件人。164 个测试）
 - C6 取件扩展面 + 游标（`delivery_cursor`）
 - C7 **订阅路**：`GET /anp-im/stream` + 订阅者注册表 + 补齐期间缓冲与背压
   （时序见 [realtime.md](docs/design/realtime.md) §5.2/§5.3）

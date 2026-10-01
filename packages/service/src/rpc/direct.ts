@@ -7,7 +7,7 @@
 // 写库发生在 `acceptOperation` 的 `perform` 里，所以这里**不得**自己开事务、
 // 也不得在写之前做任何可能失败的 I/O（一次网络往返会让并发写在锁里等）。
 
-import { anpRejection, type AnpAuth, type AnpMeta, type AnpRejection } from '@agentx/core'
+import { anpRejection, buildMessageNotification, type AnpAuth, type AnpMeta, type AnpParams, type AnpRejection } from '@agentx/core'
 import type { Storage } from '../storage/types'
 
 /** P3 §6.3 L281–285 里的三个负载字段。 */
@@ -70,35 +70,51 @@ export function validateDirectBody(body: Record<string, unknown>, contentType: s
 /**
  * `direct.incoming` 的 `params`（P3 §7.2.3 L409–422）。
  *
+ * `direct.incoming` 是**这一个方法名**：它是通知，不是请求，表不在方法表里（本服务
+ * 收它、不服务它）。放在这里是因为它承载的是"这条 `direct.send` 被投递时是什么样"，
+ * 与这个文件里其余的私聊语义是同一件事。
+ */
+export const DIRECT_INCOMING = 'direct.incoming'
+
+export interface IncomingParamsInput {
+  meta: AnpMeta
+  /** 收件人。就是 `meta.target.did`（P3 §7.2.3 L414），但单独传进来：`meta.target` 的
+   *  类型是可选的，而 §7.2.3 要这一项 MUST 在。调用方刚查过目标绑定，让它把那个已经
+   *  非空的值交过来，比在这里再写一次 `?? ''` 更诚实。 */
+  targetDid: string
+  body: Record<string, unknown>
+  auth?: AnpAuth
+}
+
+/**
  * 落库时就构造好，而不是推送时再拼：推送失败要重试，重试时原始请求早已不在手上，
  * 而这些字段**必须**与原消息一致。存下来还能让取件面（`sync.delta`）直接把它当载荷，
  * 不必重建。
  *
  * `auth` 原样带走（L420）：中间服务**不得**重签，重签会把业务原发者的证明换成
  * 这个服务的，跨域链条上"谁发的"就变了。
+ *
+ * 这个函数只写 §7.2.3 L411–418 点名的七个字段——`sender_device_id` /
+ * `recipient_device_id` 不在其中，L421 还专门要求它们 MUST NOT 出现（设备 selector
+ * 只属于 P5 的 Overlay，而 Base 的 `direct.send` 连收都不收它们）。
  */
-export function incomingParams(input: {
-  meta: AnpMeta
-  body: Record<string, unknown>
-  auth?: AnpAuth
-}): Record<string, unknown> {
+export function incomingParams(input: IncomingParamsInput): AnpParams {
   const { meta } = input
-  const params: Record<string, unknown> = {
+  return {
     meta: {
       profile: meta.profile,
       security_profile: meta.security_profile,
       sender_did: meta.sender_did,
-      target: { kind: 'agent', did: meta.target?.did },
+      target: { kind: 'agent', did: input.targetDid },
       operation_id: meta.operation_id,
       message_id: meta.message_id,
       content_type: meta.content_type,
     },
+    // 没有 `auth` 就不放这个键：一个 `undefined` 进去，JSON 序列化后整键消失、但内存里
+    // 形状不同，取件面读出来的东西会随序列化时机变。
+    ...(input.auth !== undefined ? { auth: input.auth } : {}),
     body: input.body,
   }
-  // 没有 `auth` 就不放这个键：一个 `undefined` 进去，JSON 序列化后整键消失、但内存里
-  // 形状不同，取件面读出来的东西会随序列化时机变。
-  if (input.auth !== undefined) params.auth = input.auth
-  return params
 }
 
 export interface StoreDirectInput {
@@ -158,12 +174,40 @@ export function storeDirectMessage(storage: Storage, input: StoreDirectInput): R
     acceptedAt,
   })
 
+  // §7.2.3 的字段表只写一遍：投递行与出站通知用的是**同一份** `params`，两处各拼一次
+  // 就是将来某次改动只改了一边的入口。
+  const params = incomingParams({
+    meta,
+    targetDid,
+    body: input.body,
+    ...(input.auth !== undefined ? { auth: input.auth } : {}),
+  })
+
   storage.appendDelivery({
     ownerDid: targetDid,
     messageId,
-    method: 'direct.incoming',
-    paramsJson: JSON.stringify(incomingParams({ meta, body: input.body, ...(input.auth ? { auth: input.auth } : {}) })),
+    method: DIRECT_INCOMING,
+    paramsJson: JSON.stringify(params),
     acceptedAt,
+  })
+
+  // 出站推送排进 outbox。载荷存**整个通知信封**：worker 到那时手上只有这一行，任何
+  // "到时候再拼"都要它知道方法名与 §7.2.3 的字段搬运规则，而那正是上面刚刚做过的事。
+  //
+  // `nextAttemptAt` 取受理时刻：受理成功之后马上尝试一次是常态，退避只在失败之后开始。
+  // 这一步仍然是纯写——真正解析对端与发 HTTP 的是 delivery worker，不在这里。事务里
+  // 不得有网络往返，否则一次慢连接会让所有并发受理在锁上等。
+  storage.enqueueOutbox({
+    recipientDid: targetDid,
+    payloadJson: JSON.stringify(
+      buildMessageNotification({
+        method: DIRECT_INCOMING,
+        meta: params.meta,
+        body: params.body,
+        ...(params.auth !== undefined ? { auth: params.auth } : {}),
+      }),
+    ),
+    nextAttemptAt: acceptedAt,
   })
 
   return {

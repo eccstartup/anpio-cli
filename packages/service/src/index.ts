@@ -26,8 +26,11 @@ export type { DispatchDeps } from './rpc/dispatch'
 export { checkMethod, lookupMethod, targetBindingHolds, DIRECT_SEND } from './rpc/methods'
 export type { MetaField, MethodSpec, TargetMode } from './rpc/methods'
 
-export { storeDirectMessage, incomingParams, validateDirectBody } from './rpc/direct'
-export type { StoreDirectInput } from './rpc/direct'
+export { storeDirectMessage, incomingParams, validateDirectBody, DIRECT_INCOMING } from './rpc/direct'
+export type { IncomingParamsInput, StoreDirectInput } from './rpc/direct'
+
+export { createDeliveryWorker } from './delivery/worker'
+export type { DeliveryOptions, DeliveryWorker } from './delivery/worker'
 
 export { openStorage } from './storage/sqlite'
 export type { OpenStorageOptions } from './storage/sqlite'
