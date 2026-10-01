@@ -343,19 +343,23 @@ Host 无法区分"第一次进群"与"重新加入"（§10.3 L1066 的触发条�
 1. **`anp_did_wba_device_binding` 的 ExtensionType 还是草案私有值 `0xF0A1`**
    （§6.3.1 L430）。规范说得很重：**ANP 在发布 v2 前 MUST 公布稳定的注册 code point**，
    改这个值属于 breaking draft revision。§20 L2457 把它列为待建注册表第 5 项。
-   这不是本仓库能补的（[TODO1.md](../TODO1.md) 的 `D2`），但**它决定 P6 能不能对外声明**——
-   `anp.get_capabilities` 里 P6 **不得**作为稳定 Profile 出现
-   （[message-service.md](message-service.md) §15 已写）。
+   **官方 SDK 已经把这条做成显式门禁**：Rust crate 里 `DID_WBA_DEVICE_BINDING_EXTENSION_DRAFT_V2
+   = 0xF0A1`（`rust/src/group_e2ee/v2_models.rs:13`），并定义了 `ErrP6V2PublicReleaseBlocked`
+   ——"P6 v2 public release is blocked until the draft MLS extension has a stable registered
+   codepoint"（`rust/src/group_e2ee/v2_errors.rs:84`）。本仓库照抄这个位置：
+   **代码可以写，`anp.get_capabilities` 里 P6 不得作为稳定 Profile 出现**，直到上游公布
+   稳定 codepoint。（[TODO1.md](../TODO1.md) 的 `D2` 已按此裁定。）
 2. **群 DID 文档未发布**：`get_key_package` 之外的所有 group-addressed 方法都要先解析
    `group_did` 找 Host，同 [federation.md](federation.md) §8 第 1 条。
 3. **`provider_asserted` 的取舍留给部署**（§10.5 L1082、L1098）：P6 业务策略接受还是拒绝
    由部署定，且 P6 拒绝时 **MUST** 保持 E2EE 消息面暂停——合规行为是 fail closed。
 
-## 14. 需要用户裁定
+## 14. 已定的两件事
 
-1. **客户端侧的密码学放哪**——与 [TODO1.md](../TODO1.md) 的 `D4` 是同一个问题，
-   而 P6 让它从"以后再说"变成"路线选择"：owner 的 MLS 状态、KeyPackage 私钥、
-   epoch secret **全都**在设备侧，本服务一行都没有。见 [e2ee-direct.md](e2ee-direct.md) §9.1。
-2. **被移除 leaf 的应用信封是投完还是取消**：§12.6 L1512 给了两个都合规的选项
-   （见本文 §6.1）。本设计选了"投完"，因为它对用户更诚实——被移除前最后几条消息还能读到。
-   若倾向"立即取消"，改动只在队列的收尾逻辑。
+1. ~~**客户端侧的密码学放哪**~~（2026-10-01 定：**(a) 内嵌**，见 [e2ee-direct.md](e2ee-direct.md)
+   §9.1 —— 与 [TODO1.md](../TODO1.md) 的 `D4` 同一个问题、同一个答案。owner 的 MLS 状态、
+   KeyPackage 私钥、epoch secret **全都**在设备侧，本服务一行都没有；官方方向是库调用而非子进程）。
+2. ~~**被移除 leaf 的应用信封是投完还是取消**~~（2026-10-01 用户裁定：**按序投完 (a)**。
+   用户同时指出一个事实，记在这里：**已经送达并被读到的消息，无法再收回**——最终通知只能
+   告诉设备"你已被移除"，不能让已经解密的明文消失。这是产品取舍，不是技术限制；
+   若改"立即取消"，改动只在队列的收尾逻辑。）

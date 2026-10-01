@@ -195,10 +195,26 @@ ALTER TABLE deliveries ADD COLUMN recipient_device_id TEXT;
 - **历史拉取 / 已读回执 / 设备同步**：§10.7 L1396 明说 Mailbox 不定义这些。
 - **透明目录与 Bundle 可审计日志**：§14.3 L1596 是 SHOULD，属运维面。
 
-## 9. 需要用户裁定
+## 9. 已定的两件事
 
-1. **客户端侧的密码学放哪。** 与 [TODO1.md](../TODO1.md) 的 `D4` 是同一个问题、同一份
-   取舍：X3DH-like 与 Double Ratchet（以及 P6 的 MLS）都要在设备侧跑。内嵌进 `connectx`
-   （Rust/JS 库）还是另起一个本地进程，决定"设备私钥 + 会话状态"是一处落盘还是两处。
-2. **限流的形状**：§7.3 L598 要求按 hop / service 级认证做限流，但没给数值，也没说
-   按调用方还是按目标设备计数。这属于部署策略，本服务给一个默认值即可，除非有别的偏好。
+1. ~~**客户端侧的密码学放哪。**~~（2026-10-01 定：**(a) 内嵌进 `connectx`，与官方 SDK 同向**。
+   与 [TODO1.md](../TODO1.md) 的 `D4` 是同一个问题——X3DH-like、Double Ratchet 以及 P6 的
+   MLS 都在设备侧跑。依据是官方 SDK 自己的走向：
+
+   - 官方 Rust SDK 明写群 MLS **是库调用、不是 `anp-mls` 子进程调用**（`rust/README.md`
+     L33）；同段说 MLS state 放在 `anp::group_e2ee::storage` 的 store 实现后面，
+     "**rather than a subprocess or CLI JSON command surface**"（L37–38）。
+   - 官方 monorepo 里 MLS **只**存在于 Rust crate `anp::group_e2ee`（依赖 `openmls 0.8.0` +
+     `openmls_sqlite_storage`）；Python / TS / Dart / Java 四套 SDK **都没有** MLS 实现。
+   - Go SDK 只剩 `ExecProvider`，驱动已被移除的 `anp-mls` 一次性二进制；于是 `anp-cli`
+     的群组 E2EE 至今不可用（`anp-cli/docs/implementation-status.md:31`）。
+     **这是"链不上库"的代价，是反面教材，不是可效仿的形态。**
+   - 库化之后的串行化靠**文件锁**（`rust/src/group_e2ee/storage.rs` 的 `StateLock` /
+     `state_locked`），不靠进程隔离——所以"一处落盘还是两处"的问题本来就只有一个答案：
+     **一处，客户端进程。**
+
+   照记代价：官方 **TS SDK 没有 `group_e2ee`**，`connectx` 走 (a) 需要自己写 Rust crate →
+   Node 的 napi 绑定。**这条不影响 v1**——P5 / P6 的客户端密码学 v1 都不做。
+2. ~~**限流的形状**~~（2026-10-01 定：本服务给默认值。§7.3 L598 只要求"按 hop / service 级
+   认证限流"，没给数值，属部署策略。默认＝按**调用方 DID**计数的令牌桶，数值走配置，
+   给一个保守默认；跨域时外层 hop 认证已提供调用方身份，同域时用 `meta.sender_did`）。

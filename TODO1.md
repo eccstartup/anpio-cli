@@ -244,27 +244,23 @@
     注册 code point**（§6.3.1 L430、§20 L2457）——**决定 P6 能不能对外声明**
     （`anp.get_capabilities` 里不得作为稳定 Profile 出现）；群 DID 文档未发布（同 C11）
 
-## D. 待用户裁定
+## D. 裁定留档
 
-- D2 P6 发布前置：MLS `ExtensionType 0xF0A1` 的 IANA 注册（不在本仓库，但会挡住 P6）。
-  §6.3.1 L430 把话说得很重——**ANP 在发布 v2 前 MUST 公布稳定的注册 code point**，
-  改这个草案值属于 breaking draft revision；§20 L2457 把它列为待建注册表第 5 项。
-  **它决定 P6 能不能在 `anp.get_capabilities` 里作为稳定 Profile 出现**，
-  与 C13 的代码无关（代码可以先写，声明不能先给）。见
-  [e2ee-group.md](docs/design/e2ee-group.md) §13
-- D4 客户端侧的密码学库放哪（C12 就已经有影响——P5 的 X3DH-like 与 Double Ratchet 同样
-  在设备侧；C13 的 MLS 更重）。规范不点名实现，只要求
-  MLS 1.0 语义 + 套件 `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`；服务端一行不碰
-  MLS（P6 L146 / L1266 的 MUST NOT）。两选：**(a)** 内嵌进 `connectx`（Rust 库走
-  napi / wasm 绑进 Node）；**(b)** 另起一个本地进程/库持有密码学状态，`connectx` 只收发。
-  区别是"设备私钥 + 会话/Ratchet 状态"是一处落盘还是两处。取舍另见
-  [e2ee-direct.md](docs/design/e2ee-direct.md) §9.1
-
-- D5 被移除 leaf 队列里**已入队的应用信封**：§12.6 L1512 给了两个都合规的选项——
-  **(a)** 按序投完（被移除设备仍持有那些信封的 epoch 密钥，能读到被移除前最后几条）；
-  **(b)** 按部署策略取消全部，立即投最终通知。设计选了 (a)，因为对用户更诚实；
-  改 (b) 只动队列收尾逻辑。**这是产品取舍，不是技术限制**，见
-  [e2ee-group.md](docs/design/e2ee-group.md) §14.2
+- ~~D2 P6 发布前置：MLS `ExtensionType 0xF0A1` 的 IANA 注册~~（2026-10-01 定：**照抄官方
+  SDK 的位置**。Rust crate 已把这条做成显式门禁 `ErrP6V2PublicReleaseBlocked`
+  ——"blocked until the draft MLS extension has a stable registered codepoint"
+  （`rust/src/group_e2ee/v2_errors.rs:84`；草案值 `v2_models.rs:13`）。**代码可写，
+  `anp.get_capabilities` 里 P6 不得作为稳定 Profile 出现**，直到上游公布稳定 codepoint。
+  见 [e2ee-group.md](docs/design/e2ee-group.md) §13）
+- ~~D4 客户端侧的密码学库放哪~~（2026-10-01 定：**(a) 内嵌进 `connectx`**，与官方 SDK 同向。
+  官方明写群 MLS 是"库调用、**不是** `anp-mls` 子进程调用"（`rust/README.md` L33–38），
+  且 MLS 只存在于 Rust crate `anp::group_e2ee`（openmls 0.8.0），Python/TS/Dart/Java 都没有；
+  Go 侧靠已被移除的一次性二进制驱动，于是 `anp-cli` 群组 E2EE 至今不可用——反面教材。
+  代价：TS 侧无现成绑定，`connectx` 要自己写 Rust crate → Node 的 napi 绑定；不影响 v1。
+  见 [e2ee-direct.md](docs/design/e2ee-direct.md) §9.1）
+- ~~D5 被移除 leaf 已入队的应用信封~~（2026-10-01 用户定：**(a) 按序投完**。用户补一句事实
+  ——**已经读到过的消息无法收回**，最终通知只能宣告"你已被移除"。产品取舍，不是技术限制。
+  见 [e2ee-group.md](docs/design/e2ee-group.md) §14）
 
 ~~D1 包名：`@agentx/*`~~（2026-10-01 定：`@agentx/core` / `@agentx/cli` / `@agentx/service`，用户说后面可改）
 
