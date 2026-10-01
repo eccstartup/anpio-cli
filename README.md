@@ -39,8 +39,9 @@ ANP 里有两个可以被"自己搭一个"的服务，本仓库只做第二个�
 
 1. [docs/design/cli.md](docs/design/cli.md) —— `connectx` 命令面、CAIP-10 接入、与 SDK 的边界
 2. [docs/design/message-service.md](docs/design/message-service.md) —— `AgentXAgent` 架构、方法面、存储、联邦
-3. [docs/design/vendored-core.md](docs/design/vendored-core.md) —— `packages/core` 保留/删除/新增清单
-4. [TODO1.md](TODO1.md) —— 活动台账（只记还剩什么）
+3. [docs/design/realtime.md](docs/design/realtime.md) —— 接收侧：订阅流、游标、无空洞无重复
+4. [docs/design/vendored-core.md](docs/design/vendored-core.md) —— `packages/core` 保留/删除/新增清单，以及 CAIP-10 留的口子
+5. [TODO1.md](TODO1.md) —— 活动台账（只记还剩什么）
 
 ## 规范出处
 

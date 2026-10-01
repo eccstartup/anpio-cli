@@ -18,8 +18,9 @@
 
 1. **命令面宁少勿多**（旧仓库 `TODO2.md` Part D 的判据）：无头可脚本化 + 任务级 + 对 agent 有价值，
    三条全中才开一个命令；没有第二种形态的动作不单开子命令。
-2. **`direct.incoming` 推送不进 CLI**。它是服务端到 agent 端点的长连接，属 SDK / agent 运行时。
-   CLI 走**拉**（`msg inbox`）。这条与第 4 节的"待定"冲突，见那里的取舍。
+2. **推送只走 `msg listen` 一条路**。它是 CLI 里**唯一**的常驻进程，
+   契约（输出 / 退出码 / 信号 / `--once`）单独在 [realtime.md](realtime.md) 里定死。
+   其余命令一律是"一次调用、一个结果"。
 3. **CLI 不从缓存里读回 token**。`login` 每次重新签名 + POST 然后覆盖缓存；
    因此**不设 `logout`**——没有一条命令会消费被清掉的缓存。
 
@@ -76,6 +77,7 @@ connectx anp sign  --target <uri> [--method <verb>]
 ```
 connectx msg send --to <did> (--text <s> | --body <json>) [--content-type <type>]
 connectx msg caps <did>
+connectx msg listen [--device <id>] [--since <seq>] [--ack] [--once]
 connectx msg inbox [--since <cursor>]              # 扩展面
 connectx msg show <message_id>                     # 扩展面
 connectx msg read <message_id> | --all             # 扩展面
@@ -102,7 +104,9 @@ connectx msg read <message_id> | --all             # 扩展面
 **`msg caps`** 打 `anp.get_capabilities`，打印对方支持的 `profiles[]` / `securityProfiles[]`。
 它在命令面上的价值是"发之前先问一句"，也是排查 `anp.unsupported_profile` 的唯一手段。
 
-**`msg inbox` / `show` / `read` 是扩展面**，见第 5 节——规范**没有**定义它们。
+**`msg inbox` / `show` / `read` / `listen` 是扩展面**，见第 5 节——规范**没有**定义它们。
+`msg listen` 的完整设计单独一份：[realtime.md](realtime.md)。它是 CLI 里**唯一**的常驻进程，
+契约（NDJSON / 退出码 / 信号 / `--once` 逃生舱）都在那里定死。
 
 ### 3.4 `group` —— 群组（新增）
 
@@ -157,25 +161,28 @@ connectx anp login --wallet web3 --provider <module> --address 0x… --chain-id 
   非规范拼法**必须**被拒为 `invalid_did`（§4.2），否则同一账户有两个标识符，
   会打穿重放缓存的键。
 
-### ⚠ 待定：CAIP-10 身份能不能当消息的收发地址？
+### CAIP-10 身份能不能当消息的收发地址？（2026-10-01 裁定：v1 不做，但留口子）
 
-**结论倾向：不能，至少 v1 不做。**
+**结论：v1 不做。但接口必须先立着，不许把以后的路堵死。**
 
 理由：提案自述适用范围是"agent 与 relying party 之间的**请求认证**"（提案 L11），
 不是消息定址。而 `direct.send` 的投递模型要求**收件人方**能从发送方的 `sender_did`
 解析出对方的入口服务才能回信；CAIP-10 账户 id **不可解析**（§4.3 明令禁止解析），
 于是纯钱包身份的 agent 有 `sender_did` 但没有 ingress。
 
-三个可选出路，v1 建议都不做，只记在这里：
+用户的原话与难点记录：
 
-- (a) 消息 `meta` 里加 `x_reply_to` 扩展字段——但 P1 §12.1 规定未知核心 `meta` 字段
-  **MUST** 拒绝，只有 `x_` 前缀 MAY 忽略，所以这必须是一个**双方都认的扩展**，不是随便加的。
-- (b) 钱包身份另配一个 DID 做消息地址（两个身份，认证用 CAIP-10，收发用 DID）。
-- (c) `AgentXAgent` 兼做 DID 托管——与"DID service 是 `awiki-open-server`"的分工冲突，不建议。
+> ANP 是在不断兼容的，所以关于 CAIP-10 的也会不断兼容，但是你可以现在不做，
+> 你不能以后兼容都做不了，你要把这个口子留在这里。**这里面最大的困难在于
+> ANP 是查询 DID server 的，而区块链是查询链上数据的。**
 
-**v1 的取舍**：`msg` / `group` 族**只接受 DID**；`--wallet web3` 在 `msg` 族上直接拒绝，
-错误码 `caip10_has_no_ingress`，消息里写清原因并指向 (b)。用户若要用钱包身份收发，
-走 (b)。
+这个口子的具体形状（可插拔的 `ServiceLocator` / `KeyResolver`、三种 `TrustAnchor`、
+以及"调用点不许判类型"的硬约束）写在
+[vendored-core.md](vendored-core.md) §6。
+
+**v1 的取舍**：`msg` / `group` 族**只接受 DID**，账户 id 被拒，
+错误码 `caip10_has_no_ingress`，消息里写清原因并指向"另配一个 DID 做消息地址"。
+**但拒绝发生在 locator 层，不是命令层的 `isDid()` 判断**——后者会把口子堵死。
 
 ## 5. 扩展面：规范没有定义的那一半
 
@@ -210,28 +217,20 @@ message.get_batch
 
 | 不做 | 理由 |
 |---|---|
-| `msg listen`（订阅 `direct.incoming`） | 长连接，属 SDK / agent 运行时。**见下方取舍** |
 | `connectx logout` | 没有一条命令会消费被清掉的缓存 |
 | `project init` / `project generate` | 脚手架，不是 ANP 协议 |
 | `--zk*` 全部 | 用户裁定不要 ZK |
 | `msg send --wallet web3` | 见第 4 节待定项 |
 | 本地 bearer token 那条路 | 规范里它只是**可选优化**，且 **MUST NOT** 替代 `origin_proof`（P3 §9.5）。CLI **始终**签名，于是对任何符合规范的服务都能用 |
 
-### ⚠ 待定：`msg listen` 要不要进命令面
+### `msg listen`（2026-10-01 裁定：做）
 
-第 1 节刚说"长连接不进 CLI"，但一个不能收消息的消息客户端是半个客户端。
-这正是那条判据第一次遇到反例。
+旧仓库的判据是"长连接不进 CLI"，而这是它第一次遇到反例。用户裁定**要做**，
+按 Signal / 微信那类 IM 服务的模型做——完整设计在 [realtime.md](realtime.md)。
 
-两种处理，**建议先按 A 做，等真有需求再改**：
-
-- **A（建议）**：v1 不做。CLI 只拉（`msg inbox`），推送留给 SDK。
-  agent 的运行循环里，收消息本来就是长驻进程的活，CLI 每次调用都是新进程。
-- **B**：加 `msg listen`，输出 NDJSON 一行一条，复用 `anp login` 已有的
-  "终端给卡片 / 管道给状态流"两套渲染器（`login-view.ts`）。Ctrl-C 退出，退出码 0。
-
-选 B 的代价不是实现，而是**它把 CLI 从"一次性命令"变成"常驻进程"**，
-之后 `--json` / 退出码 / 信号处理的契约都要按常驻进程重新定一遍。
-旧仓库的判据是在有反例之前定的，反例成立时应该改判据——但改判据要有真实需求撑着。
+改判据的代价已经在那份文档里付清：`msg listen` 是 CLI 里唯一的常驻进程，
+它的输出（TTY 给人读 / 管道给 NDJSON）、退出码、信号处理、以及
+`--once` 这个"退回一次性命令"的逃生舱，全部单独定死，不污染其余命令的契约。
 
 ## 7. 输出与退出码契约
 

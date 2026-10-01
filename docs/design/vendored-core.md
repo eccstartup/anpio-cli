@@ -89,6 +89,7 @@
 | `verify.ts` | 服务端侧：同一套的逆运算 + `keyid` 归属校验（`keyid` 所属 DID 必须等于 `meta.sender_did`，且该 keyid 必须被 `authentication` 授权） |
 | `discovery.ts` | 从 DID 文档取唯一 `ANPMessageService` 条目（`id` / `type` / `serviceEndpoint` / `serviceDid` / `profiles[]` / `securityProfiles[]`），校验"每个 DID 文档只能有一个可跨域 ANPMessageService" |
 | `idempotency.ts` | 幂等键 `(sender_did, target.did, method, operation_id)` 的规范化与比较 |
+| `locator.ts` | **身份 → 服务条目 / 验证密钥** 的可插拔接口。见 §6 |
 
 `sign` / `verify` 是**同一份规范化逻辑的两个方向**，必须同文件相邻或共享一个 `canonical.ts`——
 分开写两份 JCS 是这类实现最经典的 bug 来源。
@@ -100,3 +101,78 @@
 
 因此 `packages/core` 里凡是"照搬"的文件，**保留原注释与规范行号引用**——
 回迁时靠它们比对，别重写成一套自己的说法。
+
+## 6. 留的口子：身份解析必须是可插拔的
+
+**用户裁定（2026-10-01）**：CAIP-10 与消息的接合现在**不做**，
+但**不能把以后兼容的路堵死**——"你要把这个口子留在这里"。
+
+### 6.1 难点（原话记录）
+
+> ANP 是查询 DID server 的，而区块链是查询链上数据的。
+
+这句话点出的是**两套不同的信任根**，不只是两个不同的解析函数：
+
+| | `did:wba` / `did:web` | CAIP-10 |
+|---|---|---|
+| 身份材料从哪来 | **取**（DID server 的 `did.json`） | **随请求内联带过来**（§4.3 禁止解析） |
+| 信任根 | 标识符里的指纹，或域 + TLS | **地址由公钥派生**（`derive(pk) == account_address`） |
+| 有没有"服务发现" | 有——文档里的 `service` 条目 | **没有**。账户 id 上没有任何地方可以问入口服务 |
+| 更新 | ANP-03 更新链 | **无**。换钥即换账户 |
+
+所以缺口不在"怎么验签"（提案已经把认证那半边写完了），
+而在**第二条**：一个纯钱包身份的 agent，`sender_did` 有了，**ingress 没有**。
+
+### 6.2 口子长什么样
+
+core 里**不得**出现"身份就是 DID 文档"这个假设的硬编码。把两件事抽成接口：
+
+```ts
+/** 身份 → 它宣告的服务条目（可能为空）。 */
+interface ServiceLocator {
+  locate(identity: string, opts?: LocateOptions): Promise<ServiceEntry[]>
+}
+
+/** 身份 + keyid → 用来验签的密钥，以及**这份材料的信任来自哪里**。 */
+interface KeyResolver {
+  resolve(identity: string, keyid: string, opts?: ResolveOptions): Promise<ResolvedKey>
+}
+```
+
+`ResolvedKey` 必须能表达**材料是怎么可信的**，因为两种绑定不可比：
+
+```ts
+type TrustAnchor =
+  | { kind: 'fetched'; url: string }        // did:web：域 + TLS
+  | { kind: 'fingerprint'; thumbprint: string } // did:wba：标识符承诺密钥
+  | { kind: 'derived-address'; address: string } // CAIP-10：地址由公钥派生
+```
+
+第三条**必须**要求"先用它做派生校验、再验签"，顺序不能反（提案 §5.1）。
+
+v1 只提供 `DidServiceLocator` 与 `DidKeyResolver` 两个实现。**接口先立着，
+实现只有一个**——这不是过度设计，是用户明确要留的那道门。
+
+### 6.3 硬约束：调用点不许判类型
+
+**`packages/cli` 与 `packages/service` 里不得出现"这是 DID 还是账户 id"的分支。**
+一旦有 `if (isDid(x))`，门就关上了。**所有身份都交给 locator / resolver**，
+由它们决定怎么处理。
+
+这条要写进代码评审清单。它是这个口子唯一会被堵死的方式——
+接口立了但调用点绕过去直接 `resolveDidDocument`，等于没立。
+
+### 6.4 现在做还是以后做
+
+**抽象现在做，实现以后做。** 判断依据：
+
+- 立接口 + 让调用点走接口：**便宜**。不增加行为，只是不改死。
+- 实现链上 locator：**贵**，而且现在没有可依据的东西——规范里没有"链上注册表"这回事，
+  它会是又一个自造概念（与 zk / CAIP-10 提案同一类，需要先回提上游）。
+- 中间那条"让钱包身份能收发消息"的临时路（`x_` 回复地址扩展）**也不做**：
+  P1 §12.1 规定未知核心 `meta` 字段 MUST 拒绝、只有 `x_` 前缀 MAY 忽略，
+  所以它必须是一个**双方都认**的扩展，单方面加等于单方面不能用。
+
+⇒ v1 的 `msg` / `group` 族只接受 DID（[cli.md](cli.md) §4）；
+账户 id 在这两族上被拒，错误码 `caip10_has_no_ingress`，
+**但拒绝发生在 locator 层，不是命令层的 `isDid()` 判断**——这就是口子。

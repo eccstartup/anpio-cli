@@ -47,6 +47,8 @@
    POST /anp-im/rpc │  HTTP 层（node:http）                │
    ────────────────►│   · 单请求，禁 batch                 │
                     │   · 读 body / content-digest 校验    │
+   GET /anp-im/     │                                      │
+   stream (WS) ────►│   · 升级后每帧一个 JSON-RPC 信封      │
                     └──────────────┬──────────────────────┘
                                    ▼
                     ┌─────────────────────────────────────┐
@@ -356,6 +358,19 @@ P3 §5.4 规定这些 **MUST NOT** 成为线协议语义——它们可以存在
 
 **不得出现设备 selector。**
 
+### 8.3 订阅路（WebSocket）
+
+上面 8.1 描述的是**服务端主动 POST 到 agent 端点**那条路，适合常驻服务型 agent。
+CLI 与所有在 NAT 后面的客户端走**订阅路**：客户端主动连上 `GET /anp-im/stream`，
+在同一连接上补齐（`sync.delta`）并接收实时通知。
+
+**传输不同，信封同一个**——控制面的校验 / 认证 / 幂等 / dispatcher 全部复用。
+订阅者注册表、游标语义、无空洞无重复的时序、背压，全部在
+[realtime.md](realtime.md)。
+
+两条路并存是刻意的：规范只规定了 `direct.incoming` 这个 Notification 的存在与 payload，
+**没规定它走什么传输**，所以这是实现自由。
+
 ## 9. 取件扩展面（规范未定义，本服务自定）
 
 规范在取件侧是空白的，且是刻意的：P3 §1 排除历史拉取 / 已读状态 / 内部同步，
@@ -459,6 +474,12 @@ agent 的 DID 文档里那条 `ANPMessageService` 服务条目是**发现链的�
 供 DID Service 在签发文档时嵌入。**这就是与 `awiki-open-server` 的接口**——
 本服务不写 DID 文档，只交出这段 JSON。
 
+**扩展能力不在那个条目里声明。** `profiles[]` / `securityProfiles[]` 只放规范定义的
+Profile 与安全模式——把 `inbox.*` / `sync.*` / 订阅流塞进去，就是在对客户端撒谎
+（一个只实现规范的服务会被误认为支持它们）。扩展能力另走一处，
+由 `GET /.well-known/anp-message-service.json` 的一个 `x_agentx` 块自报，
+并在订阅握手的 `stream.hello` 里再报一次（见 [realtime.md](realtime.md) §9）。
+
 ## 14. 配置
 
 ```
@@ -478,22 +499,23 @@ AGENTX_MAX_BODY         请求体上限，默认 1 MiB（附件走数据面，�
 
 **v1（先跑通规范面）**
 
-1. `packages/core/message/`：信封 + JCS + 签验（CLI 与服务端共用，**先做**）
+1. `packages/core/message/`：信封 + JCS + 签验 + locator（CLI 与服务端共用，**先做**）
 2. HTTP 层 + Envelope 校验 + `anp.get_capabilities` + `direct.send` + `direct.incoming`
 3. 幂等 + 存储（`idempotency` / `messages` / `outbox`）
 4. 取件扩展面（`inbox.get` / `inbox.mark_read` / 增量游标）
-5. `/.well-known/anp-message-service.json`
+5. **订阅路**：`GET /anp-im/stream` + 订阅者注册表 + 补齐与实时的无空洞时序
+6. `/.well-known/anp-message-service.json`
 
 **v2**
 
-6. P4 群组 + Group Host 语义（线性顺序、`group_state_version` / `group_event_seq`）
-7. P7 附件数据面
-8. P8 跨域（`serviceDid` 外层认证 + caller anchor + outbox 重试）
+7. P4 群组 + Group Host 语义（线性顺序、`group_state_version` / `group_event_seq`）
+8. P7 附件数据面
+9. P8 跨域（`serviceDid` 外层认证 + caller anchor + outbox 重试）
 
 **v3**
 
-9. P5 E2EE（prekey bundle + Mailbox）
-10. P6 群组 E2EE（KeyPackage 状态机 + Device Delivery Queue）
+10. P5 E2EE（prekey bundle + Mailbox）
+11. P6 群组 E2EE（KeyPackage 状态机 + Device Delivery Queue）
 
 **发布前置条件**（不是本仓库的活，但会挡住 P6）：P6 仍是候选状态，
 MLS `ExtensionType 0xF0A1` 待 IANA 注册（`README.md:10,34`；`06:98`）。
