@@ -4,6 +4,7 @@ import { runAgent } from './commands/agent'
 import { runDidStore, runAnp } from './commands/auth'
 import { runDid } from './commands/did'
 import { runMsg } from './commands/msg'
+import { runGroup } from './commands/group'
 import { cliVersion } from './version'
 import { acceptedFlags, argSlots, findCommand, findPage } from './help/commands'
 import {
@@ -68,6 +69,12 @@ const OPTIONS = {
   since: { type: 'string' },
   ack: { type: 'boolean', default: false },
   once: { type: 'boolean', default: false },
+  // group — `--name` is the `display_name` of the group being created (P4 §7.4 L405) and
+  // `--policy` is its `group_policy`, which P4 §8.1.2 L621 makes MUST. The flag exists
+  // because that object has no other way in: without it every group this CLI creates
+  // carries the default policy in `group.ts`, including its `admission_mode`.
+  name: { type: 'string' },
+  policy: { type: 'string' },
   // session store — the token cache written by `login`. On by default, so declared as
   // `--no-save-session`; `--save-session` is unknown.
   'no-save-session': { type: 'boolean', default: false },
@@ -259,6 +266,11 @@ async function main(argv: string[]): Promise<number> {
       // extra argument this family does not take, so `runMsg` sees only its own — and it
       // takes them as a list because `msg read` accepts more than one id.
       await runMsg(v, sub, positionals.slice(2))
+      return 0
+    case 'group':
+      // P4's own family: a group is addressed by its `group_did`, which is a DID
+      // document like any other, so the same discovery and the same signature reach it.
+      await runGroup(v, sub, positionals.slice(2))
       return 0
     case 'agent':
       // The store's current agent: which id the other commands act as when neither

@@ -38,9 +38,8 @@
   `auth.ts` 的整段 `runZkLogin` 与它的属性/描述符助手、`help/commands.ts` 的 Zero-knowledge 旗标组与 `project` 页。
   `SessionWrite` 的 `uncacheable` 与 `LoginCard` 的 `note` / `identity.label` 随之删除：它们的唯一取值来源就是 ZK。
   `packages/cli/package.json` 本就已是 `@agentx/cli` + 四个运行时依赖，无需再改）
-- B3 `help/commands.ts` 加 `msg` / `group` **两族**（页面数据，见 [cli.md](docs/design/cli.md) §3）。
-  2026-10-01：`msg` 族按子命令逐条落地，`send` / `caps` / `inbox` / `show` / `read` /
-  `listen` 六页都已进来；**`group` 一族随 B6**
+- ~~B3 `help/commands.ts` 加 `msg` / `group` **两族**（页面数据，见 [cli.md](docs/design/cli.md) §3）~~
+  （2026-10-01：两族共 12 页）
 - ~~B4 `msg send`：发现 → 构造 → 签名 → POST → 报错，全链路~~（2026-10-01。含 P1 §10.3 L726 与
   P3 §5.5 L206–208 要求的 `anp.did_superseded` 重试）
 - ~~B5 取件三命令 `msg inbox` / `show` / `read`~~（2026-10-01。扩展面的接口定义落进
@@ -49,7 +48,9 @@
   （P1 §6.2.2 L277 要求 `profile` 是 MUST 且是"唯一解释"，规范 Profile 解释不了它）；
   认证走 `origin_proof`；`message.get_batch` 收 `message_ids` 而非 awiki 的 `event_ids`。
   **awiki 的取件面够不着**（它要 bearer，CLI 不持 bearer），cli.md §5 的说法已随之更正）
-- B6 `group` 六条命令
+- ~~B6 `group` 六条命令~~（2026-10-01。`meta.target` 两档（`create` 打服务、其余打群）、
+  `--policy` 的形状检查、以及两处刻意留白——不给 `group.add` / `group.remove`、群族不写
+  `did_superseded` 重试——理由与出处都在 [cli.md](docs/design/cli.md) §3.4）
 - ~~B7 `msg` 族拒绝账户 id，错误码 `caip10_has_no_ingress`~~（2026-10-01：拒绝点确在
   `DidServiceLocator.locate()`，命令层无判断；`caps` 侧有测试钉住）
 - ~~B8 对端不支持扩展面时报 `unsupported_extension`~~（2026-10-01：读对端的答复判定，

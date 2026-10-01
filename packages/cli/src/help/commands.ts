@@ -798,6 +798,190 @@ export const COMMANDS: CommandSpec[] = [
     ],
   },
   {
+    name: 'group',
+    purpose: 'make a group on a message service, read what it holds, join or leave it, and send to it',
+    // The group the `msg` family is in, and deliberately not the command `msg` itself: a
+    // family is named after the peer it talks to, and both of these talk to an
+    // ANPMessageService — one to a mailbox, the other to a group. What separates them is
+    // the thing being addressed, and a group is addressed by its own `group_did`, which a
+    // flag would have to spell again on every page (docs/design/cli.md §3.4).
+    group: 'Message service',
+    index: [
+      { form: 'group create', brief: 'ask a message service to make a group' },
+      { form: 'group info <group_did>', brief: 'print a group as its document describes it' },
+      { form: 'group members <group_did>', brief: 'list the members of a group' },
+      { form: 'group join <group_did>', brief: 'join a group as the identity in use' },
+      { form: 'group leave <group_did>', brief: 'leave a group as the identity in use' },
+      { form: 'group send <group_did>', brief: 'deliver one message to a group' },
+    ],
+    pages: [
+      {
+        sub: 'create',
+        purpose: 'ask the message service of the identity in use to make a group and answer for it',
+        usage: ['group create [options]'],
+        options: [
+          {
+            title: 'Group',
+            rows: [
+              {
+                signature: '--name <name>',
+                summary: 'the display name of the group being created',
+              },
+              {
+                signature: '--policy <json>',
+                summary:
+                  'the group policy as a JSON object, merged over the one the profile recommends',
+                fallback: 'default: the recommended structure, with admission_mode open-join',
+              },
+            ],
+            note:
+              'The policy is required by the profile, so a create without --policy carries the default above. ' +
+              'The merge is shallow: permissions is named whole or not at all.',
+          },
+          KEY_CLI,
+          derivedHostPolicy('the identity in use'),
+          STORE,
+          OUTPUT,
+        ],
+        output: [
+          'The group DID, the state version, when it was created, the creator, and the name if one was given.',
+          'The group is made by the message service that answers for the identity in use, and that service hosts it: the group DID in the answer is the address every other group command takes.',
+          'The request names that service as its target rather than a group, because no group exists to name yet. A service that publishes no service DID cannot be asked, and that is reported rather than guessed at.',
+        ],
+        exits: [
+          { code: '0', meaning: 'created' },
+          { code: '1', meaning: 'failed: refused, no message service found, or rejected input' },
+        ],
+        examples: [
+          'group create --name "contract team"',
+          `group create --policy '{"admission_mode":"admin-add"}'`,
+        ],
+        see: 'cli/api/group.md',
+      },
+      {
+        sub: 'info',
+        purpose: 'print what a group is and how it stands, read from the group document and its host',
+        usage: ['group info <group_did> [options]'],
+        args: [{ name: 'group_did', required: true }],
+        options: [KEY_CLI, derivedHostPolicy('the group DID'), STORE, OUTPUT],
+        output: [
+          'The group DID, its state version, its profile, the member count, and the policy when the service returns one.',
+          'The group is reached by resolving the group DID itself: a group is a DID document like any other, and the host answering for it is the message service entry in that document. There is no group-specific lookup.',
+          'The policy comes back only to a caller entitled to see it, so its absence is printed as the answer the service gave rather than as a missing field.',
+        ],
+        exits: [
+          { code: '0', meaning: 'printed' },
+          { code: '1', meaning: 'failed: no message service found, refused, or a malformed answer' },
+        ],
+        examples: ['group info did:wba:example.com:group:contract-team'],
+        see: 'cli/api/group.md',
+      },
+      {
+        sub: 'members',
+        purpose: 'list the members of a group, one line each',
+        usage: ['group members <group_did> [options]'],
+        args: [{ name: 'group_did', required: true }],
+        options: [KEY_CLI, derivedHostPolicy('the group DID'), STORE, OUTPUT],
+        output: [
+          'The number of members, then one line per member: status, role, DID, and the join time when the service returns it.',
+          'This is group info with the member list asked for, not a method of its own. A service that returns a roster only to a caller entitled to it answers with an empty list for anyone else, and that is printed as it arrived.',
+        ],
+        exits: [
+          { code: '0', meaning: 'printed' },
+          { code: '1', meaning: 'failed: no message service found, refused, or a malformed answer' },
+        ],
+        examples: ['group members did:wba:example.com:group:contract-team'],
+        see: 'cli/api/group.md',
+      },
+      {
+        sub: 'join',
+        purpose: 'join a group as the identity in use',
+        usage: ['group join <group_did> [options]'],
+        args: [{ name: 'group_did', required: true }],
+        options: [KEY_CLI, derivedHostPolicy('the group DID'), STORE, OUTPUT],
+        output: [
+          'The group DID, the member DID, the membership status, and the state version.',
+          'The member is the identity this run signs as, which the request carries as its sender; no flag names one. The policy of the group decides whether the join is admitted at once or held as a request.',
+        ],
+        exits: [
+          { code: '0', meaning: 'joined, or the request was accepted' },
+          { code: '1', meaning: 'failed: refused, no message service found, or rejected input' },
+        ],
+        examples: ['group join did:wba:example.com:group:contract-team'],
+        see: 'cli/api/group.md',
+      },
+      {
+        sub: 'leave',
+        purpose: 'leave a group as the identity in use',
+        usage: ['group leave <group_did> [options]'],
+        args: [{ name: 'group_did', required: true }],
+        options: [KEY_CLI, derivedHostPolicy('the group DID'), STORE, OUTPUT],
+        output: [
+          'The group DID, the DID that left, the membership status, and the state version.',
+          'Leaving is the one group operation whose subject can only be the caller: the request names the leaver by its sender, so there is no way to point at another member.',
+        ],
+        exits: [
+          { code: '0', meaning: 'left' },
+          { code: '1', meaning: 'failed: refused, not a member, or no message service found' },
+        ],
+        examples: ['group leave did:wba:example.com:group:contract-team'],
+        see: 'cli/api/group.md',
+      },
+      {
+        sub: 'send',
+        purpose: 'deliver one message to a group, through the message service that hosts it',
+        // Two usage lines rather than one with an alternation, for the reason `msg send`
+        // states: a reader copies a line, and an alternation is not a thing to copy.
+        usage: [
+          'group send <group_did> --text <string> [options]',
+          'group send <group_did> --body <json> [options]',
+        ],
+        args: [{ name: 'group_did', required: true }],
+        options: [
+          {
+            title: 'Message',
+            rows: [
+              { signature: '--text <string>', summary: 'the message body, as text' },
+              { signature: '--body <json>', summary: 'the message body, as a JSON object' },
+              {
+                signature: '--content-type <type>',
+                summary: 'media type the body is sent as',
+                fallback: 'default: text/plain with --text, application/json with --body',
+              },
+              {
+                signature: '--operation-id <id>',
+                summary:
+                  'the idempotency key for the message, and its message id with it. Reuse it to send the same message again after a failure',
+                fallback: 'default: a random id',
+              },
+            ],
+            note:
+              'A message carries exactly one body, so --text and --body are alternatives rather than companions. ' +
+              'The content type decides which of the two the profile has a place for: text/plain pairs with --text, ' +
+              'application/json with --body. The same rule holds for a group message and a direct one.',
+          },
+          KEY_CLI,
+          derivedHostPolicy('the group DID'),
+          STORE,
+          OUTPUT,
+        ],
+        output: [
+          'The group DID, the message id, the position of the message in the group event order, the state version, and when the service accepted it.',
+          'The message is addressed to the group, not to its members: the service fans it out to the members, and their services hold the copies. A member that was added after the message was sent does not receive it.',
+        ],
+        exits: [
+          { code: '0', meaning: 'the service accepted the message' },
+          { code: '1', meaning: 'failed: refused, not a member, or rejected input' },
+        ],
+        examples: [
+          'group send did:wba:example.com:group:contract-team --text "ship it"',
+          `group send did:wba:example.com:group:contract-team --body '{"kind":"vote"}'`,
+        ],
+        see: 'cli/api/group.md',
+      },
+    ],
+  },
+  {
     name: 'agent',
     purpose: 'choose which stored agent the commands act as when no flag names one',
     // With `did`, not `version`: this reads and writes the identity store (`identity/paths`,

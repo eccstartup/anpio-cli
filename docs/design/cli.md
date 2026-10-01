@@ -111,17 +111,47 @@ connectx msg read <message_id>... | --all                # 扩展面
 ### 3.4 `group` —— 群组（新增）
 
 ```
-connectx group create [--name <s>]
+connectx group create [--name <s>] [--policy <json>]
 connectx group info    <group_did>
 connectx group members <group_did>
 connectx group join    <group_did>
 connectx group leave   <group_did>
-connectx group send    <group_did> (--text <s> | --body <json>)
+connectx group send    <group_did> (--text <s> | --body <json>) [--content-type <type>]
 ```
 
 群组**单开一族而不是挂进 `msg`**：它的定址对象不同（群有自己的 `group_did` 和自己的 host），
 发的是 `group.send` 而不是 `direct.send`，这与旧仓库"按对端分族"的惯例一致
 （`did` 与 `anp` 同属身份却也分了两族，理由相同）。
+
+**定址：`group.create` 之外一律解群自己的 DID。** P2 L546–548 把 Agent 与 Group 收敛到
+同一条发现路径——群的 DID 文档里就有一条自己的 `ANPMessageService` 条目，所以没有"群专用发现"
+可写。
+
+**`meta.target` 是这一族里唯一的变量**，P4 自己分了两档：
+
+| 方法 | `meta.target` | 出处 |
+|---|---|---|
+| `group.create` | `{kind:"service", did: <ANPMessageService.serviceDid>}` | §8.1.2 L624–625 |
+| 其余五个 | `{kind:"group", did: <group_did>}` | §8.2.2 L648–649、§8.9.2 L833–834 |
+
+`meta.target` 在 Signed Request Object 里，所以这是**签名内容而不是路由提示**：`group.create`
+是在请一个服务建群，此时还没有群可指。一个只服务本域、因此没发布 `serviceDid` 的服务
+（P2 §8.7 L508 把 `serviceDid` 定为**跨域**才必需）无法被这条命令合规地调用——CLI 直接报错，
+不去拿调用方自己的 DID 顶上，那等于替服务签一个它没做过的声明。
+
+**`--policy` 旗标存在的唯一理由：`body.group_policy` 是 MUST**（§8.1.2 L628），而这个对象
+没有第二条进入路径。不给就用车 `DEFAULT_POLICY`（§7.1 L313–328 推荐的形状逐字照抄，
+`admission_mode` 取 `open-join`）；给了就在它之上做**浅合并**。
+
+**刻意不给的两样东西，都记在这**：
+
+- `group.add` / `group.remove` 没有命令。命令面就是上面六条（§3.4 的形状），不再加动词。
+  代价是 CLI 建出的群不能靠 CLI 加人：因此 `DEFAULT_POLICY` 的 `admission_mode` 取 `open-join`
+  而不是 `admin-add`——后者会让这个群从命令行**无法被填充**。要另一种模式的部署自己传 `--policy`。
+- **群族没有 `anp.did_superseded` 重试**。P4 §8.12 L934 明说 `group.member_did_update`
+  **不是** JSON-RPC 方法（客户端必须收到 `-32601`），DID 连续性在群里是成员级、由宿主机驱动的；
+  P1 §10.3 L726 又把 1019–1021 限定在"所属 Profile 处理 DID 迁移的场景"。P4 没有为群 DID 本身
+  定义客户端路径，所以这里没有可重试的东西——`msg send` 的重试链不是被遗漏，是**不适用**。
 
 ### 3.5 `agent` / `version`（不变）
 
