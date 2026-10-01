@@ -45,12 +45,21 @@ ANP 里有两个可以被"自己搭一个"的服务，本仓库只做第二个�
 
 ## 规范出处
 
-引用行号以本机 checkout 为准：
+引用行号以本机 checkout 为准（已核对到 `v1.2` 标签）：
 
 | 简称 | 路径 | 版本 |
 |---|---|---|
-| ANP-02 / ANP-03 | `code/claude/AgentNetworkProtocol/chinese/vnext/`（分支 `release/0910`） | v1.2 |
-| ANP-09 P1–P9 | `code/claude/AgentNetworkProtocol/chinese/message/`（`main`） | main |
-| CAIP-10 提案 | `code/claude/AgentNetworkProtocol/proposals/anp-caip10-identity-proposal.md` | Proposal |
+| ANP-02 / ANP-03 / ANP-04 | `code/claude/AgentNetworkProtocol/chinese/` | **已发布 v1.2** |
+| ANP-09 P1–P9 | `code/claude/AgentNetworkProtocol/chinese/message/` | **已发布 v1.2 目录**；P6 仍为候选 |
+| CAIP-10 提案 | `code/claude/AgentNetworkProtocol/proposals/anp-caip10-identity-proposal.md` | Proposal（未发布） |
 
-消息部分**必须**读 `main:chinese/message/`，不是 `release/0910` 的 vNext——那是 ANP-02/03/04 的。
+**ANP 1.2 已经发布**，所以这两条都读**正式路径**：ANP-02/03/04 在 `chinese/` 根下，
+消息九篇在 `chinese/message/`。仓库里还留着 `chinese/vnext/`（以及
+`chinese/message/vnext/`），那是**下一轮修订的起点**、1.2 发布前的草案快照，不是引用对象
+——同一份 ANP-02 在 `vnext/` 里行号会整体差一行（文件头的状态块不同），照它引就会指出
+错误的位置。`main` 与 `v1.2` 在 `chinese/message/` 上目前没有正文差异，所以行号两边通用。
+
+一处**未发布**的东西要在阅读时记住：ANP-09 的 **P6（群组端到端加密）仍是候选**，
+它的 `anp.group.e2ee.v2` 卡在"注册一个稳定的 MLS `ExtensionType` code point"这道发布
+门槛上（规范仓库 README 的发布清单里该项未打勾）。C13 依赖 P6，因此 C13 落地前要再看
+一眼这个门槛是否已经跨过。CAIP-10 提案同理——它是提案，不是已发布规范。

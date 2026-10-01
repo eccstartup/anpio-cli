@@ -56,7 +56,14 @@ JSON-RPC（§14.1 的示例就是一个完整信封），`content_type` 是**业
 | 请求 | 鉴权 | 应答 |
 |---|---|---|
 | `PUT /anp-im/upload/{token}` | URL 里那个不可猜的 token | `200`（空体） |
-| `GET /anp-im/objects/{digest}` | `Authorization: Bearer {download_ticket}`（§9.5 L703–706） | `200` + 对象字节 |
+| `GET /anp-im/objects/{object_id}` | `Authorization: Bearer {download_ticket}`（§9.5 L703–706） | `200` + 对象字节 |
+
+**第二段的段名不是摘要，是 `object_id`。** §14.2 的示例里 `upload_uri` 落在
+`/upload/slot-70001`、`object_uri` 落在 `/objects/obj-abc`——两者是同一层的一对随机 id，
+**不是** `sha-256:<...>` 那种自证式路径。规范也没给别的选择：`create_slot` 的响应里就有
+`object_uri`（§10.2.3 L881–889），而那时字节还没上传，摘要根本不存在。于是 `object_uri`
+是**不透明定位符**：`objectUriFor()` 是铸它与取它这**同一份定义**，下载路由把 URL 的最后
+一段拿回来与行里的 `object_uri` 比。**字节仍按摘要寻址**（§4），只是那件事不进 URL。
 
 上传不需要 `origin_proof`，也不能要：`upload_uri` 是给普通 HTTP 客户端用的，
 `upload_headers`（§10.2.3 L892）指的是 HTTP 头，不是 JSON-RPC 的 `auth`。它的凭据就是
@@ -82,14 +89,18 @@ JSON-RPC（§14.1 的示例就是一个完整信封），`content_type` 是**业
 | 票据非法 / 已被作废 | `401` | `anp.attachment.download_ticket_invalid`（6007） |
 | 票据过期 | `410` | `anp.attachment.ticket_expired`（6009） |
 | 票据没绑到这个对象 | `403` | `anp.attachment.ticket_binding_mismatch`（6008） |
-| 摘要不在库里 | `404` | `anp.attachment.object_unavailable`（6012） |
+| 那个对象还没提交（或不在库里） | `404` | `anp.attachment.object_unavailable`（6012） |
 | PUT 的槽不存在 / 已废弃 | `404` | `anp.attachment.slot_not_found`（6000） |
 | PUT 的槽已过期 | `410` | `anp.attachment.slot_expired`（6001） |
 | PUT 超限 | `413` | `anp.attachment.object_too_large`（6003） |
 
-**6007 会永远开不了口。** §12 L1095 把它的含义写成"缺失、非法、**验签失败**、无法解析，
-或已被作废"——见 §7，v1 的票据是不透明令牌，没有签名可验。这一条与 P4 的 3002 同一种
-情况：留着一个发不出的码，比造一个场景去用上它诚实。
+**6007 只从两条路开口，而 §12 L1095 的措辞比这宽。** 规范把 6007 的含义写成"缺失、
+非法、**验签失败**、无法解析，或已被作废"——见 §7，v1 的票据是不透明令牌，没有签名
+可验，所以"验签失败"这一项在本服务里没有对应场景。真正会用上它的是另外两项：
+`download_tickets` 里查不到这张票（缺失），以及 `one_time` 的票已被兑换（已作废，
+`consumed_at` 非空）。§12 里**始终发不出**的是另外两个码——6004
+`unsupported_mime_type`（v1 不做类型白名单）与 6011 `decrypt_failed`（v1 只承载
+`none`）。这与 P4 的 3002 是同一种情况：留着一个发不出的码，比造一个场景去用上它诚实。
 
 ### 3.2 回给浏览器的 `Content-Type` 不用清单里的 `mime_type`
 
@@ -183,7 +194,7 @@ E2EE 承载下的清单归 C12 / C13，到那时要解决的就是"客户端怎�
 | # | 规范要求 | 本服务 |
 |---|---|---|
 | 1 | `meta.target.kind = "service"` | 方法表（`targetMode: 'service-scoped'`） |
-| 2 | `meta.target.did` = 由原始消息发送者 DID 解析出的 `serviceDid` | 同域消息就是这个值，`targetBindingHolds` 已在做 |
+| 2 | `meta.target.did` = 由原始消息发送者 DID 解析出的 `serviceDid` | 方法表只判 `kind`（`targetBindingHolds`），所以 `did` 这一项由 handler 自己比对（`attachments.ts` L172），不符 → 1014 |
 | 3 | `requester_did = meta.sender_did` | 正文校验（§10.5.2 L1008），不符回 1003 |
 | 4 | `(message_id, attachment_id, object_uri)` 的 Grant 存在 | 查表，无 → 6005 |
 | 5 | `message_security_profile` 与 Grant 一致 | 不一致 → 6006 |
@@ -228,18 +239,25 @@ SHA-256**（不存原值——它是一张 bearer 凭据，台账里不该有明
 有效期默认 **5 分钟**（§9.5 L696 的 SHOULD NOT 上限），`one_time`（§10.5.2 L1002）为真
 时下载一次即置 `consumed_at`。
 
-## 8. 存储增量（v4）
+## 8. 存储增量（v5）
 
 ```sql
 -- 上传槽，§10.1 L808–824 那张状态机
 CREATE TABLE attachment_slots (
   attachment_id TEXT NOT NULL, slot_id TEXT NOT NULL, owner_did TEXT NOT NULL,
-  upload_token TEXT NOT NULL, commit_token TEXT NOT NULL,
+  upload_token TEXT NOT NULL DEFAULT '', commit_token TEXT NOT NULL,
   object_encryption_mode TEXT NOT NULL, message_security_profile TEXT NOT NULL,
-  state TEXT NOT NULL,                 -- pending | uploaded | committed | aborted | expired
+  state TEXT NOT NULL,                 -- pending | uploaded | committed | aborted
   expires_at TEXT NOT NULL, object_uri TEXT, size INTEGER, digest TEXT, committed_at TEXT,
   PRIMARY KEY (attachment_id, slot_id)
 );
+-- 下载路由按 object_uri 反查槽位；也是唯一性约束——两个槽共用一个 object_uri
+-- 意味着一个对象有两个签发者。NULL 在 SQLite 的唯一索引里互不相等，旧行不撞。
+CREATE UNIQUE INDEX attachment_slots_object_uri ON attachment_slots (object_uri);
+-- 这条得是**部分索引**：迁移给旧行填的 upload_token 是空串，把空串也纳进唯一性，
+-- 文件里只要有第二行旧数据整个建表就失败；空串的语义本来就是"这行没有令牌"。
+CREATE UNIQUE INDEX attachment_slots_upload_token
+  ON attachment_slots (upload_token) WHERE upload_token <> '';
 
 -- 已提交的对象。路径由摘要推出，所以这张表是"这些字节存在"的索引，不是字节的容器
 CREATE TABLE attachment_objects (
@@ -267,9 +285,11 @@ CREATE TABLE download_tickets (
 );
 ```
 
-`attachment_slots` 是 message-service.md §7 那份草稿的同一张表，加两列
-（`upload_token`、`commit_token` 早就有，补 `upload_token`）。v3→v4 是四张表的新增加
-一列 `ADD COLUMN`，全部是 SQLite 原位能做的。
+`attachment_slots` 是 message-service.md §7 那份草稿的同一张表，v5 给它补上
+`upload_token`——数据面唯一的凭据（§3）。v4→v5 因此只有**一列**要 `ADD COLUMN`，
+同一个事务里先按 `ADD COLUMN ... DEFAULT ''` 补列、再走那张 `IF NOT EXISTS` 建表。
+那三张新表**不进迁移步骤**：`CREATE TABLE IF NOT EXISTS` 对新旧文件都是对的，写一遍
+等于把同一件事说两遍。但版本号仍然要走，否则 v4 写的文件读进来会被当成 v5。
 
 **过期不改行、不后台扫。** 槽与票据的过期都在**用的时候**判（`expires_at < now`），
 不写 `state = 'expired'`、不起定时任务：判定所需的全部信息已经在行里，扫一遍只会把

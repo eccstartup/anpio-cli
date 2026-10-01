@@ -1,6 +1,6 @@
 # TODO1 —— 活动台账
 
-设计文档见 [docs/design/](docs/design/)。本文件只记**还剩什么**，做完的划掉。
+设计文档见 [message-service.md](docs/design/message-service.md)（九份都在 `docs/design/`）。本文件只记**还剩什么**，做完的划掉。
 
 ---
 
@@ -184,23 +184,28 @@
   跨域 `keyid` 的解析基准，一个 fragment 会把"这个服务"悄悄变成"它的某个 key"。
   真机冒烟：well-known 200 且三个字段齐、`get_capabilities` 匿名 200、错 Profile 1001。
   service 262）
-- C9 P4 群组 + Group Host（线性顺序 / `group_state_version` / `group_event_seq`）
+- ~~C9 P4 群组 + Group Host（线性顺序 / `group_state_version` / `group_event_seq`）~~（2026-10-01。service 305）
   - ~~设计~~（2026-10-01：[groups.md](docs/design/groups.md)。定下的是几个规范没说话的地方——
     `group_did` 形状、群消息不写投递行、3002 没有产生路径、私有群缺省、merge patch 校的是
     合并后的对象、receipt 的 `proof` v1 不签。§7 的 `group_members` 随之补两列，schema 到 v3）
-  - 还剩：九条方法进方法表 + 成员状态机与权限判定 + 群消息 fan-out +
-    `group.state_changed`（含被移除者的"最后一封"）
-- C10 P7 附件数据面（Slot → PUT → commit → ticket → GET）
+  - ~~九条方法进方法表 + 成员状态机与权限判定 + 群消息 fan-out + `group.state_changed`
+    （含被移除者的"最后一封"）~~（2026-10-01。实现与设计共两处修正，都写在 groups.md：
+    `group.get_info` 的 proof 取 `(meta) => meta.sender_did !== undefined` 而不是 `false`；
+    schema 落 **v4**（v3 已被 `message_reads` 用掉），多两列 `messages.group_event_seq` /
+    `group_state_version` 供消息级重放答受理时快照）
+- ~~C10 P7 附件数据面（Slot → PUT → commit → ticket → GET）~~
   - ~~设计~~（2026-10-01：[attachments.md](docs/design/attachments.md)。定下的是几个规范没说话
     的地方——票据是不透明令牌、不签名；数据面用真 HTTP 状态码（§2.1 那条"一律 200"在数据面
-    不成立）；对象按摘要寻址放文件系统；6004 / 6007 / 6011 在 v1 没有产生路径；回环下
-    `object_uri` 允许 http，这是对 §7.5 L488 那条 MUST 的显式偏离；同域仍要求 `origin_proof`）
-  - 还剩：四条方法进方法表 + 上传槽状态机 + 两条数据面路由（含 HTTP 层的字节路）+
-    Grant 建在受理事务里（群路径与 C9 共用）+ 票据签发与下载校验
-  - **动手前先修**：`rpc/direct.ts` L18–21 / L65 把 P3 §6.2.5 L268 那条**单向**规则
-    （"content_type 是 application/json 时 MUST 用 payload"）读成了等号，P7 §6.1 L350
-    要求的 `application/anp-attachment-manifest+json` 会被 1003 拒掉；C9 写 `group.send`
-    正文校验时别把等号抄过去
+    不成立）；对象按摘要寻址放文件系统；6007 只从"查不到/一次性票已兑"两条路开口，6004 /
+    6011 在 v1 没有产生路径；回环下 `object_uri` 允许 http，这是对 §7.5 L488 那条 MUST
+    的显式偏离；同域仍要求 `origin_proof`）
+  - ~~四条方法进方法表 + 上传槽状态机 + 两条数据面路由（含 HTTP 层的字节路）+ Grant 建在
+    受理事务里（群路径与 C9 共用）+ 票据签发与下载校验~~（2026-10-01。附带的"动手前先修"
+    也一并做完：`rpc/direct.ts` 那条被读成等号的规则现在是 `payload.ts` 里的
+    `payloadFieldRequiredBy`，单向、`+json` 按后缀收）
+  - 还剩一个**产品取舍**待你定：`connectx` 要不要发/收附件的命令（见
+    [attachments.md](docs/design/attachments.md) §11）。服务端已满足 §13 L1117–1129 的
+    MTI 要求，没有对应命令面也合规——所以这不是阻塞项
 - C11 P8 跨域：`serviceDid` 外层认证 + **caller anchor 单点判断** + 并发投递
   - ~~设计~~（2026-10-01：[federation.md](docs/design/federation.md)。定下的是几个规范没
     说话的地方——外层认证按"有没有带 `Signature-Input`"触发；失败回 ANP-02 的 401 + `WWW-Authenticate` 而不是
@@ -284,3 +289,12 @@
 - E3 **加的评审清单**：CLI 与服务端里**不得出现 `isDid()` 之类的身份类型分支**
   （[vendored-core.md](docs/design/vendored-core.md) §6.3）
 - E4 端到端：`connectx msg send` → `AgentXAgent` → `connectx msg listen` 收到
+- ~~E5 文档站~~（2026-10-01：VitePress，`srcDir` 指仓库根，所以 README / 本文件 /
+  `docs/design/*.md` 是**同一份文件**的两种呈现；`vercel.json` + 根 `docs:dev|build|preview`。
+  改到三处**真的断了**的相对链接：`e2ee-direct.md` / `e2ee-group.md` 里 `../TODO1.md`
+  少了**一**层目录，`TODO1.md` 指向的是目录不是页面。剩下**只有一步要你做**：在 Vercel 上
+  连这个仓库——它要你的账号，我做不了）
+- ~~E6 说法对齐 ANP 1.2~~（2026-10-01：README 那张"规范出处"表还停在
+  `chinese/vnext/`（`release/0910`），现已按 v1.2 的正式路径改写——ANP-02/03/04 在
+  `chinese/` 根下，九篇消息在 `chinese/message/`；`vnext/` 降级为"下一轮修订的起点"。
+  顺带核到：ANP-02 的行号（L82/L98/L112/L143/L437）两种取法差一行，现已明确以正式路径为准）

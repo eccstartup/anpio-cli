@@ -100,8 +100,8 @@
 会**静默截断**，该 bug 在 24.16.0 与 26.1.0 才修。消息体是任意字节，这条不能忽略。
 `packages/core` 与 `packages/cli` 不受此限，仍可保持 ≥ 22.12（与旧仓库一致）。
 
-HTTP 层用 `node:http` 自己写路由：整个服务只有**两个**端点
-（JSON-RPC 控制面 + 附件数据面），引框架的收益是负的。
+HTTP 层用 `node:http` 自己写路由：服务一共只有**四条**路由（控制面、取件流、两段附件
+数据面），引框架的收益是负的。
 
 ### 2.1 路由与 HTTP 状态码
 
@@ -111,10 +111,13 @@ HTTP 层用 `node:http` 自己写路由：整个服务只有**两个**端点
 | `GET /anp-im/stream` | `101` 升级为 WebSocket |
 | `GET /anp-im/stream`，**不是**升级请求 | `426` + `Upgrade: websocket` |
 | `GET /.well-known/anp-message-service.json` | `200`，体是 §13 那个条目 |
-| `PUT <upload_uri>` | 数据面，附件对象字节（P7） |
-| `GET <object_uri>` | 数据面，凭票据取对象字节（P7） |
+| `PUT /anp-im/upload/{token}` | 数据面，附件对象字节（P7，[attachments.md](attachments.md) §3） |
+| `GET /anp-im/objects/{object_id}` | 数据面，凭票据取对象字节（P7，同上） |
 | 其余路径 | `404` |
 | 已知路径、方法不对 | `405` + `Allow` |
+
+数据面那两行**不**走 §2.1 的"一律 200"：它们没有 JSON-RPC 信封、客户端是普通 HTTP
+客户端，用真的是非 2xx 状态码；理由与那张码表在 [attachments.md](attachments.md) §3.1。
 
 `426` 那一行是给"方法对了、但没带升级头"的请求的：`405` 会去怪方法，而方法正是它唯一
 做对的地方（`http/server.ts` 的 `route()` 里写着同一句）。它由升级监听器拒绝后落到普通

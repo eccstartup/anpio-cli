@@ -241,7 +241,7 @@ DID** 去解析其公开 `ANPMessageService`，把 `attachment.get_download_tick
 
 ## 6. 存储增量
 
-只有一张表。C10 的 v4 落地后它是 v5，顺序无所谓，两张表互不依赖。
+只有一张表。C10 落地后当前是 v5，所以 C11 这张表会是 v6；两张表互不依赖，顺序无所谓。
 
 ```sql
 -- ANP-02 L437 要求的重放缓存。键取 (keyid, nonce)，过期即无意义
