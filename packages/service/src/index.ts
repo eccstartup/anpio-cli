@@ -8,6 +8,11 @@
 export { loadConfig, didWebFor } from './config'
 export type { Config, DidResolution, ListenAddress } from './config'
 
+export { buildServiceEntry } from './well-known'
+export type { ServiceEntry } from './well-known'
+export { serviceCapabilities } from './capabilities'
+export type { ServiceCapabilities } from './capabilities'
+
 export { createServer, RPC_PATH, STREAM_PATH, WELL_KNOWN_PATH } from './http/server'
 export type {
   RpcHandler,
@@ -37,7 +42,7 @@ export type { Acceptance, AcceptInput } from './rpc/accept'
 export { createDispatch } from './rpc/dispatch'
 export type { DispatchDeps } from './rpc/dispatch'
 
-export { checkMethod, lookupMethod, targetBindingHolds, DIRECT_SEND } from './rpc/methods'
+export { checkMethod, lookupMethod, targetBindingHolds, DIRECT_SEND, GET_CAPABILITIES } from './rpc/methods'
 export type { MetaField, MethodSpec, TargetMode } from './rpc/methods'
 
 export { storeDirectMessage, incomingParams, validateDirectBody, DIRECT_INCOMING } from './rpc/direct'

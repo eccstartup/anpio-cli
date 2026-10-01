@@ -60,6 +60,22 @@ describe('AGENTX_SERVICE_DID', () => {
     const config = loadConfig({ AGENTX_SERVICE_DID: 'did:web:elsewhere.example' })
     expect(config.serviceDid).toBe('did:web:elsewhere.example')
   })
+
+  it('refuses a DID URL, because the field names the service rather than one of its keys', () => {
+    // §8.7 L512. This value is written into the DID document and is the base a cross-domain
+    // `keyid` resolves against, so a fragment here would quietly turn "this service" into
+    // "some key of this service" at a place that never says so.
+    expect(() => loadConfig({ AGENTX_SERVICE_DID: 'did:web:agentx.example#svc' })).toThrow(/not a DID URL/)
+    expect(() => loadConfig({ AGENTX_SERVICE_DID: 'did:web:agentx.example?x=1' })).toThrow(/not a DID URL/)
+  })
+
+  it('refuses something that is not a DID at all', () => {
+    expect(() => loadConfig({ AGENTX_SERVICE_DID: 'https://agentx.example' })).toThrow(/must be a DID string/)
+  })
+
+  it('accepts another DID method, which is the deployment choice rather than this module one', () => {
+    expect(loadConfig({ AGENTX_SERVICE_DID: 'did:wba:agentx.example' }).serviceDid).toBe('did:wba:agentx.example')
+  })
 })
 
 describe('didWebFor', () => {

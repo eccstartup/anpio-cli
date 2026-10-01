@@ -15,6 +15,7 @@ import {
 import { loadConfig } from '../config'
 import { openStorage } from '../storage/sqlite'
 import { createDispatch } from './dispatch'
+import { buildServiceEntry } from '../well-known'
 import type { RpcHandler, RpcRequest } from '../http/server'
 import type { Storage } from '../storage/types'
 
@@ -570,6 +571,84 @@ describe('the pick-up extension surface (§9)', () => {
     const h = harness()
     const outcome = await asOwner(h, 'inbox.get', { 'include-read': true })
     expect(outcome.json?.error?.code).toBe(1003)
+  })
+})
+
+describe('capability discovery (P1 §8.2)', () => {
+  /** §8.2.1 L524–538's request verbatim, minus `sender_did`: anonymous is the whole point of
+   *  this method (L543–544), so it is not built through `signed()` — there is no proof. */
+  const anonymous = {
+    jsonrpc: '2.0',
+    id: 'req-cap',
+    method: 'anp.get_capabilities',
+    params: {
+      meta: { profile: 'anp.core.binding.v1', security_profile: 'transport-protected', operation_id: 'op-cap' },
+      body: {},
+    },
+  }
+
+  it('answers an unsigned caller, because discovery cannot require trust it does not have', async () => {
+    const h = harness()
+    const outcome = await h.call(anonymous)
+    expect(outcome.status).toBe(200)
+    expect(outcome.json?.error).toBeUndefined()
+    expect(outcome.json?.result).toMatchObject({
+      service_did: 'did:web:127.0.0.1%3A8787',
+      supported_profiles: ['anp.core.binding.v1', 'anp.direct.base.v1'],
+      supported_security_profiles: ['transport-protected'],
+    })
+  })
+
+  it('reports its limits as decimal strings, and its content types as an array', async () => {
+    const h = harness()
+    const result = (await h.call(anonymous)).json?.result
+    // §8.2.2 L570–573 + §7.3 L491: counting values are strings, so a client that does
+    // arithmetic on them has to say so.
+    expect(result?.limits).toEqual({ max_request_bytes: '1048576', max_message_bytes: '1048576' })
+    expect(result?.supported_content_types).toEqual(['text/plain', 'application/json'])
+  })
+
+  it('agrees with the static hint the well-known document hands out', async () => {
+    // The two are the same fact in two places (§8.3 L591–593 says the runtime one wins on a
+    // conflict — which means a conflict must be impossible, not merely resolved).
+    const h = harness()
+    const config = loadConfig({})
+    const result = (await h.call(anonymous)).json?.result
+    const entry = buildServiceEntry(config)
+    expect(result?.supported_profiles).toEqual(entry.profiles)
+    expect(result?.supported_security_profiles).toEqual(entry.securityProfiles)
+    expect(result?.limits).toMatchObject({ max_request_bytes: String(config.maxBody) })
+  })
+
+  it('does not name a single extension among the spec profiles', async () => {
+    const h = harness()
+    const result = (await h.call(anonymous)).json?.result
+    for (const profile of (result?.supported_profiles ?? []) as string[]) {
+      expect(profile.startsWith('x_')).toBe(false)
+    }
+  })
+
+  it('still refuses an unknown profile, so a wrong call is not answered as if it were right', async () => {
+    const h = harness()
+    const outcome = await h.call({
+      ...anonymous,
+      params: { ...anonymous.params, meta: { ...anonymous.params.meta, profile: 'anp.group.base.v2' } },
+    })
+    expect(outcome.json?.error?.code).toBe(1001)
+    expect(outcome.json?.error?.data?.anp_code).toBe('anp.unsupported_profile')
+  })
+
+  it('takes a target when one is offered, rather than refusing the shape §8.2.1 does not forbid', async () => {
+    const h = harness()
+    const outcome = await h.call({
+      ...anonymous,
+      params: {
+        ...anonymous.params,
+        meta: { ...anonymous.params.meta, target: { kind: 'agent', did: sender.did } },
+      },
+    })
+    // `endpoint-local` only means the target may be absent; nothing says it may not be sent.
+    expect(outcome.json?.error).toBeUndefined()
   })
 })
 

@@ -120,6 +120,30 @@ function parseDidResolution(env: NodeJS.ProcessEnv): DidResolution {
   return resolution
 }
 
+/**
+ * §8.7 L512：`serviceDid` **MUST** 是 DID 字符串，而不是 DID URL。
+ *
+ * `#` 是 fragment、`?` 是 query（DID Core 的 DID URL 定义），带上任何一个就不再是"这个
+ * 服务"。代价不只是难听：`serviceDid` 会被写进 DID 文档，也是跨域外层签名 `keyid` 的解析
+ * 基准——`did:web:example.com#svc` 在那里指的是那个 DID 的某一个 key，不是这个服务，于是
+ * 一次跨域调用会拿着一个指向密钥的 id 去找服务身份。
+ *
+ * **不校验方法名**：`did:web` / `did:wba` 之外还有别的 DID 方法部署方可以用，这里只判它
+ * 确实是一个 DID。
+ */
+function parseServiceDid(raw: string): string {
+  if (!raw.startsWith('did:')) {
+    throw new ConnectxError('invalid_argument', `AGENTX_SERVICE_DID must be a DID string (got ${JSON.stringify(raw)})`)
+  }
+  if (raw.includes('#') || raw.includes('?')) {
+    throw new ConnectxError(
+      'invalid_argument',
+      `AGENTX_SERVICE_DID must be a DID, not a DID URL (got ${JSON.stringify(raw)}); it may carry no fragment or query`,
+    )
+  }
+  return raw
+}
+
 /** The public base URL with any trailing slash removed, so `publicUrl + '/anp-im/rpc'`
  *  is one slash and not two. */
 function normalizeUrl(raw: string, name: string): string {
@@ -174,7 +198,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const config: Config = {
     listen,
     publicUrl,
-    serviceDid: env.AGENTX_SERVICE_DID ?? didWebFor(publicUrl),
+    serviceDid: parseServiceDid(env.AGENTX_SERVICE_DID ?? didWebFor(publicUrl)),
     didResolution: parseDidResolution(env),
     dbPath: env.AGENTX_DB ?? DEFAULT_DB,
     maxBody: parsePositive(env.AGENTX_MAX_BODY, 'AGENTX_MAX_BODY', DEFAULT_MAX_BODY),

@@ -23,11 +23,12 @@ import {
   type LocateOptions,
 } from '@agentx/core'
 import type { Config } from '../config'
+import { capabilitiesResult } from '../capabilities'
 import type { RpcHandler, RpcResponse } from '../http/server'
 import type { DeliveryRecord, Storage } from '../storage/types'
 import { acceptOperation } from './accept'
 import { authenticate, callerAnchor } from './auth'
-import { DIRECT_SEND, lookupMethod, checkMethod, type MethodSpec } from './methods'
+import { DIRECT_SEND, GET_CAPABILITIES, lookupMethod, checkMethod, type MethodSpec } from './methods'
 import { storeDirectMessage } from './direct'
 import { INBOX_GET, INBOX_MARK_READ, MESSAGE_GET_BATCH, SYNC_DELTA, markRead, readBatch, readDelta, readInbox } from './inbox'
 import { errorResponse, failureId, noResponse, parseRequestText, successResponse } from './envelope'
@@ -83,6 +84,9 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
   ): Record<string, unknown> {
     const { meta, body, auth } = params
     switch (spec.name) {
+      case GET_CAPABILITIES:
+        // 只读、且是匿名可达的：答复里没有一处与调用方身份相关，所以这就是全部。
+        return capabilitiesResult(deps.config)
       case DIRECT_SEND:
         return storeDirectMessage(deps.storage, {
           meta,

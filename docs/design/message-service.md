@@ -831,16 +831,42 @@ agent 的 DID 文档里那条 `ANPMessageService` 服务条目是**发现链的�
 供 DID Service 在签发文档时嵌入。**这就是与 `awiki-open-server` 的接口**——
 本服务不写 DID 文档，只交出这段 JSON。
 
+**`id` 由嵌入方改写。** 上例里的 `…#anp-message-service` 省略的那一段是**文档所有者的
+DID**：服务条目住在被描述的那个 agent（或群）的文档里，而本服务不知道对方是谁，也给不出
+那个 DID。所以本服务交出的是自己那半边能给出的东西——`<自己的 serviceDid>#anp-message-service`
+——**嵌入方把 DID 那一段换成自己的**。给一个真实存在、可解析的 DID，比给一个占位符好在：
+忘了改写的时候，那个 id 至少是一个真 DID，而不是一段没人认识的字符串。
+
+条目的字段分两处取，且**都必须**与实现一致：
+- `serviceEndpoint` / `serviceDid` 来自配置（§14）；
+- `profiles[]` / `securityProfiles[]` 从方法表**推出**（`capabilities.ts` 的
+  `serviceCapabilities()`），与 `anp.get_capabilities` 的运行时答复**同源**，所以
+  §8.3 L591–593 那条"冲突时以运行为准"在本服务里永远无事可做——两处不会不同。
+
 **扩展能力不在那个条目里声明。** `profiles[]` / `securityProfiles[]` 只放规范定义的
 Profile 与安全模式——把 `inbox.*` / `sync.*` / 订阅流塞进去，就是在对客户端撒谎
 （一个只实现规范的服务会被误认为支持它们）。扩展能力另走一处，
 由 `GET /.well-known/anp-message-service.json` 的一个 `x_agentx` 块自报，
 并在订阅握手的 `stream.hello` 里再报一次（见 [realtime.md](realtime.md) §9）。
-块里放的正是 §9.1 那个 Profile 名：
+块里放的是 `x_` 命名空间下的东西（§9.1 与 [realtime.md](realtime.md) §9 那两个
+Profile 名），以及分属它们的方法：
 
 ```json
-{ "x_agentx": { "profiles": ["x_agentx.inbox.v1"], "methods": ["inbox.get", "inbox.mark_read", ...] } }
+{
+  "x_agentx": {
+    "profiles": ["x_agentx.inbox.v1", "x_agentx.stream.v1"],
+    "methods": ["inbox.get", "inbox.mark_read", "message.get_batch", "stream.ack", "stream.auth", "sync.delta"]
+  }
+}
 ```
+
+`methods` 里的 `stream.*` 只在 WebSocket 上可达（§9 与 [realtime.md](realtime.md) §9）：
+块说的是"这个服务有这些扩展方法"，**不是**"它们都能 POST 到 `serviceEndpoint`"。传输由
+Profile 决定，所以没有按传输再分一层——多一层形状就多一处要维护的约定。
+
+**`anp.get_capabilities` 只报规范字段**，扩展不进它的 `supported_profiles`：那个结果是
+"**规范**能力"的运行时权威（§8.3 L592），掺进扩展会让一个标准客户端按规范理解出一个
+错误的结论。
 
 ## 14. 配置
 

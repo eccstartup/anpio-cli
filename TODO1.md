@@ -172,7 +172,18 @@
   且 `--once` 要保持 §7.2 的只读语义）。文档改 realtime.md §4/§5.1/§5.2/§5.5/§6/§8.1/§9
   与 message-service.md §2.1（426）、§9.3。真机冒烟：426、`stream.hello` 首帧、
   带活连接 SIGTERM → 客户端收 1001 且进程 exit 0。service 240 / core 666 / cli 207）
-- C8 `/.well-known/anp-message-service.json` + `x_agentx` 扩展块
+- ~~C8 `/.well-known/anp-message-service.json` + `x_agentx` 扩展块~~（2026-10-01。顺带补了
+  `anp.get_capabilities`：它是发现的最后一环（P1 §8.2），设计 §15 第 2 步写着却一直没做
+  ——**静态 hint 没有运行时权威对照，就是一张没人核对的清单**。两份清单同源
+  （`capabilities.ts` 从方法表推），于是 §8.3 L591–593 的"冲突时以运行为准"永远无事可做。
+  它匿名可达（§8.2.1 L543），所以不要 proof；也不要 `operation_id`——§6.2.6 L388 只对会改
+  状态的操作要求它，例子里有它，但例子不是规范。扩展**不进** `supported_profiles`：那是
+  "规范符合性"的运行时权威。条目里 `serviceEndpoint`/`serviceDid` 来自配置，清单来自方法表；
+  `id` 用自己那半边的 DID，**嵌入方要改写**（服务条目住在对方的文档里，§13）。
+  `serviceDid` 顺带过一遍 §8.7 L512：它是 DID 不是 DID URL——这个值会写进 DID 文档，也是
+  跨域 `keyid` 的解析基准，一个 fragment 会把"这个服务"悄悄变成"它的某个 key"。
+  真机冒烟：well-known 200 且三个字段齐、`get_capabilities` 匿名 200、错 Profile 1001。
+  service 262）
 - C9 P4 群组 + Group Host（线性顺序 / `group_state_version` / `group_event_seq`）
 - C10 P7 附件数据面（Slot → PUT → commit → ticket → GET）
 - C11 P8 跨域：`serviceDid` 外层认证 + **caller anchor 单点判断** + 并发投递

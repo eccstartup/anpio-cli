@@ -20,6 +20,19 @@ const CONTENT_TYPE_OF = {
   payload: 'application/json',
 } as const
 
+/**
+ * 本服务接受的内容类型，供 `anp.get_capabilities` 的 `supported_content_types` 自报
+ * （P1 §8.2.2 L574，那里说这个字段 SHOULD 尽量给）。
+ *
+ * 从上面那张表**推**出来，而不是另写一份清单：那张表就是"哪些内容类型会被接受"的判据
+ * （`validateDirectBody` 按它拒），另写一份迟早与它对不上，而对不上的方向是"报了却不认"
+ * ——客户端照着自己看到的清单发，收到一个 1003。
+ *
+ * `payload_b64u` 的私有扩展对象用的是发送方自定义的内容类型（§6.2.6 L274），枚举不出来，
+ * 所以不在这里；它们照样能被受理，只是没法提前声明。
+ */
+export const ACCEPTED_CONTENT_TYPES: readonly string[] = [...new Set(Object.values(CONTENT_TYPE_OF))]
+
 function isUnpaddedBase64Url(value: string): boolean {
   // P3 §6.2.6 L276：无填充 base64url。`=` 出现在这里就是填充；长度模 4 余 1 是任何
   // base64 都不可能产生的形态。

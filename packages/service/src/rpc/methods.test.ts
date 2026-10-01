@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import type { AnpMeta } from '@agentx/core'
-import { DIRECT_SEND, checkMethod, lookupMethod, targetBindingHolds } from './methods'
+import { DIRECT_SEND, GET_CAPABILITIES, checkMethod, lookupMethod, lookupStreamMethod, targetBindingHolds } from './methods'
 import type { MethodSpec } from './methods'
+import { STREAM_AUTH } from './stream'
 
 const spec = (): MethodSpec => {
   const found = lookupMethod(DIRECT_SEND)
@@ -23,10 +24,19 @@ function meta(overrides: Partial<AnpMeta> = {}): AnpMeta {
 }
 
 describe('lookupMethod', () => {
-  it('knows direct.send and nothing else', () => {
+  it('knows the two spec methods and nothing else', () => {
     expect(lookupMethod(DIRECT_SEND)?.name).toBe('direct.send')
+    expect(lookupMethod(GET_CAPABILITIES)?.name).toBe('anp.get_capabilities')
     expect(lookupMethod('direct.sendx')).toBeUndefined()
     expect(lookupMethod('group.create')).toBeUndefined()
+  })
+
+  it('does not hand a stream method to the control plane', () => {
+    // realtime.md §9: `stream.auth` is reachable over one transport only, and the way that
+    // is enforced is that this table does not contain it.
+    expect(lookupMethod(STREAM_AUTH)).toBeUndefined()
+    expect(lookupStreamMethod(STREAM_AUTH)?.name).toBe(STREAM_AUTH)
+    expect(lookupStreamMethod(DIRECT_SEND)).toBeUndefined()
   })
 })
 

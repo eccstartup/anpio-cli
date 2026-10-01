@@ -140,7 +140,19 @@ describe('the routes that are not built yet', () => {
     expect(res.headers.get('upgrade')).toBe('websocket')
   })
 
-  it('answers 501 on the well-known document', async () => {
+  it('serves the service entry once the wiring supplies one', async () => {
+    // C8: the document is data, so the route's job is to hand it back and say it is JSON.
+    const document = JSON.stringify({ type: 'ANPMessageService', serviceDid: 'did:web:agentx.example' })
+    running = createServer({ config: testConfig(), handleRpc: echo, wellKnown: document })
+    await running.listen()
+    const res = await fetch(`http://127.0.0.1:${running.address.port}${WELL_KNOWN_PATH}`)
+    expect(res.status).toBe(200)
+    expect(res.headers.get('content-type')).toBe('application/json')
+    expect(await res.json()).toEqual({ type: 'ANPMessageService', serviceDid: 'did:web:agentx.example' })
+  })
+
+  it('answers 501 on the well-known document when nothing was wired to it', async () => {
+    // An unbuilt surface must stay distinguishable from a missing one (§2.1).
     const base = await start(echo)
     const res = await fetch(`${base}${WELL_KNOWN_PATH}`)
     expect(res.status).toBe(501)

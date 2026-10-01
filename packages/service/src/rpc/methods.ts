@@ -88,6 +88,31 @@ export interface MethodSpec {
 
 export const DIRECT_SEND = 'direct.send'
 
+export const GET_CAPABILITIES = 'anp.get_capabilities'
+
+/**
+ * P1 §8.2：**发现的最后一环**，也是唯一可以不认证调用的方法。
+ *
+ * 匿名是这一条的核心：§8.2.1 L543–544 允许省略 `meta.sender_did`，所以这里**不**要
+ * `origin_proof`——一个还没有任何信任关系的调用方至少要能问出"你会什么"。没有 proof 就
+ * 没有锚点，`callerAnchor()` 也就不给这个方法算。
+ *
+ * `endpoint-local`（可以省略 target）照 §8.2.1 L524–538 那个请求例子：它没有 target。
+ * 正文同样没有规则：§8.2.1 没给这个请求定义任何 body 字段，为规范没定义的东西发明一个
+ * 1003，拒掉的会是规范允许的请求。**不要 `operation_id`**——§6.2.6 L388 只对"会改变状态
+ * 的操作"要求它，而这里什么都不改（例子里有它，例子不是规范）。
+ */
+const GET_CAPABILITIES_SPEC: MethodSpec = {
+  name: GET_CAPABILITIES,
+  targetMode: 'endpoint-local',
+  profiles: ['anp.core.binding.v1'],
+  securityProfiles: ['transport-protected'],
+  requiredMeta: [],
+  forbiddenMeta: [],
+  requiresOriginProof: () => false,
+  authCodes: P1_AUTH_CODES,
+}
+
 /** 直连私聊。`meta.target.kind` 必须是 `agent`（P3 §5.1 L172）。 */
 const DIRECT_SEND_SPEC: MethodSpec = {
   name: DIRECT_SEND,
@@ -196,12 +221,23 @@ const STREAM_ACK_SPEC: MethodSpec = {
 
 /** `POST /anp-im/rpc` 认得的方法。两个传输方法**不在其中**——理由写在 `stream.ts`。 */
 const METHODS: readonly MethodSpec[] = [
+  GET_CAPABILITIES_SPEC,
   DIRECT_SEND_SPEC,
   INBOX_GET_SPEC,
   INBOX_MARK_READ_SPEC,
   MESSAGE_GET_BATCH_SPEC,
   SYNC_DELTA_SPEC,
 ]
+
+/** 两张表的全部方法，不分传输。
+ *
+ *  能力清单要回答的是"本服务实现了哪些 Profile"，那个问题与传输无关：`stream.auth` 只在
+ *  WebSocket 上可达，但它的 Profile 一样要出现在自我描述里（realtime.md §9）。上面把控制
+ *  面与流分成两张表是为了**查得到**——"这个方法的 Profile 是哪几个"必须只有一处答案——
+ *  不是为了能力清单。 */
+export function allMethods(): readonly MethodSpec[] {
+  return [...METHODS, STREAM_AUTH_SPEC, STREAM_ACK_SPEC]
+}
 
 export function lookupMethod(name: string): MethodSpec | undefined {
   return METHODS.find((spec) => spec.name === name)

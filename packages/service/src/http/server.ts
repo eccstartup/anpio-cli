@@ -53,6 +53,11 @@ export interface ServerOptions {
   /** Absent means the stream route keeps answering 501, which is what a service with no
    *  subscriber registry wired up should say. */
   handleStream?: StreamHandler
+  /** The body of `/.well-known/anp-message-service.json` (C8). Absent means 501 for the same
+   *  reason as `handleStream`: an unbuilt surface stays distinguishable from a missing one.
+   *  It is data rather than a callback because the document is a pure function of the
+   *  configuration and the method table — `main.ts` builds it once, at startup. */
+  wellKnown?: string
 }
 
 export interface RunningServer {
@@ -177,8 +182,14 @@ export function createServer(options: ServerOptions): RunningServer {
         refuse(res, 405, 'method not allowed', { allow: 'GET' })
         return
       }
-      // C8. Answering 501 keeps an unbuilt surface distinguishable from a missing one.
-      refuse(res, 501, `${WELL_KNOWN_PATH} is not implemented yet`)
+      const document = options.wellKnown
+      if (document === undefined) {
+        // Wiring, not routing, decides whether this is a 501 or a 200 — a service that has
+        // not built the document is not a service that has no such route.
+        refuse(res, 501, `${WELL_KNOWN_PATH} is not implemented yet`)
+        return
+      }
+      send(res, 200, 'application/json', document)
       return
     }
 

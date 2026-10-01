@@ -18,6 +18,7 @@ import { createDispatch } from './rpc/dispatch'
 import { openStorage } from './storage/sqlite'
 import { createSubscriberRegistry } from './stream/registry'
 import { createStreamSession } from './stream/session'
+import { buildServiceEntry } from './well-known'
 import type { RpcHandler } from './http/server'
 
 async function main(): Promise<void> {
@@ -47,6 +48,10 @@ async function main(): Promise<void> {
     config,
     handleRpc,
     handleStream: (connection, request) => session.handlersFor(connection, request),
+    // A pure function of the configuration and the method table, so it is built once. The
+    // DID Service fetches this to embed as the agent's `ANPMessageService` entry
+    // (message-service.md §13) — this service never writes a DID document itself.
+    wellKnown: JSON.stringify(buildServiceEntry(config), null, 2),
   })
   // Outbound `direct.incoming` pushes. Started only after the socket is up: a startup
   // that fails should exit without a background timer having already spent attempts.
