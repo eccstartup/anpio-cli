@@ -1,7 +1,13 @@
-// High-level server-side ANP login verification.
+// High-level server-side ANP-02 verification.
 //
-// The lower-level pieces (`parseSignatureInput` / `resolveVerificationKey` /
-// `verifyHttpMessageSignature`) are individually correct but easy to MIS-wire: the
+// Two entry points, one vocabulary. `verifyAnpLoginRequest` runs the login binding
+// (`keyid → did → body.did → document → key`) for a DID Service; `verifyHttpSignatureForServer`
+// collapses a check the caller has already bound itself — the ANP-09 message service's
+// cross-domain layer is that caller. Both answer in the ANP-02 §3.2.4.1 words a server
+// puts in a `WWW-Authenticate` challenge, and both keep "your proof is bad" apart from
+// "we could not look".
+//
+// The lower-level pieces are individually correct but easy to MIS-wire: the
 // 2026-09-11 audit found three worked examples taking the public key from the
 // request's inline DID document while writing a *separate, unbound* `did` field
 // into the token — so an attacker could sign with their own key and claim a victim
@@ -25,6 +31,7 @@ import {
   verifyHttpMessageSignatureDetailed,
   type NonceStore,
   type VerifyFailure,
+  type VerifyHttpSignatureInput,
 } from './verify'
 import { isFingerprint } from './fingerprint'
 import { ethAddressFromPublicKey } from '../wallet/eip1193'
@@ -152,7 +159,12 @@ export type AnpLoginResult =
 //   - WE could not look (policy, network, size) → unverifiable
 // `did_resolve_blocked` lands in the third group on purpose: the usual cause is a
 // host missing from `allowedHosts`, which is our configuration, not a bad proof.
-function resolveFailureToAnpError(err: unknown): AnpLoginFailure {
+//
+// Exported (a second caller is the ANP-09 message service's cross-domain outer
+// verification): that layer resolves two documents of its own — the caller anchor's
+// and the `serviceDid`'s — and answering "your proof is bad" when we simply could not
+// look is the same mistake there. One table, one answer.
+export function anpErrorForResolveFailure(err: unknown): AnpLoginFailure {
   if (!isConnectxError(err)) return 'unverifiable'
   switch (err.code) {
     case 'invalid_did':
@@ -187,6 +199,34 @@ const VERIFY_FAILURE_TO_ANP_ERROR: Record<VerifyFailure, AnpLoginFailure> = {
   nonce_consumed: 'invalid_nonce',
   signature_invalid: 'invalid_signature',
   store_failed: 'unverifiable',
+}
+
+/**
+ * The same collapse, for a server that verifies an ANP-02 HTTP signature it did NOT
+ * receive as a login request.
+ *
+ * Two callers need this: the login verifier below, and the ANP-09 message service's
+ * cross-domain layer, which checks the OUTER signature of a federated call (P8 §6.2.2
+ * step 8). That layer resolves the key itself — the keyid's DID must first be shown to
+ * equal the `serviceDid` the caller's own document publishes — so it cannot use
+ * `verifyAnpLoginRequest`, whose whole shape is the login binding
+ * `keyid → did → body.did → document`.
+ *
+ * It exists rather than letting the caller map `VerifyOutcome.reason` itself because
+ * the mapping IS the wire vocabulary: `VerifyFailure` is deliberately not exported
+ * (see its declaration — relaying it verbatim is a per-check oracle), so a caller
+ * wanting an ANP-02 `error=` value has no table to read. One answer, one place.
+ *
+ * `unverifiable` is the answer for our own outage (`store_failed`); a caller MUST NOT
+ * write it into a challenge — see {@link AnpLoginFailure}.
+ */
+export async function verifyHttpSignatureForServer(
+  input: VerifyHttpSignatureInput,
+): Promise<{ ok: true } | { ok: false; error: AnpLoginFailure; cause?: unknown }> {
+  const outcome = await verifyHttpMessageSignatureDetailed(input)
+  if (outcome.ok) return { ok: true }
+  const error = VERIFY_FAILURE_TO_ANP_ERROR[outcome.reason]
+  return outcome.cause === undefined ? { ok: false, error } : { ok: false, error, cause: outcome.cause }
 }
 
 // An inline DID document is trusted ONLY for an identifier that COMMITS to a key:
@@ -328,7 +368,7 @@ export async function verifyAnpLoginRequest(input: VerifyAnpLoginInput): Promise
       // agreement with the address in the identifier.
       assertAccountBinding(did, key)
     } catch (err) {
-      return rejected(resolveFailureToAnpError(err), err)
+      return rejected(anpErrorForResolveFailure(err), err)
     }
 
     const outcome = await verifyHttpMessageSignatureDetailed({

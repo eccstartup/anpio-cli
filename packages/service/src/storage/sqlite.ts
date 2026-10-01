@@ -905,6 +905,23 @@ class SqliteStorage implements Storage {
     this.stmt('DELETE FROM outbox WHERE seq = ?').run(seq)
   }
 
+  consumeHttpNonce(keyid: string, nonce: string, expiresAt: string, now: string): boolean {
+    // 两句，一个事务。清理与判定必须一起看：先删过期行，再让 UPSERT 去撞主键——留下的
+    // 那一行如果还有效就是重放（`changes` 为 0），已经过期就由 DO UPDATE 覆盖掉。
+    //
+    // 判据写成 SQL 而不是"先 SELECT 再看"：后者在两句之间有窗口，两个并发的同一份签名
+    // 会双双读到"没用过"。这里 `changes` 是不是 1，就是"这次是我兑掉的吗"。
+    return this.transaction(() => {
+      this.stmt('DELETE FROM http_nonces WHERE expires_at <= ?').run(now)
+      const result = this.stmt(
+        `INSERT INTO http_nonces (keyid, nonce, expires_at) VALUES (?, ?, ?)
+           ON CONFLICT (keyid, nonce) DO UPDATE SET expires_at = excluded.expires_at
+           WHERE http_nonces.expires_at <= ?`,
+      ).run(keyid, nonce, expiresAt, now)
+      return result.changes > 0
+    })
+  }
+
   close(): void {
     this.statements.clear()
     this.db.close()

@@ -14,8 +14,21 @@ import {
   type AnpSigningIdentity,
   type KeyResolver,
   type LocateOptions,
+  type NonceStore,
+  type ServiceEntry,
+  type ServiceLocator,
 } from '@agentx/core'
+import {
+  ANP_COMPONENTS,
+  buildContentDigestValue,
+  buildSignatureBase,
+  bytesToBase64,
+  serializeSignatureParams,
+  signatureBaseBytes,
+  utf8,
+} from '@agentx/core/advanced'
 import { loadConfig } from '../config'
+import { createHttpNonceStore } from '../federation/nonces'
 import { openObjectStore } from '../objects'
 import { openStorage } from '../storage/sqlite'
 import { createDispatch } from './dispatch'
@@ -26,6 +39,10 @@ import type { Storage } from '../storage/types'
 const sender = createAnpIdentity('sender.example')
 const second = createAnpIdentity('second.example')
 const receiver = createAnpIdentity('receiver.example')
+/** 发送方域里那个对外入口的服务身份。外层请求由它签，与业务发送者是两个人——
+ *  §3.6 L90–98 说的两层身份，这里就是这个区别。 */
+const service = createAnpIdentity('service.example')
+const impostor = createAnpIdentity('evil.example')
 
 /** One instant for every request in this file, so `accepted_at` is a literal and the
  *  proof's window can be pinned around it. */
@@ -48,6 +65,74 @@ const DOCUMENTS: Record<string, unknown> = {
   [sender.did]: sender.didDocument,
   [second.did]: second.didDocument,
   [receiver.did]: receiver.didDocument,
+  [service.did]: service.didDocument,
+}
+
+// ---- 外层身份（C11）-----------------------------------------------------------
+// 这一层要跑真的签名，所以测试自己拼一份跨域请求：覆盖集合取自核验侧读的同一个
+// `ANP_COMPONENTS`，摘要与签名都是真算的。
+
+/** 本服务在 `loadConfig({})` 下的公网地址（`config.ts` 的 loopback 默认）。 */
+const AUTHORITY = '127.0.0.1:8787'
+const RPC_PATH = '/anp-im/rpc'
+const TARGET_URI = `http://${AUTHORITY}${RPC_PATH}`
+
+/** 锚点发布的那唯一一个入口。`serviceDid` 指的是别的域——这正是第 6 步要比的东西。 */
+function entryFor(serviceDid?: string): ServiceEntry {
+  const entry: ServiceEntry = {
+    id: '#anp-message-service',
+    type: 'ANPMessageService',
+    serviceEndpoint: 'https://sender.example/anp-im/rpc',
+  }
+  if (serviceDid !== undefined) entry.serviceDid = serviceDid
+  return entry
+}
+
+function locator(published: Record<string, ServiceEntry[]>): ServiceLocator {
+  return {
+    async locate(identity: string): Promise<ServiceEntry[]> {
+      return published[identity] ?? []
+    },
+  }
+}
+
+/** `signed()` 的正文原样签一遍外层。`created` 用真实时钟：这一层的时间窗在 core 里，
+ *  没有注入点（`verify.ts` 的 `VerifyHttpSignatureInput` 里没有 `now`）。 */
+async function outerHeaders(
+  bodyText: string,
+  options: { signer?: AnpSigningIdentity; nonce?: string } = {},
+): Promise<Record<string, string>> {
+  const signer = options.signer ?? service
+  const created = Math.floor(Date.now() / 1000)
+  const contentDigest = await buildContentDigestValue(utf8(bodyText))
+  const signatureParams = serializeSignatureParams(ANP_COMPONENTS, {
+    created,
+    expires: created + 300,
+    nonce: options.nonce ?? 'outer-nonce-1',
+    keyid: signer.keyid,
+  })
+  const base = buildSignatureBase({
+    method: 'POST',
+    path: RPC_PATH,
+    authority: AUTHORITY,
+    targetUri: TARGET_URI,
+    headers: { 'content-digest': contentDigest },
+    components: ANP_COMPONENTS,
+    signatureParams,
+  })
+  const signature = await ed25519OriginProofSigner(signer.priv, signer.keyid).sign(signatureBaseBytes(base))
+  return {
+    'content-type': 'application/json',
+    host: AUTHORITY,
+    'content-digest': contentDigest,
+    'signature-input': `sig1=${signatureParams}`,
+    signature: `sig1=:${bytesToBase64(signature)}:`,
+  }
+}
+
+/** 常走的装配：`sender.did` 发布的入口指向 `service.did`。 */
+function publishedBySender(serviceDid: string = service.did): Record<string, ServiceEntry[]> {
+  return { [sender.did]: [entryFor(serviceDid)] }
 }
 
 function meta(overrides: Partial<AnpMeta> = {}): AnpMeta {
@@ -104,6 +189,8 @@ async function signed(
 interface Outcome {
   status: number
   json: { id?: unknown; result?: Record<string, unknown>; error?: { code: number; data?: { anp_code?: string } } } | undefined
+  /** 外层认证的失败形态走响应头（ANP-02 §3.2.4.1），所以它得能被读到。 */
+  headers: Record<string, string>
 }
 
 interface Harness {
@@ -111,9 +198,13 @@ interface Harness {
   storage: Storage
   logs: string[]
   call(payload: unknown): Promise<Outcome>
+  /** 一次真的 HTTP POST：带上方法与头，外层八步读的就是它们。 */
+  post(bodyText: string, headers: Record<string, string>): Promise<Outcome>
 }
 
-function harness(overrides: { storage?: Storage } = {}): Harness {
+function harness(
+  overrides: { storage?: Storage; locator?: ServiceLocator; nonceStore?: NonceStore } = {},
+): Harness {
   const storage = overrides.storage ?? openStorage({ path: ':memory:' })
   const logs: string[] = []
   const handle = createDispatch({
@@ -124,21 +215,36 @@ function harness(overrides: { storage?: Storage } = {}): Harness {
     // 真的可写目录，所以给一个系统临时目录；这个文件里没人往里写东西。
     objects: openObjectStore({ directory: mkdtempSync(join(tmpdir(), 'agentx-dispatch-')), maxBytes: 1024 }),
     resolver: inlineResolver(DOCUMENTS),
+    locator: overrides.locator ?? locator(publishedBySender()),
+    nonceStore: overrides.nonceStore ?? createHttpNonceStore(storage),
     log: (line) => logs.push(line),
     now: () => NOW,
   })
+
+  async function send(body: string, headers: Record<string, string>, method?: string): Promise<Outcome> {
+    const request: RpcRequest = {
+      body,
+      headers,
+      url: new URL(`http://${AUTHORITY}${RPC_PATH}`),
+      ...(method !== undefined ? { method } : {}),
+    }
+    const response = await handle(request)
+    return {
+      status: response.status,
+      json: response.body === '' ? undefined : (JSON.parse(response.body) as Outcome['json']),
+      headers: response.headers ?? {},
+    }
+  }
+
   return {
     handle,
     storage,
     logs,
     async call(payload: unknown): Promise<Outcome> {
-      const request: RpcRequest = {
-        body: typeof payload === 'string' ? payload : JSON.stringify(payload),
-        headers: {},
-        url: new URL('http://127.0.0.1:8787/anp-im/rpc'),
-      }
-      const response = await handle(request)
-      return { status: response.status, json: response.body === '' ? undefined : JSON.parse(response.body) }
+      return send(typeof payload === 'string' ? payload : JSON.stringify(payload), {})
+    },
+    async post(bodyText: string, headers: Record<string, string>): Promise<Outcome> {
+      return send(bodyText, headers, 'POST')
     },
   }
 }
@@ -815,5 +921,88 @@ describe('group.* over the wire (P4)', () => {
       group_state_version: '1',
       group_profile: { discoverability: 'public' },
     })
+  })
+})
+
+// C11 —— 外层身份接进受理路径。
+//
+// 这里测的不是八步本身（`federation/outer.test.ts` 逐个覆盖了），而是**接线**：它跑在
+// 信封之后、JSON-RPC 之前，失败形态是 HTTP 401/503 而不是 JSON-RPC 错误，以及它只在
+// 这次调用真的是一次 HTTP 请求时才跑。
+describe('the outer identity on the request path', () => {
+  async function envelopeText(options: Parameters<typeof signed>[0] = {}): Promise<string> {
+    return JSON.stringify(await signed(options))
+  }
+
+  it('accepts a cross-domain request whose outer signature verifies', async () => {
+    const h = harness()
+    const text = await envelopeText()
+    const outcome = await h.post(text, await outerHeaders(text))
+    expect(outcome.status).toBe(200)
+    expect(outcome.json?.error).toBeUndefined()
+    expect(outcome.json?.result).toBeDefined()
+  })
+
+  it('answers 401 with a WWW-Authenticate challenge, and no id in the body', async () => {
+    // §2.4：这一步跑在 JSON-RPC 之前，所以**没有 `id` 可答**——正文是 §4.2.2 L377–383 的
+    // 那个镜像形状，不是一份 JSON-RPC 响应。
+    const h = harness()
+    const text = await envelopeText()
+    const outcome = await h.post(text, await outerHeaders(text, { signer: impostor }))
+    expect(outcome.status).toBe(401)
+    expect(outcome.headers['www-authenticate']).toBe('DIDWba realm="127.0.0.1", error="forbidden_did"')
+    expect(outcome.json).toEqual({ code: 401, error: 'forbidden_did' })
+    expect(outcome.json).not.toHaveProperty('id')
+    // 外层拒了就没有业务动作发生。
+    expect(h.storage.headSeq(receiver.did)).toBe(0)
+  })
+
+  it('refuses a replayed nonce on the second delivery of the same request', async () => {
+    const h = harness()
+    const text = await envelopeText()
+    const headers = await outerHeaders(text, { nonce: 'replayed' })
+    expect((await h.post(text, headers)).status).toBe(200)
+    const again = await h.post(text, headers)
+    expect(again.status).toBe(401)
+    expect(again.json).toEqual({ code: 401, error: 'invalid_nonce' })
+  })
+
+  it('answers 503 when our own nonce store is down, and keeps the internal word off the wire', async () => {
+    // `unverifiable` 是"我们得不出结论"，回 401 会把对端送去重签一份本来没问题的东西；
+    // ANP-02 §3.2.4.1 的九个 `error` 值里也没有它，所以它连挑战头都不该出现。
+    const h = harness({
+      nonceStore: {
+        consume(): never {
+          throw new Error('nonce store is down')
+        },
+      },
+    })
+    const text = await envelopeText()
+    const outcome = await h.post(text, await outerHeaders(text))
+    expect(outcome.status).toBe(503)
+    expect(outcome.json).toEqual({ code: 503 })
+    expect(outcome.headers['www-authenticate']).toBeUndefined()
+  })
+
+  it('stands down when the call did not arrive as an HTTP request', async () => {
+    // 流式那条路的帧就是这样：它借了升级请求的头，但帧本身不是 HTTP 请求，`@method` /
+    // `@target-uri` 无从谈起。头里带着一份**属于别人**的签名，这一层也不该看它。
+    const h = harness()
+    const text = await envelopeText()
+    const outcome = await h.call(text)
+    expect(outcome.status).toBe(200)
+    expect(outcome.json?.result).toBeDefined()
+  })
+
+  it('refuses a cross-domain notification at the outer layer instead of just not answering it', async () => {
+    // 顺序的全部意义（§2.4）：通知本来就没有响应，但外层没过时对端要拿到 401，
+    // 而不是一个"没有响应"。
+    const h = harness()
+    const { id, ...withoutId } = await signed()
+    void id
+    const text = JSON.stringify(withoutId)
+    const outcome = await h.post(text, await outerHeaders(text, { signer: impostor }))
+    expect(outcome.status).toBe(401)
+    expect(outcome.headers['www-authenticate']).toContain('error="forbidden_did"')
   })
 })

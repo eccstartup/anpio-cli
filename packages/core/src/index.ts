@@ -73,7 +73,7 @@ export { verifyHttpMessageSignature, verifyAnpJsonAuthRequest, createNonceStore 
 // ANP-02 §4 的验证半边：同一份证明装在 JSON envelope 里时从 `auth` 对象取字段，且
 // `contentDigest` 绑定的是 `payload`——而不是像 §3 那样绑定整个消息体。
 export type { VerifyHttpSignatureInput, VerifyJsonAuthInput, NonceStore, NonceStoreOptions } from './crypto/verify'
-export { verifyAnpLoginRequest } from './crypto/serverAuth'
+export { verifyAnpLoginRequest, anpErrorForResolveFailure, verifyHttpSignatureForServer } from './crypto/serverAuth'
 export type {
   VerifyAnpLoginInput,
   AnpLoginIdentity,

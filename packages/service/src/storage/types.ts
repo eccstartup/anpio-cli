@@ -387,5 +387,26 @@ export interface Storage {
   /** Drop an entry that was delivered, or one that will never be. */
   dropOutbox(seq: number): void
 
+  // ---- federation (P8, C11) --------------------------------------------------
+  //
+  // ANP-02 L437 要求服务端实现重放防护。core 的 `verifyHttpMessageSignature` 因此留了
+  // 一个 `nonceStore` 接缝，这里给它一个能跨进程存活的实现——进程内那张 Map 一次重启
+  // 就清空，而"重启一下就能把同一份签名再放一遍"正是重放防护要防的。
+
+  /**
+   * Consume `(keyid, nonce)`, returning whether THIS call was the consumption.
+   *
+   * The check and the write are one statement, and that is the whole point of putting it
+   * here rather than in the caller: two concurrent requests carrying the same signature
+   * both reach this call, and exactly one of them may win. A read-then-write pair in
+   * application code has a window between the two where both read "unused".
+   *
+   * `expiresAt` is when the row stops standing for anything; a pair that is already there
+   * but expired is replaced rather than remembered, because a nonce older than the
+   * signature window cannot be replayed inside one and would otherwise fill the table
+   * with answers that no longer mean anything.
+   */
+  consumeHttpNonce(keyid: string, nonce: string, expiresAt: string, now: string): boolean
+
   close(): void
 }

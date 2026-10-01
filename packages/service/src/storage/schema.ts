@@ -31,8 +31,13 @@
  *  in-place change; the three tables come from `SCHEMA`'s `IF NOT EXISTS` pass, so they
  *  are not in a migration step — but the version still moves, or a file written by v4
  *  would return early from `applySchema` and never get them. The `upload_token` column
- *  needs a `DEFAULT` because SQLite refuses `ADD COLUMN ... NOT NULL` without one. */
-export const SCHEMA_VERSION = 5
+ *  needs a `DEFAULT` because SQLite refuses `ADD COLUMN ... NOT NULL` without one.
+ *
+ *  v6: `http_nonces` is new — the ANP-02 replay cache the cross-domain outer signature
+ *  needs (federation.md §6). Like v3 and the three P7 tables it arrives through the
+ *  `IF NOT EXISTS` pass and needs no migration step of its own; the version still moves
+ *  for the same reason. */
+export const SCHEMA_VERSION = 6
 
 export const SCHEMA: readonly string[] = [
   // ---- idempotency -----------------------------------------------------------
@@ -274,4 +279,20 @@ export const SCHEMA: readonly string[] = [
      last_error       TEXT
    )`,
   `CREATE INDEX IF NOT EXISTS outbox_due ON outbox (next_attempt_at)`,
+
+  // ---- federation (P8) -------------------------------------------------------
+  // 外层签名的一次性 nonce 缓存，ANP-02 L437 要求服务端**必须**有。键是
+  // (keyid, nonce) 这一**对**：nonce 只保证签者自己内部唯一，拿裸 nonce 当键会让一个
+  // DID 的重放烧掉另一个 DID 的挑战（core 的 `NonceStore` 里有完整说明）。
+  //
+  // 行只活一个短窗口，过期之后"这个 nonce 用过没有"就没有意义了，所以清理是 DELETE
+  // 而不是标记。`expires_at` 上的索引是给那次 DELETE 用的——没有它，每来一个跨域请求
+  // 都要全表扫一遍来找已经死掉的行。
+  `CREATE TABLE IF NOT EXISTS http_nonces (
+     keyid       TEXT NOT NULL,
+     nonce       TEXT NOT NULL,
+     expires_at  TEXT NOT NULL,
+     PRIMARY KEY (keyid, nonce)
+   )`,
+  `CREATE INDEX IF NOT EXISTS http_nonces_expiry ON http_nonces (expires_at)`,
 ]

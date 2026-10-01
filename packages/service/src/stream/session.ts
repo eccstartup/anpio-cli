@@ -226,8 +226,12 @@ export function createStreamSession(deps: StreamSessionDeps): StreamSession {
           return
         }
         // Not ours, so it goes through the control plane's own path. The upgrade request's
-        // headers stand in for the frame's: they describe the same connection, and that is
-        // what the outer-auth layer (C11) will read.
+        // headers are passed along, but no HTTP method is: a frame is not an HTTP request,
+        // and the outer signature (C11) covers `@method` / `@target-uri`. Verifying one from
+        // an upgrade that happened earlier would be proving a different thing with it, so
+        // `method` stays absent and the outer layer stands down (§2.3). What authenticates
+        // the frame is the business layer — `stream.auth` holds the mailbox and every call
+        // still carries its own `origin_proof`.
         const answer = await deps.handleRpc({ body: text, headers: request.headers, url: frameUrl(request) })
         emit(answer)
         backfillAnswered(answer)

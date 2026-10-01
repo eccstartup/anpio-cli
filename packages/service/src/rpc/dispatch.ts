@@ -11,19 +11,25 @@
 import {
   contentDigestOf,
   DidKeyResolver,
+  DidServiceLocator,
   idempotencyKey,
   idempotencyScopeFromMeta,
   JSON_RPC_ERROR,
   rpcRejection,
   signedRequestObject,
+  type AnpLoginFailure,
   type AnpMeta,
   type AnpParams,
   type AnpRejection,
   type KeyResolver,
   type LocateOptions,
+  type NonceStore,
+  type ServiceLocator,
 } from '@agentx/core'
 import type { Config } from '../config'
 import { capabilitiesResult } from '../capabilities'
+import { createHttpNonceStore } from '../federation/nonces'
+import { challengeHeader, verifyOuterIdentity } from '../federation/outer'
 import type { RpcHandler, RpcResponse } from '../http/server'
 import type { DeliveryRecord, Storage } from '../storage/types'
 import { acceptOperation } from './accept'
@@ -57,6 +63,13 @@ export interface DispatchDeps {
   /** Passed to the resolver on every verification. Defaults to the config's
    *  `didResolution`, which is the operator's SSRF allowlist. */
   resolverOptions?: LocateOptions
+  /** Resolves a caller anchor's DID document to its service entries — P8 §6.2.2 steps 2–3.
+   *  Defaults to core's `DidServiceLocator`; a test substitutes one that answers from an
+   *  inline document, which is what keeps the cross-domain path testable without a network. */
+  locator?: ServiceLocator
+  /** 跨域外层签名的重放缓存（P8 §6.2.2 第 8 步、federation.md §2.2）。默认为本服务自己
+   *  `Storage` 上的 `http_nonces` 表。 */
+  nonceStore?: NonceStore
   /** Authentication failures are logged with their reason, which is deliberately NOT
    *  put on the wire (`auth.ts` explains why: answering "was this keyid authorized"
    *  per request is an oracle). */
@@ -80,8 +93,14 @@ export interface DispatchDeps {
 export function createDispatch(deps: DispatchDeps): RpcHandler {
   const resolver = deps.resolver ?? new DidKeyResolver()
   const resolverOptions = deps.resolverOptions ?? deps.config.didResolution
+  const locator = deps.locator ?? new DidServiceLocator()
+  const nonceStore = deps.nonceStore ?? createHttpNonceStore(deps.storage)
   const now = deps.now ?? (() => new Date())
   const log = deps.log ?? ((line: string): void => void process.stderr.write(`${line}\n`))
+  // `config.publicUrl` 已经过 `normalizeUrl`，保证是一个绝对的 http(s) URL（配置层拒过别的）。
+  // 外层签名覆盖的是 `@target-uri`，而那是一个绝对 URI——scheme 只能来自部署声明：本服务
+  // 自己是明文监听，落在 TLS 终止后面时客户端签的是 `https`，从 socket 上看不出来。
+  const publicUrl = new URL(deps.config.publicUrl)
 
   /**
    * 这个方法收下这次调用的**状态改变**，返回 §7.1.3 的 `result`。
@@ -171,6 +190,38 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
     if (!parsed.ok) return errorResponse(failureId(text, parsed.error), parsed.error)
 
     const envelope = parsed.value
+
+    // P8 §6.2.2 的八步跑在 JSON-RPC **之前**（federation.md §2.4），所以它排在方法表、
+    // 排在这个通知短路之前：一份跨域通知被拒时，对端要拿到的是 401，而不是"没有响应"。
+    // 没带外层身份的请求在这里原样放过——那是本地调用，业务动作仍由 `origin_proof` 授权
+    // （§2.3，代价写在 federation.md 里）。
+    if (request.method !== undefined) {
+      const outer = await verifyOuterIdentity({
+        method: envelope.method,
+        params: envelope.params,
+        http: {
+          method: request.method,
+          path: request.url.pathname,
+          search: request.url.search,
+          // 客户端寻址的是哪个 authority，它签的就是哪个：`host` 头，不是本服务的监听地址。
+          authority: request.headers.host ?? '',
+          headers: request.headers,
+          body: text,
+        },
+        scheme: publicUrl.protocol,
+        resolver,
+        locator,
+        locateOptions: resolverOptions,
+        nonceStore,
+      })
+      if (outer.kind === 'refused') {
+        // `reason` 只进日志。逐条答出去等于给对端一个"哪一步没过"的探针，而 ANP-02
+        // §3.2.4.1 已经把这件事用一个 `error` 值表示完了。
+        log(`anp: ${envelope.method} refused at the outer layer (${outer.error}: ${outer.reason})`)
+        return outerRefusal(publicUrl.hostname, outer.error)
+      }
+    }
+
     // 通知不答（§5.3 L162、§5.6 L201）。用 `'id' in` 而不是 core 的 `isNotification`：
     // 理由写在 `envelope.ts` 里（联合会被守卫收成 `never`）。
     if (!('id' in envelope)) return noResponse()
@@ -277,6 +328,31 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
   }
 
   return handle
+}
+
+/**
+ * 外层认证失败时回什么。
+ *
+ * 401 的形态是 ANP-02 §3.2.4.1：`WWW-Authenticate` 带 `DIDWba realm=…, error=…`，正文
+ * 按 §4.2.2 L377–383 的示例镜像同一组字段。**没有 `id`**：这一步跑在 JSON-RPC 之前，
+ * 那时信封还没被判为可答复的东西，所以正文里只有 §4.2.2 那三个字段，不是一份 JSON-RPC 响应。
+ *
+ * `unverifiable` 是例外，它回 503 且**不进挑战头**：那个词的语义是"我们（本服务）得不出
+ * 结论"（core 把 `VerifyFailure.store_failed` 收在这里），回 401 会把对端送去重签一份本来
+ * 没问题的请求。ANP-02 §3.2.4.1 的九个 `error` 值里也没有它——把它塞进头里等于自造词汇。
+ */
+function outerRefusal(realm: string, error: AnpLoginFailure): RpcResponse {
+  if (error === 'unverifiable') {
+    // 正文里连 `unverifiable` 都不写：那是本服务的内部词，对端能做的是稍后重试，而不是
+    // 根据我们的诊断去改什么。
+    return { status: 503, contentType: 'application/json', body: JSON.stringify({ code: 503 }) }
+  }
+  return {
+    status: 401,
+    contentType: 'application/json',
+    body: JSON.stringify({ code: 401, error }),
+    headers: { 'www-authenticate': challengeHeader(realm, error) },
+  }
 }
 
 /**

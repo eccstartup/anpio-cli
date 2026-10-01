@@ -28,6 +28,16 @@ export interface RpcRequest {
   body: string
   headers: IncomingMessage['headers']
   url: URL
+  /**
+   * 这次调用是作为**哪一个 HTTP 方法**到达的。
+   *
+   * 只为外层签名而带（P8 §6.2.2 第 8 步的 `@method`）：那个签名覆盖的是 `@method` 与
+   * `@target-uri`，两者都是 HTTP 请求的属性，而不是 JSON-RPC 的。所以这个字段缺席表示
+   * "这次调用不是一次 HTTP 请求"——流式那条路上的帧就是这种（`stream/session.ts` 把升级
+   * 请求的头借给了帧，但帧本身不是 HTTP 请求，对它跑外层认证等于拿升级时签的东西去证明
+   * 另一件事）。缺席时外层认证整段跳过，业务层的 `origin_proof` 照常。
+   */
+  method?: string
 }
 
 export interface RpcResponse {
@@ -36,6 +46,14 @@ export interface RpcResponse {
   status: number
   body: string
   contentType?: string
+  /**
+   * 附加响应头。
+   *
+   * 存在的理由是外层认证那一条：ANP-02 §3.2.4.1 把 401 的挑战放在 `WWW-Authenticate`
+   * 里，而那个判定要读过信封才做得了（八步的第一步是 caller anchor），所以它发生在
+   * `handleRpc` 这一侧——响应头因此必须能穿过这道缝，而不是让 HTTP 层自己再判一次。
+   */
+  headers?: Record<string, string>
 }
 
 /** The seam C2 onward plugs into. Returning a value rather than writing to the response
@@ -195,7 +213,8 @@ export function createServer(options: ServerOptions): RunningServer {
     const url = new URL(req.url ?? '/', 'http://localhost')
 
     if (url.pathname === RPC_PATH) {
-      if (req.method !== 'POST') {
+      const method = req.method
+      if (method !== 'POST') {
         refuse(res, 405, 'method not allowed', { allow: 'POST' })
         return
       }
@@ -208,8 +227,8 @@ export function createServer(options: ServerOptions): RunningServer {
         refuse(res, 413, `request body exceeds ${config.maxBody} bytes`)
         return
       }
-      const answer = await options.handleRpc({ body, headers: req.headers, url })
-      send(res, answer.status, answer.contentType ?? 'application/json', answer.body)
+      const answer = await options.handleRpc({ body, headers: req.headers, url, method })
+      send(res, answer.status, answer.contentType ?? 'application/json', answer.body, answer.headers ?? {})
       return
     }
 

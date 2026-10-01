@@ -64,6 +64,11 @@ const MAIN = [
   'createDidDocumentStore',
   'didToUrl',
   'verifyHttpMessageSignature',
+  // 跨域那一半（P8 §6.2.2）：`verifyHttpSignatureForServer` 是入站服务端用的同一套
+  // 校验，理由收成 ANP-02 的九个词；`anpErrorForResolveFailure` 把解析失败也收进同一张表
+  // ——"哪一步没过"只在这里翻译一次，调用方不自己拼错误码。
+  'verifyHttpSignatureForServer',
+  'anpErrorForResolveFailure',
   // ANP-02 §4：同一份证明装在 JSON envelope 里，字段从 `auth` 取、摘要绑 `payload`
   'verifyAnpJsonAuthRequest',
   'createNonceStore',
