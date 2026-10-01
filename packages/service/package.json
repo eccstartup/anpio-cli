@@ -41,7 +41,7 @@
   "scripts": {
     "build": "tsup",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "vitest run --passWithNoTests",
     "dev": "node --watch src/main.ts",
     "clean": "rm -rf dist"
   },

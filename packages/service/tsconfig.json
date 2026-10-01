@@ -6,5 +6,9 @@
     "allowImportingTsExtensions": true,
     "rewriteRelativeImportExtensions": true
   },
-  "include": ["src"]
+  // `src` lands with C1. Until then the package has no source, and `tsc` fails on an
+  // `include` that matches nothing (TS18003) — which turns the repo-wide `typecheck` red
+  // for a package that simply has not been written yet. The config files are real files,
+  // so they are covered instead.
+  "include": ["src", "*.ts"]
 }
