@@ -215,16 +215,30 @@
     挡 MTI 第 1/4/5 项；`serviceDid` 文档由 `awiki-open-server` 托管，外层 `keyid` 的 fragment
     必须与它写进去的一致
 - C12 P5 E2EE：prekey bundle + Mailbox
+  - ~~设计~~（2026-10-01：[e2ee-direct.md](docs/design/e2ee-direct.md)。定下的是几个规范没
+    说话的地方——**OPK 池只出不进**（`assigned` 是终态，于是 §6.6 L449 那条"建链成功后标记
+    已消费"服务端根本观察不到，被更强的不变量覆盖掉，**不是被忽略**）；`publish` / `get`
+    两条幂等键的分工与"幂等记录 + OPK 分配"的原子写；§11.5 的两类重放状态一边一半
+    （外层归服务端、init replay 归客户端，因为键含 `session_id`）。不建 init replay 表）
+  - 还剩：两条 Key 方法进方法表（`targetScope` 两档不同）+ OPK 池与分配 + `bundle_id`
+    不可重定义检查（§6.2.2 L371）+ Mailbox 的设备维度 + 限流（§7.3 L598 是 MUST 的落点）
+  - **动手前先留列**：`deliveries` / `DeliveryRecord` 没有设备列，而 C7 的订阅路由键是
+    `owner_did`（[realtime.md](docs/design/realtime.md) §5.1 L111 把 `device_id` 定成"搭车"）。
+    P5 要求只投给 `meta.recipient_device_id`（§10.7.1 L1407）→ **C6 / C7 先别把 `ownerDid`
+    焊死成唯一路由键**，加一列比事后拆键便宜
+  - **挡住 v1 的**：无。两条 Key 方法同域即可跑，跨域部分随 C11
 - C13 P6 群组 E2EE：KeyPackage 状态机 + Device Delivery Queue
 
 ## D. 待用户裁定
 
 - D2 P6 发布前置：MLS `ExtensionType 0xF0A1` 的 IANA 注册（不在本仓库，但会挡住 P6）
-- D4 P6 客户端侧的 MLS 库放哪（C13 才有影响，现在只是记下）。规范不点名实现，只要求
+- D4 客户端侧的密码学库放哪（C12 就已经有影响——P5 的 X3DH-like 与 Double Ratchet 同样
+  在设备侧；C13 的 MLS 更重）。规范不点名实现，只要求
   MLS 1.0 语义 + 套件 `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`；服务端一行不碰
   MLS（P6 L146 / L1266 的 MUST NOT）。两选：**(a)** 内嵌进 `connectx`（Rust 库走
-  napi / wasm 绑进 Node）；**(b)** 另起一个本地进程/库持有 MLS 状态，`connectx` 只收发。
-  区别是"设备身份 + MLS 私有状态"是一处落盘还是两处
+  napi / wasm 绑进 Node）；**(b)** 另起一个本地进程/库持有密码学状态，`connectx` 只收发。
+  区别是"设备私钥 + 会话/Ratchet 状态"是一处落盘还是两处。取舍另见
+  [e2ee-direct.md](docs/design/e2ee-direct.md) §9.1
 
 ~~D1 包名：`@agentx/*`~~（2026-10-01 定：`@agentx/core` / `@agentx/cli` / `@agentx/service`，用户说后面可改）
 

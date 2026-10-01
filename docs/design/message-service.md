@@ -223,6 +223,11 @@ Postgres 的事等真需要多实例时再说，现在不做抽象层之上的�
 | `direct.e2ee.get_prekey_bundle` | 取对方的 |
 | `direct.send`（重载） | `content_type` 变为 `application/anp-direct-init+json` → `application/anp-direct-cipher+json` |
 
+两条 Key 方法都是 **service-scoped**（§7.1 L465、§7.2 L520），且**幂等键不同**：`get`
+比 `publish` 多出 `target_did` / `target_device_id`（§7.2 L579），并要求"幂等记录写入 +
+OPK 分配"**原子**完成（§7.2 L581），同一键重试 **MUST** 拿回同一 OPK（§7.2 L580）。
+本层不碰任何密码学——见 [e2ee-direct.md](e2ee-direct.md)。
+
 ### P6 群组 E2EE — `anp.group.e2ee.v2`
 
 `publish_key_package` / `get_key_package` / `create` / `add` / `remove` / `send`，
@@ -809,7 +814,19 @@ E2EE 会话里的取件走 Mailbox，明文历史走 `inbox.get`。两者别混�
 
 ## 11. E2EE 对本服务的硬约束
 
-- **MUST NOT 解密或重加密**（P5 §1392、P6 §1496）。
+- **MUST NOT 解密或重加密**（P5 §1392、P6 §1496）。P5 这一侧服务端只有两件事：
+  **钥匙柜**（§4.4 L204–210 那七项密钥材料能力）与**邮箱**（§10.7 L1391 只放不透明密文）。
+  §14.3 L1590–1594 说明这条边界的价值：一个恶意 Key Service 最坏只能拒绝转发、
+  拒绝发放 OPK、诱导建链失败。
+- **设备寻址是本层的一等公民**，且资格**每次操作都要重判**（P5 §4.1.1 L171–178、
+  §12.4 L1515、P2 L630）。所选设备不在**当前** Manifest 里、未宣告本 Profile、
+  或密钥引用对不上 → 停止供材料、停止入队投递、拒绝新材料并停用受影响 Session。
+- **Mailbox 的键必须含设备**：§10.7 L1396「其授权与投递键 **MUST** 包含接收 DID 与设备」，
+  而 [realtime.md](realtime.md) §5.1 L111 现在把 `device_id` 定成"搭车过来"——
+  C12 要把订阅路由键从 `owner_did` 变成 `(owner_did, recipient_device_id)`。
+  这条缝的完整说明在 [e2ee-direct.md](e2ee-direct.md) §4，C6 / C7 要先留出那一列。
+- **§11.5 的两类状态一边一半**：外层幂等记录归服务端（就是 §6 那张表，键多两个设备段），
+  init replay 记录归客户端（键含 `session_id`，是 DH 产物）。
 - Device Delivery Queue 只持久化**公开元数据 + 不可读密文**（P6 §1508）。
 - 群成员变更时，**历史密钥材料不得回溯分发**——`group.e2ee.add` 只给
   `commit_b64u` / `welcome_b64u` / `ratchet_tree_b64u`，本服务原样转发。
@@ -953,7 +970,8 @@ AGENTX_DID_DEV_HOSTS      联调放宽：这些域可以解析私有地址、可
 
 **v3**
 
-10. P5 E2EE（prekey bundle + Mailbox）
+10. P5 E2EE（prekey bundle + Mailbox）——钥匙柜与邮箱、OPK 池只出不进、
+    Mailbox 加设备维度——决策见 [e2ee-direct.md](e2ee-direct.md)
 11. P6 群组 E2EE（KeyPackage 状态机 + Device Delivery Queue）
 
 **发布前置条件**（不是本仓库的活，但会挡住 P6）：P6 仍是候选状态，
