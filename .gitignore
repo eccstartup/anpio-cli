@@ -10,4 +10,7 @@ dist/
 # attachment object store
 objects/
 
+# VitePress：构建产物 .vitepress/dist 已被上面的 dist/ 覆盖，缓存目录没有
+.vitepress/cache/
+
 .DS_Store
