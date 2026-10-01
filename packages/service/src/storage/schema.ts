@@ -47,8 +47,14 @@
  *  v8: `one_time_prekeys` is new — the per-device OPK pool P5 §6.6 hands out from. Like
  *  v3 and v6 it arrives through the `IF NOT EXISTS` pass and needs no migration step of
  *  its own; the version still moves, or a file written by v7 would return early from
- *  `applySchema` and never get the table. */
-export const SCHEMA_VERSION = 8
+ *  `applySchema` and never get the table.
+ *
+ *  v9: P6 (C13) arrives. Three tables — `group_leaves` (§11.10.3 L1372's public projection),
+ *  `group_did_updates` (§10.5's orchestration progress) and `device_envelopes` (§12.6's
+ *  Device Delivery Queue) — plus two columns on `group_key_packages` recording which caller
+ *  reserved a KeyPackage. Only the two columns are an in-place change; the three tables come
+ *  from the `IF NOT EXISTS` pass, and the version moves for the usual reason. */
+export const SCHEMA_VERSION = 9
 
 export const SCHEMA: readonly string[] = [
   // ---- idempotency -----------------------------------------------------------
@@ -227,6 +233,13 @@ export const SCHEMA: readonly string[] = [
   // `uploaded_at` 而过滤条件已经由主键前缀定死。
   `CREATE INDEX IF NOT EXISTS one_time_prekeys_pool
      ON one_time_prekeys (owner_did, owner_device_id, state, uploaded_at)`,
+  // KeyPackage 柜子（P6 §8.2.4 L765–770）。三态而不是两态：`available → reserved → consumed`，
+  // 与 P5 的 OPK 池的差别就在**第三个状态有触发者**——对应的 `group.e2ee.add` 是经过本服务的
+  // 控制动作，它把 `group_key_package` 内联带着，所以 Host 能按 `key_package_id` 定位到这一行。
+  //
+  // `reserved_to` / `reserved_at` 是"这枚被谁领走了"的唯一记录：§8.2.4 L769 要求两
+  // 次 add 不能复用同一枚，而这句话只有在预约写下了领取者时才判得了。它们不是幂等用的
+  // 台账（那是 `idempotency` 表的活），形状与 OPK 池的 `assigned_to` / `assigned_at` 相同。
   `CREATE TABLE IF NOT EXISTS group_key_packages (
      owner_did        TEXT NOT NULL,
      owner_device_id  TEXT NOT NULL,
@@ -234,8 +247,70 @@ export const SCHEMA: readonly string[] = [
      package_json     TEXT NOT NULL,
      state            TEXT NOT NULL,
      published_at     TEXT NOT NULL,
+     reserved_to      TEXT,
+     reserved_at      TEXT,
      PRIMARY KEY (owner_did, owner_device_id, key_package_id)
    )`,
+
+  // §11.10.3 L1372 的公开投影：谁在群里、以哪台设备、在哪个 epoch 上成立。**这是 Host 侧
+  // 唯一的"群密码学状态"，而它是投影不是状态**——每一条都是某次被接受的控制动作的结论，
+  // 不含任何能参与运算的材料（e2ee-group.md §5）。所以这一表里没有私钥、没有 epoch secret，
+  // 一列都不该有。
+  //
+  // `state = terminal` 的行**留着不删**：Remove 之后同一 `(did, device)` 可能重新加入，而
+  // §10.3 L1066 的触发条件问的是"该精确设备当前**没有** Leaf"——删了行就分不出"第一次进群"
+  // 与"重新加入"。重新加入是**覆盖**这一行（`upsertGroupLeaf`），区分在 Add 那一刻被消费掉。
+  `CREATE TABLE IF NOT EXISTS group_leaves (
+     group_did          TEXT NOT NULL,
+     member_did         TEXT NOT NULL,
+     member_device_id   TEXT NOT NULL,
+     crypto_group_id    TEXT NOT NULL,
+     epoch              TEXT NOT NULL,
+     state              TEXT NOT NULL,
+     added_by_ref_json  TEXT NOT NULL,
+     updated_at         TEXT NOT NULL,
+     PRIMARY KEY (group_did, member_did, member_device_id)
+   )`,
+  `CREATE INDEX IF NOT EXISTS group_leaves_by_did ON group_leaves (group_did, member_did)`,
+
+  // §10.5 的编排进度：成员 DID 更新期间暂停并串行化 P6 控制动作。每群至多一行，`progress`
+  // 记走到哪一步。§11.10.3 L1374 明说它**不是**协议级成员状态，但它要落库，否则重启后
+  // 不知道暂停到哪了（e2ee-group.md §8）。
+  `CREATE TABLE IF NOT EXISTS group_did_updates (
+     group_did        TEXT PRIMARY KEY,
+     event_ref_json   TEXT NOT NULL,
+     progress         TEXT NOT NULL,
+     expected_json    TEXT NOT NULL,
+     done_json        TEXT NOT NULL,
+     started_at       TEXT NOT NULL
+   )`,
+
+  // §12.6 的 Device Delivery Queue。推的、可重试、有界的队列——与 P5 的 Mailbox 只共享
+  // "以 recipient_device_id 定址"那条缝，不共享表：那张是拉的信箱（`deliveries`），这张是
+  // 推的队列，而 §12.6 末段禁止 P6 信封出现在按自述设备取件的面上（e2ee-group.md §6）。
+  //
+  // `kind` 不是分类学，是 §6.1 那张排序表的例外：只有 `welcome-delivery` 允许越过待投的
+  // 应用信封，其余一律排队头。`group_did` 单列而非从 JSON 现取：§12.6 第 3 条要求每次尝试
+  // **前**重查 leaf 投影。`attempts` / `next_attempt_at` / `last_error` 与 outbox 同理。
+  //
+  // 只存**待投**的行：传输确认即删，到保留上限也删。所以没有 `state` 列——一行在或不在
+  // 就是全部状态。
+  `CREATE TABLE IF NOT EXISTS device_envelopes (
+     recipient_did        TEXT NOT NULL,
+     recipient_device_id  TEXT NOT NULL,
+     seq                  INTEGER NOT NULL,
+     group_did            TEXT NOT NULL,
+     kind                 TEXT NOT NULL,
+     envelope_json        TEXT NOT NULL,
+     origin_context_json  TEXT,
+     attempts             INTEGER NOT NULL DEFAULT 0,
+     next_attempt_at      TEXT NOT NULL,
+     last_error           TEXT,
+     enqueued_at          TEXT NOT NULL,
+     PRIMARY KEY (recipient_did, recipient_device_id, seq)
+   )`,
+  // 到期扫描按时间走；队列内仍按主键的 `seq` 取队头。
+  `CREATE INDEX IF NOT EXISTS device_envelopes_due ON device_envelopes (next_attempt_at)`,
 
   // ---- attachments (P7) ------------------------------------------------------
   // 控制面对象状态机（§10.1 L808–824）。`state` 只有 pending / uploaded / committed /

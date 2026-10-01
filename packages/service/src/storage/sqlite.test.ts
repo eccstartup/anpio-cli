@@ -647,3 +647,249 @@ describe('prekey bundles and one-time prekeys (P5, C12)', () => {
     expect(store.availableOneTimePrekeys(OWNER, 'dev-b')).toBe(1)
   })
 })
+
+/** P6 的三个存储面（C13）。这一层判的仍是**行语义**：柜子的三态转移、投影对"重新加入"的
+ *  覆盖、队列内序的赋值。§13.3 L1625 那个判定序、§6.1 那张排序表都是上层的事。 */
+describe('the KeyPackage cabinet (P6, C13)', () => {
+  const OWNER = 'did:web:owner.example'
+  const DEV = 'dev-a'
+
+  function kp(keyPackageId: string, publishedAt = '2026-10-01T00:00:00Z') {
+    return {
+      ownerDid: OWNER,
+      ownerDeviceId: DEV,
+      keyPackageId,
+      packageJson: JSON.stringify({ key_package_id: keyPackageId }),
+      state: 'available',
+      publishedAt,
+    }
+  }
+
+  it('ignores a re-publish of the same id instead of applying it', () => {
+    // `key_package_id` 由发布方自己起（§7.3 L563），所以重发是正常事。覆盖会把两件事一起
+    // 做坏：把已经 `consumed` 的一枚复活（§13.2 L1610 只在部署显式声明 last-resort 时允许），
+    // 以及把已经交出去的那份 `package_json` 换掉。
+    const store = open()
+    store.insertGroupKeyPackage(kp('kp-1'))
+    expect(store.markGroupKeyPackageConsumed(OWNER, DEV, 'kp-1')).toBe('consumed')
+
+    store.insertGroupKeyPackage({ ...kp('kp-1', '2026-10-01T00:00:05Z'), packageJson: JSON.stringify({ swapped: true }) })
+    expect(store.groupKeyPackage(OWNER, DEV, 'kp-1')?.state).toBe('consumed')
+    expect(store.groupKeyPackage(OWNER, DEV, 'kp-1')?.packageJson).toBe(JSON.stringify({ key_package_id: 'kp-1' }))
+  })
+
+  it('lists only the available ones, oldest first, and hands over the whole object', () => {
+    // 交回**列表**而不是计数：§8.2.4 L763 的"应当返回未过期的一枚"要看 `expires_at`，而它
+    // 在对象里面——取它就得对不透明的 blob 做 `json_extract`（`inboxPage` 那条注释挡的就是
+    // 这扇门），所以未过期与否由调用方拿对象自己判。
+    const store = open()
+    store.insertGroupKeyPackage(kp('kp-b', '2026-10-01T00:00:01Z'))
+    store.insertGroupKeyPackage(kp('kp-a', '2026-10-01T00:00:02Z'))
+    store.insertGroupKeyPackage(kp('kp-c', '2026-10-01T00:00:02Z'))
+
+    expect(store.availableGroupKeyPackages(OWNER, DEV).map((k) => k.keyPackageId)).toEqual(['kp-b', 'kp-a', 'kp-c'])
+
+    store.claimGroupKeyPackage(OWNER, DEV, 'kp-b', 'did:web:host.example', '2026-10-01T00:00:03Z')
+    expect(store.availableGroupKeyPackages(OWNER, DEV).map((k) => k.keyPackageId)).toEqual(['kp-a', 'kp-c'])
+  })
+
+  it('lets exactly one caller claim a package, and records which one (§8.2.4 L769)', () => {
+    // 认领就是那句条件 UPDATE：只有把行移出 `available` 的调用方看到 `changes > 0`，所以
+    // 两个并发的 `group.e2ee.add` 拿不到同一枚（与 `claimOneTimePrekey` 同形、同理由）。
+    const store = open()
+    store.insertGroupKeyPackage(kp('kp-1'))
+
+    expect(store.claimGroupKeyPackage(OWNER, DEV, 'kp-1', 'did:web:host-a.example', '2026-10-01T00:00:03Z')).toBe(true)
+    expect(store.claimGroupKeyPackage(OWNER, DEV, 'kp-1', 'did:web:host-b.example', '2026-10-01T00:00:04Z')).toBe(false)
+
+    const row = store.groupKeyPackage(OWNER, DEV, 'kp-1')
+    expect(row?.state).toBe('reserved')
+    // 领到了谁：§8.2.4 L769 要能说出是哪次 add 拿走的，第二次 add 才不至于悄悄复用。
+    expect(row?.reservedTo).toBe('did:web:host-a.example')
+    expect(row?.reservedAt).toBe('2026-10-01T00:00:03Z')
+  })
+
+  it('separates a consumed package from one it never issued', () => {
+    // 三种结局而不是布尔：本服务从没发过的一枚不能被叫作 consumed（没有东西证明它被用了），
+    // 而已经 consumed 的那枚要答 `group.e2ee.key_package_consumed`（5012）。
+    const store = open()
+    store.insertGroupKeyPackage(kp('kp-1'))
+
+    expect(store.markGroupKeyPackageConsumed(OWNER, DEV, 'kp-unknown')).toBe('missing')
+
+    // `reserved` 与 `available` 都进 `consumed`：§8.2.4 L769 的触发是那次被接受的 add，
+    // 它把 KeyPackage 内联带着，与本服务有没有经手发放无关。
+    store.insertGroupKeyPackage(kp('kp-2'))
+    store.claimGroupKeyPackage(OWNER, DEV, 'kp-2', 'did:web:host.example', '2026-10-01T00:00:03Z')
+    expect(store.markGroupKeyPackageConsumed(OWNER, DEV, 'kp-2')).toBe('consumed')
+    expect(store.markGroupKeyPackageConsumed(OWNER, DEV, 'kp-2')).toBe('already-consumed')
+  })
+})
+
+describe('the leaf projection (P6, C13)', () => {
+  const GROUP = 'did:web:host.example:group:g1'
+
+  function leaf(memberDeviceId: string, state = 'active', memberDid = 'did:web:alice.example') {
+    return {
+      groupDid: GROUP,
+      memberDid,
+      memberDeviceId,
+      cryptoGroupId: 'crypto-1',
+      epoch: '7',
+      state,
+      addedByRefJson: JSON.stringify({ event_seq: '3' }),
+      updatedAt: '2026-10-01T00:00:00Z',
+    }
+  }
+
+  it('overwrites a terminal row on a re-join, so "is a leaf" has one answer', () => {
+    // `state = terminal` 的行**留着不删**（§10.3 L1066 的触发条件问的是"该精确设备当前没有
+    // Leaf"），所以重新加入只能**覆盖**它——留两行会让"这台设备现在是不是 leaf"有两个答案。
+    const store = open()
+    store.upsertGroupLeaf(leaf('dev-a'))
+    expect(store.groupLeaf(GROUP, 'did:web:alice.example', 'dev-a')?.state).toBe('active')
+
+    store.upsertGroupLeaf(leaf('dev-a', 'terminal'))
+    expect(store.groupLeaf(GROUP, 'did:web:alice.example', 'dev-a')?.state).toBe('terminal')
+
+    store.upsertGroupLeaf({ ...leaf('dev-a'), epoch: '9', updatedAt: '2026-10-01T00:00:09Z' })
+    const row = store.groupLeaf(GROUP, 'did:web:alice.example', 'dev-a')
+    expect(row?.state).toBe('active')
+    expect(row?.epoch).toBe('9')
+    // 一台设备一行，不是历史。
+    expect(store.activeGroupLeaves(GROUP)).toHaveLength(1)
+  })
+
+  it('fans out to the active leaves only, in a stable order', () => {
+    const store = open()
+    store.upsertGroupLeaf(leaf('dev-b', 'active', 'did:web:bob.example'))
+    store.upsertGroupLeaf(leaf('dev-a', 'active', 'did:web:alice.example'))
+    store.upsertGroupLeaf(leaf('dev-a2', 'active', 'did:web:alice.example'))
+    store.upsertGroupLeaf(leaf('dev-c', 'terminal', 'did:web:carol.example'))
+
+    // 顺序是稳定的（先 DID 后设备），否则 `group.e2ee.notice` 的扇出两次跑出两个顺序。
+    expect(store.activeGroupLeaves(GROUP).map((l) => `${l.memberDid}#${l.memberDeviceId}`)).toEqual([
+      'did:web:alice.example#dev-a',
+      'did:web:alice.example#dev-a2',
+      'did:web:bob.example#dev-b',
+    ])
+    // `terminal` 那台不投，但它的行还在（上面那条要区分第一次进群与重新加入）。
+    expect(store.groupLeaf(GROUP, 'did:web:carol.example', 'dev-c')?.state).toBe('terminal')
+  })
+})
+
+describe('the DID-update orchestration row (P6, C13)', () => {
+  const GROUP = 'did:web:host.example:group:g1'
+
+  function progress(progress: string, startedAt = '2026-10-01T00:00:00Z') {
+    return {
+      groupDid: GROUP,
+      eventRefJson: JSON.stringify({ event_seq: '4' }),
+      progress,
+      expectedJson: JSON.stringify([['did:web:alice.example', 'dev-a']]),
+      doneJson: JSON.stringify([]),
+      startedAt,
+    }
+  }
+
+  it('keeps one row per group and replaces it as the orchestration advances', () => {
+    // 每群至多一行：这张表说的是"这次暂停走到哪了"，不是它的历史（§11.10.3 L1374 明说它不是
+    // 协议级成员状态）。§10.5 L1094 的暂停靠"有没有这一行"判，所以走完必须清掉。
+    const store = open()
+    expect(store.groupDidUpdate(GROUP)).toBeUndefined()
+
+    store.upsertGroupDidUpdate(progress('add-pending'))
+    expect(store.groupDidUpdate(GROUP)?.progress).toBe('add-pending')
+
+    store.upsertGroupDidUpdate({ ...progress('remove-pending', '2026-10-01T00:00:01Z'), doneJson: JSON.stringify([['did:web:alice.example', 'dev-a']]) })
+    const row = store.groupDidUpdate(GROUP)
+    expect(row?.progress).toBe('remove-pending')
+    expect(row?.doneJson).toBe(JSON.stringify([['did:web:alice.example', 'dev-a']]))
+
+    store.clearGroupDidUpdate(GROUP)
+    expect(store.groupDidUpdate(GROUP)).toBeUndefined()
+  })
+})
+
+describe('the device delivery queue (P6, C13)', () => {
+  const GROUP = 'did:web:host.example:group:g1'
+
+  function envelope(
+    recipientDeviceId: string,
+    kind = 'incoming',
+    nextAttemptAt = '2026-10-01T00:00:00Z',
+    recipientDid = 'did:web:alice.example',
+  ) {
+    return {
+      recipientDid,
+      recipientDeviceId,
+      groupDid: GROUP,
+      kind,
+      envelopeJson: JSON.stringify({ meta: { message_id: 'm-1' } }),
+      attempts: 0,
+      nextAttemptAt,
+      enqueuedAt: '2026-10-01T00:00:00Z',
+    }
+  }
+
+  it('numbers each device from 1 independently', () => {
+    // 序号在一次事务里取（否则两个入队会交错出一个不是有序的队列），而 §12.6 排队的顺序就是
+    // `group_event_seq` —— 也就是入队顺序，所以这里给的号**就是**那个序。
+    const store = open()
+    expect(store.enqueueDeviceEnvelope(envelope('dev-a'))).toBe(1)
+    expect(store.enqueueDeviceEnvelope(envelope('dev-a'))).toBe(2)
+    expect(store.enqueueDeviceEnvelope(envelope('dev-b'))).toBe(1)
+    expect(store.enqueueDeviceEnvelope(envelope('dev-a', 'incoming', '2026-10-01T00:00:00Z', 'did:web:bob.example'))).toBe(1)
+  })
+
+  it('scans by due time but returns each device queue in its own order', () => {
+    // 扫描按 `next_attempt_at` 走（重试要退避，所以不是"入队即到期"），而返回的顺序是队列
+    // 自己的键——§6.1 让 `welcome` 越过待投的应用信封，那个调用要看的是排队顺序。
+    const store = open()
+    store.enqueueDeviceEnvelope(envelope('dev-a', 'incoming', '2026-10-01T00:00:00Z'))
+    store.enqueueDeviceEnvelope(envelope('dev-a', 'commit', '2026-10-01T00:00:02Z'))
+    store.enqueueDeviceEnvelope(envelope('dev-b', 'incoming', '2026-10-01T00:00:01Z'))
+
+    const due = store.dueDeviceEnvelopes('2026-10-01T00:00:01Z', 10)
+    expect(due.map((e) => `${e.recipientDeviceId}#${e.seq}`)).toEqual(['dev-a#1', 'dev-b#1'])
+    // 那枚还在退避的（`dev-a#2`）不在这一页里，但它是**队头之后**的行，不是被丢掉了。
+    expect(store.dueDeviceEnvelopes('2026-10-01T00:00:02Z', 10).map((e) => `${e.recipientDeviceId}#${e.seq}`)).toEqual([
+      'dev-a#1',
+      'dev-a#2',
+      'dev-b#1',
+    ])
+  })
+
+  it('reschedules with a reason, then drops a row that leaves the queue', () => {
+    const store = open()
+    const seq = store.enqueueDeviceEnvelope(envelope('dev-a'))
+    expect(store.dueDeviceEnvelopes('2026-10-01T00:00:00Z', 10)[0]?.attempts).toBe(0)
+
+    store.rescheduleDeviceEnvelope('did:web:alice.example', 'dev-a', seq, 2, '2026-10-01T00:00:05Z', 'connection refused')
+    const [row] = store.dueDeviceEnvelopes('2026-10-01T00:00:05Z', 10)
+    expect(row?.attempts).toBe(2)
+    expect(row?.nextAttemptAt).toBe('2026-10-01T00:00:05Z')
+    expect(row?.lastError).toBe('connection refused')
+
+    // 队列只存**待投**的行：传输确认即删、到保留上限也删。所以没有 `state` 列——一行在或不
+    // 在就是全部状态。
+    store.dropDeviceEnvelope('did:web:alice.example', 'dev-a', seq)
+    expect(store.dueDeviceEnvelopes('2026-10-01T00:00:05Z', 10)).toEqual([])
+  })
+
+  it('keeps the envelope and its origin context verbatim', () => {
+    // §13.6 L1665：proof 的新鲜性在提交时与投递时**用不同方式**判定，所以 `origin_context`
+    // 必须原样留着；§12.6 要求重投无损复现 `message_id` / `ordering` / `group_receipt`。
+    const store = open()
+    store.enqueueDeviceEnvelope({
+      ...envelope('dev-a', 'incoming'),
+      originContextJson: JSON.stringify({ created_at: '2026-10-01T00:00:00Z' }),
+    })
+
+    const [row] = store.dueDeviceEnvelopes('2026-10-01T00:00:00Z', 10)
+    expect(row?.envelopeJson).toBe(JSON.stringify({ meta: { message_id: 'm-1' } }))
+    expect(row?.originContextJson).toBe(JSON.stringify({ created_at: '2026-10-01T00:00:00Z' }))
+    expect(row?.groupDid).toBe(GROUP)
+    expect(row?.kind).toBe('incoming')
+  })
+})

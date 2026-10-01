@@ -20,9 +20,13 @@ import type {
   StoredAttachmentGrant,
   StoredAttachmentObject,
   StoredAttachmentSlot,
+  StoredDeviceEnvelope,
   StoredDownloadTicket,
   StoredGroup,
+  StoredGroupDidUpdate,
   StoredGroupEvent,
+  StoredGroupKeyPackage,
+  StoredGroupLeaf,
   StoredGroupMember,
   StoredMessage,
   StoredOneTimePrekey,
@@ -160,6 +164,13 @@ function applySchema(db: DatabaseSync): void {
     // NOT be fanned out to a sibling. `toDelivery` reads it back as absent when it is
     // NULL, which is exactly what a P3 message means (every device of the account).
     addColumnIfMissing(db, 'deliveries', 'recipient_device_id', 'TEXT')
+    // v9. P6 §8.2.4 L767 allows marking a handed-out KeyPackage `reserved`, and the row has
+    // to say who took it: §8.2.4 L769's "SHOULD NOT let two adds reuse one KeyPackage" is
+    // only checkable if the reservation names its taker. Same shape as the OPK pool's
+    // `assigned_to` / `assigned_at`, and not bookkeeping for idempotency — that is the
+    // `idempotency` table's job.
+    addColumnIfMissing(db, 'group_key_packages', 'reserved_to', 'TEXT')
+    addColumnIfMissing(db, 'group_key_packages', 'reserved_at', 'TEXT')
     for (const statement of SCHEMA) db.exec(statement)
     // `user_version` takes a literal, so the constant is interpolated rather than bound.
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
@@ -328,6 +339,65 @@ function toOneTimePrekey(row: Row): StoredOneTimePrekey {
   const assignedAt = maybeText(row.assigned_at)
   if (assignedAt !== undefined) key.assignedAt = assignedAt
   return key
+}
+
+function toGroupKeyPackage(row: Row): StoredGroupKeyPackage {
+  const entry: StoredGroupKeyPackage = {
+    ownerDid: text(row.owner_did),
+    ownerDeviceId: text(row.owner_device_id),
+    keyPackageId: text(row.key_package_id),
+    packageJson: text(row.package_json),
+    state: text(row.state),
+    publishedAt: text(row.published_at),
+  }
+  const reservedTo = maybeText(row.reserved_to)
+  if (reservedTo !== undefined) entry.reservedTo = reservedTo
+  const reservedAt = maybeText(row.reserved_at)
+  if (reservedAt !== undefined) entry.reservedAt = reservedAt
+  return entry
+}
+
+function toGroupLeaf(row: Row): StoredGroupLeaf {
+  return {
+    groupDid: text(row.group_did),
+    memberDid: text(row.member_did),
+    memberDeviceId: text(row.member_device_id),
+    cryptoGroupId: text(row.crypto_group_id),
+    epoch: text(row.epoch),
+    state: text(row.state),
+    addedByRefJson: text(row.added_by_ref_json),
+    updatedAt: text(row.updated_at),
+  }
+}
+
+function toGroupDidUpdate(row: Row): StoredGroupDidUpdate {
+  return {
+    groupDid: text(row.group_did),
+    eventRefJson: text(row.event_ref_json),
+    progress: text(row.progress),
+    expectedJson: text(row.expected_json),
+    doneJson: text(row.done_json),
+    startedAt: text(row.started_at),
+  }
+}
+
+function toDeviceEnvelope(row: Row): StoredDeviceEnvelope {
+  const envelope: StoredDeviceEnvelope = {
+    recipientDid: text(row.recipient_did),
+    recipientDeviceId: text(row.recipient_device_id),
+    seq: int(row.seq),
+    groupDid: text(row.group_did),
+    kind: text(row.kind),
+    envelopeJson: text(row.envelope_json),
+    attempts: int(row.attempts),
+    nextAttemptAt: text(row.next_attempt_at),
+    enqueuedAt: text(row.enqueued_at),
+  }
+  const originContextJson = maybeText(row.origin_context_json)
+  if (originContextJson !== undefined) envelope.originContextJson = originContextJson
+  const lastError = maybeText(row.last_error)
+  if (lastError !== undefined) envelope.lastError = lastError
+  return envelope
 }
 
 /**
@@ -846,6 +916,222 @@ class SqliteStorage implements Storage {
         WHERE owner_did = ? AND owner_device_id = ? AND state = 'available'`,
     ).get(ownerDid, ownerDeviceId) as Row
     return int(row.total)
+  }
+
+  // ---- P6 group E2EE (C13) ---------------------------------------------------
+
+  groupKeyPackage(
+    ownerDid: string,
+    ownerDeviceId: string,
+    keyPackageId: string,
+  ): StoredGroupKeyPackage | undefined {
+    const row = this.stmt(
+      `SELECT * FROM group_key_packages
+        WHERE owner_did = ? AND owner_device_id = ? AND key_package_id = ?`,
+    ).get(ownerDid, ownerDeviceId, keyPackageId) as Row | undefined
+    return row === undefined ? undefined : toGroupKeyPackage(row)
+  }
+
+  insertGroupKeyPackage(entry: StoredGroupKeyPackage): void {
+    // OR IGNORE, for the same reason the OPK pool ignores a re-upload: `key_package_id` is
+    // the publisher's own name (§7.3 L563), so a second publish of it is expected. Applying
+    // it would do two bad things at once — resurrect a `consumed` package (§13.2 L1610
+    // allows that only under an explicit last-resort declaration) and swap the `package_json`
+    // out from under a caller already handed this id.
+    this.stmt(
+      `INSERT OR IGNORE INTO group_key_packages
+         (owner_did, owner_device_id, key_package_id, package_json, state, published_at, reserved_to, reserved_at)
+       VALUES (?, ?, ?, ?, 'available', ?, NULL, NULL)`,
+    ).run(entry.ownerDid, entry.ownerDeviceId, entry.keyPackageId, entry.packageJson, entry.publishedAt)
+  }
+
+  availableGroupKeyPackages(ownerDid: string, ownerDeviceId: string): StoredGroupKeyPackage[] {
+    // Oldest first, so a cabinet is handed out in publish order. `key_package_id` breaks
+    // ties: two publishes can share a timestamp.
+    //
+    // A list rather than a COUNT because §8.2.4 L763's "SHOULD return an unexpired one"
+    // needs `expires_at`, which lives *inside* the KeyPackage object — digging it out would
+    // be `json_extract` on an opaque blob, the door `inboxPage` keeps shut.
+    const rows = this.stmt(
+      `SELECT * FROM group_key_packages
+        WHERE owner_did = ? AND owner_device_id = ? AND state = 'available'
+        ORDER BY published_at ASC, key_package_id ASC`,
+    ).all(ownerDid, ownerDeviceId) as Row[]
+    return rows.map(toGroupKeyPackage)
+  }
+
+  claimGroupKeyPackage(
+    ownerDid: string,
+    ownerDeviceId: string,
+    keyPackageId: string,
+    reservedTo: string,
+    reservedAt: string,
+  ): boolean {
+    // The CLAIM is this UPDATE, not a prior read — same shape as `claimOneTimePrekey`, and
+    // for the same reason: §8.2.4 L769 SHOULD NOT let two adds reuse one package, and only
+    // the caller that sees `changes > 0` moved the row out of `available`.
+    const result = this.stmt(
+      `UPDATE group_key_packages SET state = 'reserved', reserved_to = ?, reserved_at = ?
+        WHERE owner_did = ? AND owner_device_id = ? AND key_package_id = ? AND state = 'available'`,
+    ).run(reservedTo, reservedAt, ownerDid, ownerDeviceId, keyPackageId)
+    return result.changes > 0
+  }
+
+  markGroupKeyPackageConsumed(
+    ownerDid: string,
+    ownerDeviceId: string,
+    keyPackageId: string,
+  ): 'missing' | 'consumed' | 'already-consumed' {
+    // The write is the test (`state <> 'consumed'` in the WHERE), so no read comes first and
+    // there is no window between the two. `reserved` and `available` both go to `consumed`:
+    // §8.2.4 L769 triggers on the accepted `add`, which carries the package inline, whether
+    // or not this service was the one that handed it out.
+    const result = this.stmt(
+      `UPDATE group_key_packages SET state = 'consumed'
+        WHERE owner_did = ? AND owner_device_id = ? AND key_package_id = ? AND state <> 'consumed'`,
+    ).run(ownerDid, ownerDeviceId, keyPackageId)
+    if (result.changes > 0) return 'consumed'
+
+    // Nothing moved. The row is either not here — this service never issued that id, so
+    // there is nothing it may call consumed — or already consumed.
+    const row = this.stmt(
+      `SELECT state FROM group_key_packages
+        WHERE owner_did = ? AND owner_device_id = ? AND key_package_id = ?`,
+    ).get(ownerDid, ownerDeviceId, keyPackageId) as Row | undefined
+    return row === undefined ? 'missing' : 'already-consumed'
+  }
+
+  groupLeaf(groupDid: string, memberDid: string, memberDeviceId: string): StoredGroupLeaf | undefined {
+    const row = this.stmt(
+      `SELECT * FROM group_leaves
+        WHERE group_did = ? AND member_did = ? AND member_device_id = ?`,
+    ).get(groupDid, memberDid, memberDeviceId) as Row | undefined
+    return row === undefined ? undefined : toGroupLeaf(row)
+  }
+
+  activeGroupLeaves(groupDid: string): StoredGroupLeaf[] {
+    const rows = this.stmt(
+      `SELECT * FROM group_leaves WHERE group_did = ? AND state = 'active'
+        ORDER BY member_did, member_device_id`,
+    ).all(groupDid) as Row[]
+    return rows.map(toGroupLeaf)
+  }
+
+  upsertGroupLeaf(leaf: StoredGroupLeaf): void {
+    // Replacing the row it had is deliberate: §10.3 L1066's re-join trigger is consumed by
+    // the Add that takes it, and two rows for one `(did, device)` would make "is this device
+    // currently a leaf" a question with two answers.
+    this.stmt(
+      `INSERT INTO group_leaves
+         (group_did, member_did, member_device_id, crypto_group_id, epoch, state, added_by_ref_json, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (group_did, member_did, member_device_id) DO UPDATE SET
+         crypto_group_id   = excluded.crypto_group_id,
+         epoch             = excluded.epoch,
+         state             = excluded.state,
+         added_by_ref_json = excluded.added_by_ref_json,
+         updated_at        = excluded.updated_at`,
+    ).run(
+      leaf.groupDid,
+      leaf.memberDid,
+      leaf.memberDeviceId,
+      leaf.cryptoGroupId,
+      leaf.epoch,
+      leaf.state,
+      leaf.addedByRefJson,
+      leaf.updatedAt,
+    )
+  }
+
+  groupDidUpdate(groupDid: string): StoredGroupDidUpdate | undefined {
+    const row = this.stmt('SELECT * FROM group_did_updates WHERE group_did = ?').get(groupDid) as
+      | Row
+      | undefined
+    return row === undefined ? undefined : toGroupDidUpdate(row)
+  }
+
+  upsertGroupDidUpdate(row: StoredGroupDidUpdate): void {
+    // One row per group, so a step that advances the orchestration overwrites its
+    // predecessor: the row is "where did this pause get to", not a history of it (§11.10.3
+    // L1374 says this is not protocol-level membership state at all).
+    this.stmt(
+      `INSERT INTO group_did_updates
+         (group_did, event_ref_json, progress, expected_json, done_json, started_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT (group_did) DO UPDATE SET
+         event_ref_json = excluded.event_ref_json,
+         progress       = excluded.progress,
+         expected_json  = excluded.expected_json,
+         done_json      = excluded.done_json,
+         started_at     = excluded.started_at`,
+    ).run(row.groupDid, row.eventRefJson, row.progress, row.expectedJson, row.doneJson, row.startedAt)
+  }
+
+  clearGroupDidUpdate(groupDid: string): void {
+    this.stmt('DELETE FROM group_did_updates WHERE group_did = ?').run(groupDid)
+  }
+
+  enqueueDeviceEnvelope(envelope: Omit<StoredDeviceEnvelope, 'seq'>): number {
+    return this.transaction(() => {
+      // Per-device head, for the reason `appendDelivery` reads one: the sequence has to be
+      // assigned under the write lock, or two enqueues interleave into a queue that is not
+      // sorted. §12.6 orders a device's queue by `group_event_seq` (commits by epoch), which
+      // is enqueue order — so the number assigned here IS that order.
+      const row = this.stmt(
+        `SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM device_envelopes
+          WHERE recipient_did = ? AND recipient_device_id = ?`,
+      ).get(envelope.recipientDid, envelope.recipientDeviceId) as Row
+      const seq = int(row.seq)
+      this.stmt(
+        `INSERT INTO device_envelopes
+           (recipient_did, recipient_device_id, seq, group_did, kind, envelope_json, origin_context_json,
+            attempts, next_attempt_at, last_error, enqueued_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, NULL, ?)`,
+      ).run(
+        envelope.recipientDid,
+        envelope.recipientDeviceId,
+        seq,
+        envelope.groupDid,
+        envelope.kind,
+        envelope.envelopeJson,
+        envelope.originContextJson ?? null,
+        envelope.nextAttemptAt,
+        envelope.enqueuedAt,
+      )
+      return seq
+    })
+  }
+
+  dueDeviceEnvelopes(now: string, limit: number): StoredDeviceEnvelope[] {
+    // Ordered by the queue's own key, not by `next_attempt_at`: the scan picks which rows are
+    // due, but a caller walking the result walks each device's queue in order — §6.1 lets a
+    // `welcome` overtake the pending application envelopes, and that call needs to see them
+    // in the order they are queued, not in the order they happened to come due.
+    const rows = this.stmt(
+      `SELECT * FROM device_envelopes WHERE next_attempt_at <= ?
+        ORDER BY recipient_did, recipient_device_id, seq LIMIT ?`,
+    ).all(now, limit) as Row[]
+    return rows.map(toDeviceEnvelope)
+  }
+
+  rescheduleDeviceEnvelope(
+    recipientDid: string,
+    recipientDeviceId: string,
+    seq: number,
+    attempts: number,
+    nextAttemptAt: string,
+    lastError: string,
+  ): void {
+    this.stmt(
+      `UPDATE device_envelopes SET attempts = ?, next_attempt_at = ?, last_error = ?
+        WHERE recipient_did = ? AND recipient_device_id = ? AND seq = ?`,
+    ).run(attempts, nextAttemptAt, lastError, recipientDid, recipientDeviceId, seq)
+  }
+
+  dropDeviceEnvelope(recipientDid: string, recipientDeviceId: string, seq: number): void {
+    this.stmt(
+      'DELETE FROM device_envelopes WHERE recipient_did = ? AND recipient_device_id = ? AND seq = ?',
+    ).run(recipientDid, recipientDeviceId, seq)
   }
 
   // ---- attachments (P7, C10) -------------------------------------------------

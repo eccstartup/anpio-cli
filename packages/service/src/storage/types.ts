@@ -131,6 +131,110 @@ export interface StoredGroupEvent {
 }
 
 /**
+ * One published `group_key_package` (P6 §7.3), one row per
+ * `(owner_did, owner_device_id, key_package_id)`.
+ *
+ * `packageJson` is the object **verbatim**, `did_wba_binding` included: §8.2.3 hands the same
+ * object to the caller that will put it in `group.e2ee.add` (§9.3.3), and the Group Host then
+ * checks the binding it carries — so anything this service normalized away would change what
+ * every party downstream is verifying.
+ *
+ * `state` is `available` | `reserved` | `consumed` (§8.2.4 L765–770). Unlike P5's OPK pool
+ * there IS a third state, because the transition into `consumed` is triggered by something
+ * this service does see: an accepted `group.e2ee.add` carries the KeyPackage inline, so the
+ * Host can name the row (e2ee-group.md §4).
+ *
+ * `reservedTo` / `reservedAt` are not bookkeeping for the reservation's own sake — §8.2.4
+ * L769 needs to be able to say which caller took this one, so that a second `add` cannot
+ * quietly reuse it.
+ */
+export interface StoredGroupKeyPackage {
+  ownerDid: string
+  ownerDeviceId: string
+  keyPackageId: string
+  packageJson: string
+  state: string
+  publishedAt: string
+  reservedTo?: string
+  reservedAt?: string
+}
+
+/**
+ * One row of P6 §11.10.3 L1372's public projection: which `(did, device)` is a leaf, on which
+ * `crypto_group_id` and `epoch`.
+ *
+ * This is the Host's ONLY group-cryptography-side state and it holds no material that could
+ * take part in a computation (§11.11 L1386 — the Host does not judge whether a Commit is
+ * valid). Every row is the conclusion of one accepted control action.
+ *
+ * `state = terminal` rows are KEPT after a Remove: §10.3 L1066's trigger asks whether that
+ * exact device currently has NO leaf, and deleting the row would erase the difference between
+ * a first join and a re-join (e2ee-group.md §11).
+ */
+export interface StoredGroupLeaf {
+  groupDid: string
+  memberDid: string
+  memberDeviceId: string
+  cryptoGroupId: string
+  epoch: string
+  /** `active` | `terminal`. */
+  state: string
+  /** Which accepted action established it, serialized. */
+  addedByRefJson: string
+  updatedAt: string
+}
+
+/**
+ * P6 §10.5's orchestration progress for one group, at most one row per `group_did`.
+ *
+ * §11.10.3 L1374 says outright that this is NOT new protocol-level membership state — but it
+ * has to be on disk, or a restart cannot tell where the pause got to (e2ee-group.md §8).
+ */
+export interface StoredGroupDidUpdate {
+  groupDid: string
+  /** The `group_state_ref` of the P4 `member-did-updated` being carried out, serialized. */
+  eventRefJson: string
+  /** `add-pending` | `remove-pending`. */
+  progress: string
+  /** The exact `(did, device)` pairs still to do, serialized. */
+  expectedJson: string
+  /** The ones already done, serialized. */
+  doneJson: string
+  startedAt: string
+}
+
+/**
+ * One queued P6 envelope (P6 §12.6), for exactly one recipient device.
+ *
+ * The queue is a DELIVERY mechanism, not group history (§12.6 L1523): a row exists only
+ * while the envelope has not been transport-confirmed, and there is no `state` column
+ * because "here" and "not here" is the whole of its state.
+ *
+ * `envelopeJson` is the envelope **verbatim** — §12.6 requires a re-delivery to reproduce
+ * `meta.message_id` / `operation_id` / `content_type`, the ordering fields, `group_receipt`,
+ * a preserved `auth` and `body` losslessly, and forbids re-addressing, merging, splitting,
+ * reordering or renumbering. `originContextJson` is the extra P6 `group.incoming` carries
+ * (§13.6 L1665: freshness and validity are judged differently at submission and at delivery).
+ */
+export interface StoredDeviceEnvelope {
+  recipientDid: string
+  recipientDeviceId: string
+  /** Position in THIS device's queue. §12.6 orders a device's queue by `group_event_seq`
+   *  (and a `commit-delivery` by epoch), which enqueue order already is. */
+  seq: number
+  groupDid: string
+  /** `incoming` | `commit` | `welcome` | `final-notice`. Not taxonomy: §6.1's ordering
+   *  table lets a `welcome-delivery` overtake the pending application envelopes, and only it. */
+  kind: string
+  envelopeJson: string
+  originContextJson?: string
+  attempts: number
+  nextAttemptAt: string
+  lastError?: string
+  enqueuedAt: string
+}
+
+/**
  * One published PreKey Bundle (P5 §7.1 L467), one row per `(owner_did, owner_device_id)`.
  *
  * `bundleJson` is the `body.prekey_bundle` object **verbatim**, `proof` included: §7.2 hands
@@ -473,6 +577,94 @@ export interface Storage {
   /** How many prekeys are still `available`. `require_opk` (§7.2 L479) is answered from
    *  this, not from a claim that has already taken one. */
   availableOneTimePrekeys(ownerDid: string, ownerDeviceId: string): number
+
+  // ---- P6 group E2EE (C13) ---------------------------------------------------
+  //
+  // Three surfaces: the KeyPackage cabinet (§8), the leaf projection (§11.10.3 L1372) and
+  // the Device Delivery Queue (§12.6). The first is P5's pool with a third state; the
+  // second and third are new here.
+
+  /** One published KeyPackage, or `undefined` if this device never published that id. */
+  groupKeyPackage(ownerDid: string, ownerDeviceId: string, keyPackageId: string): StoredGroupKeyPackage | undefined
+  /** Add a KeyPackage to the device's cabinet. A re-publish of the same `key_package_id`
+   *  is IGNORED rather than applied.
+   *
+   *  Ignoring is what keeps a consumed package consumed: §13.2 L1610 allows a consumed
+   *  KeyPackage back into circulation only under a deployment's explicit last-resort
+   *  declaration, so a second publish of the same id must not resurrect it — and the same
+   *  property keeps a package already handed to a caller from changing under it. */
+  insertGroupKeyPackage(entry: StoredGroupKeyPackage): void
+  /** This device's `available` packages, in publish order (oldest first).
+   *
+   *  A list rather than a count because the caller has to look inside the objects to answer
+   *  §8.2.4 L763's "SHOULD return an unexpired one": `expires_at` is a field of the
+   *  KeyPackage, and reading it here would mean `json_extract` on an opaque blob
+   *  (sqlite.ts's `inboxPage` note says why that door stays shut). */
+  availableGroupKeyPackages(ownerDid: string, ownerDeviceId: string): StoredGroupKeyPackage[]
+  /** Take one named `available` package and mark it `reserved` in the same call, returning
+   *  whether THIS call took it.
+   *
+   *  §8.2.4 L767 makes the reservation a MAY; taking it anyway is what stops two concurrent
+   *  `group.e2ee.add` operations from being handed the same KeyPackage (L769). The claim is
+   *  a conditional UPDATE, so only the caller that moved the row out of `available` wins —
+   *  same shape as `claimOneTimePrekey`, and for the same reason. */
+  claimGroupKeyPackage(
+    ownerDid: string,
+    ownerDeviceId: string,
+    keyPackageId: string,
+    reservedTo: string,
+    reservedAt: string,
+  ): boolean
+  /** Mark a package `consumed` (§8.2.4 L769).
+   *
+   *  Three outcomes rather than a boolean because the caller has to tell them apart: a
+   *  package this service never issued cannot be called consumed (nothing proves it was),
+   *  while one already consumed must be refused with `group.e2ee.key_package_consumed`. */
+  markGroupKeyPackageConsumed(
+    ownerDid: string,
+    ownerDeviceId: string,
+    keyPackageId: string,
+  ): 'missing' | 'consumed' | 'already-consumed'
+
+  /** One leaf of the public projection, or `undefined`. A `terminal` row still answers. */
+  groupLeaf(groupDid: string, memberDid: string, memberDeviceId: string): StoredGroupLeaf | undefined
+  /** The group's `active` leaves, in a stable order (by member DID, then device). This is
+   *  who a `group.e2ee.notice` has to be fanned out to. */
+  activeGroupLeaves(groupDid: string): StoredGroupLeaf[]
+  /** Write the projection row for one `(member_did, member_device_id)`.
+   *
+   *  A re-join overwrites the `terminal` row it had: the distinction between first join and
+   *  re-join is consumed by the Add that makes it, and keeping both rows would make "is this
+   *  device currently a leaf" a question with two answers. */
+  upsertGroupLeaf(leaf: StoredGroupLeaf): void
+
+  /** The DID-update orchestration in progress for this group, or `undefined` when there is
+   *  none — which is the normal state. */
+  groupDidUpdate(groupDid: string): StoredGroupDidUpdate | undefined
+  upsertGroupDidUpdate(row: StoredGroupDidUpdate): void
+  /** Drop the row once the last step succeeded (§10.5 L1094). */
+  clearGroupDidUpdate(groupDid: string): void
+
+  /** Append one envelope to a device's queue and return its position in it.
+   *
+   *  The position is assigned here because §12.6 orders a device's queue by
+   *  `group_event_seq` (and commits by epoch), which is enqueue order: assigning it
+   *  anywhere else would let two transactions interleave into a queue that is not sorted. */
+  enqueueDeviceEnvelope(envelope: Omit<StoredDeviceEnvelope, 'seq'>): number
+  /** Envelopes due at or before `now`, ordered by `(recipient_did, recipient_device_id,
+   *  seq)` — the queue's own order, so a caller that walks it in order walks each device's
+   *  queue in order. */
+  dueDeviceEnvelopes(now: string, limit: number): StoredDeviceEnvelope[]
+  rescheduleDeviceEnvelope(
+    recipientDid: string,
+    recipientDeviceId: string,
+    seq: number,
+    attempts: number,
+    nextAttemptAt: string,
+    lastError: string,
+  ): void
+  /** Drop an envelope that was delivered, or one that hit the retention bound. */
+  dropDeviceEnvelope(recipientDid: string, recipientDeviceId: string, seq: number): void
 
   // ---- attachments (P7, C10) -------------------------------------------------
   //

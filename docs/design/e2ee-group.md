@@ -149,10 +149,23 @@ available ──get 发放──▶ reserved ──对应 add 被 Host 接受─
 （`group.e2ee.notice` 与 P6 `group.incoming`）。§12.6 L1508 划了存储边界：
 **只**存公开元数据、被保留的公开 origin proof、与不可读密文。
 
-**这就是 [e2ee-direct.md](e2ee-direct.md) §4 那条缝的第二次出现，而且是同一个键。**
-P5 的 Mailbox 与 P6 的 Delivery Queue 是同一张表、同一个维度、同一个"只投给
-`meta.recipient_device_id`"的要求。C6 / C7 要留的那一列，两处共用。**别建两张表**——
-它们的差别只在**队列内的排序规则**（下一节）与**保留策略**，不在结构。
+**（2026-10-01 更正）** 本节原先写的是"P5 的 Mailbox 与 P6 的 Delivery Queue 是同一张表，
+**别建两张表**"——**那是错的**，§11 的 DDL 才是对的。两者共享的是那条**缝**（都以
+`meta.recipient_device_id` 定址、都只投给那一台设备），不是**表**：
+
+- P5 的 Mailbox 是**拉的**：`deliveries` 的一行进账号的序号流，订阅路推给在线设备，离线设备
+  用 `sync.delta` / `inbox.get` 取回（[e2ee-direct.md](e2ee-direct.md) §4）。
+- P6 的队列是**推的**：§12.6 的"传输确认后 Host **MAY** 出队"与"保留期到限即弃"描述的是
+  一条重试到底、不成就丢的推送路径，而本 Profile **不定义**任何 P6 历史拉取方法（L1523
+  逐字："该队列是投递机制，不是群历史"）。
+
+而且 §12.6 末段把这条路堵死了：部署若提供返回**设备寻址的 P6 信封**的本地历史 API，
+它 **MUST** 从**已认证的设备主体**推导 `meta.target.did` 与 `meta.recipient_device_id`，
+并 **MUST NOT** 把调用方自述的设备字段当权威依据。本服务的取件面正是**自述**的
+（`sync.delta` 的 `body.device_id`）——那是 [e2ee-direct.md](e2ee-direct.md) §9 第 3 条那处
+缺口的另一个后果。P6 信封一旦进 `deliveries`，就等于用一条违反该段的路径把它们暴露出去。
+
+所以是两张表。共用的仍然是那条缝，以及 C6 / C7 为它留下的那一列。
 
 ### 6.1 队列内的顺序（§12.6 L1512）
 
@@ -306,18 +319,32 @@ CREATE TABLE group_leaves (
   PRIMARY KEY (group_did, member_did, member_device_id)
 );
 
--- §12.6 的 Device Delivery Queue。与 P5 的 Mailbox 是同一条缝（§6）
+-- §12.6 的 Device Delivery Queue：推的、可重试、有界的队列，与 P5 的 Mailbox 只共享那条缝（§6）
 CREATE TABLE device_envelopes (
   recipient_did        TEXT NOT NULL,
   recipient_device_id  TEXT NOT NULL,
   seq                  INTEGER NOT NULL,  -- 队列内序；排序规则见 §6.1
+  group_did            TEXT NOT NULL,     -- §12.6 第 3 条每次尝试前要重查 leaf 投影
+  kind                 TEXT NOT NULL,     -- incoming | commit | welcome | final-notice（§6.1）
   envelope_json        TEXT NOT NULL,     -- 原样，重投必须逐字节复现
   origin_context_json  TEXT,              -- 仅 P6 group.incoming 有（§9）
-  attempts             INTEGER NOT NULL,
+  attempts             INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at      TEXT NOT NULL,     -- 重试要退避，所以不是"入队即到期"
+  last_error           TEXT,
   enqueued_at          TEXT NOT NULL,
   PRIMARY KEY (recipient_did, recipient_device_id, seq)
 );
+CREATE INDEX device_envelopes_due ON device_envelopes (next_attempt_at);
 ```
+
+`kind` 不是分类学，是**§6.1 那张表要的例外**：只有 `welcome-delivery` 允许越过待投的应用
+信封，其余一律排队头。`attempts` / `next_attempt_at` / `last_error` 与 `outbox` 同理——
+一次投递失败要有下次，且要有证据。`group_did` 单列而不是从 `envelope_json` 里现取：§12.6
+第 3 条要求**每次尝试前**重查该群的 leaf 投影，而 JSON 解析一次只为拿一个键没有理由。
+
+队列只存**待投**的行：传输确认即删（§12.6 "MAY 出队"），到保留上限也删——两处"到限即弃"
+与 C9 的 outbox 是同一类收尾，只是另一条队列（§7）。所以这里没有 `state` 列：一行在或不在
+就是全部状态。
 
 `group_leaves` 的 `state = terminal` 就是 §7 那个终态：该 leaf 已被 Remove，
 队列里的最终通知投完即弃，但**行要留着**，否则同一 `(did, device)` 重新加入时

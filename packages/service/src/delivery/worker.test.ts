@@ -389,6 +389,9 @@ describe('the schema the worker reads', () => {
     // back, so any change to the outbox shape has to be checked against this file.
     // v7 changed `deliveries`, which this file does not touch — checked, no action.
     // v8 added `one_time_prekeys`, a new table — checked, no action.
-    expect(SCHEMA_VERSION).toBe(8)
+    // v9 added P6's `group_leaves` / `group_did_updates` / `device_envelopes` and two
+    // columns on `group_key_packages` — none of them read here. The P6 queue is a
+    // SEPARATE worker's queue, so this one still has nothing to do with it.
+    expect(SCHEMA_VERSION).toBe(9)
   })
 })
