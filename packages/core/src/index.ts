@@ -179,6 +179,7 @@ export {
   firstUnknownMetaField,
   parseEnvelope,
   isNotification,
+  buildMessageRequest,
 } from './message/envelope'
 export type {
   AnpProfileId,
@@ -199,9 +200,13 @@ export type {
   AnpErrorCode,
   AnpRejection,
   EnvelopeCheck,
+  BuildMessageRequestInput,
 } from './message/envelope'
-export { signOriginProof, buildOriginProofAuth, ed25519OriginProofSigner } from './message/sign'
+export { signOriginProof, buildOriginProofAuth, ed25519OriginProofSigner, walletOriginProofSigner } from './message/sign'
 export type { OriginProofSigner, SignOriginProofInput } from './message/sign'
+// JSON-RPC 的**出站**半边：POST 到 `serviceEndpoint` + 响应形状判定。与 `envelope.ts`
+// 分工是"信封长什么样"与"信封怎么走"，所以服务端可以只 import 前者。
+export { postMessage, anpCodeOf } from './message/rpc'
 export { verifyOriginProof, verifyOriginProofDetailed, originProofFreshness } from './message/verify'
 export type {
   VerifyOriginProofInput,

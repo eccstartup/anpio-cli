@@ -1,11 +1,20 @@
 import { describe, it, expect } from 'vitest'
 import { ed25519 } from '@noble/curves/ed25519.js'
+import { secp256k1 } from '@noble/curves/secp256k1.js'
 import { createAnpIdentity } from '../crypto/signer'
 import type { AnpMeta } from './envelope'
 import type { KeyResolver, ResolvedIdentityKey } from './locator'
 import { ORIGIN_PROOF_SCHEME } from './envelope'
+import { keypairWallet } from '../protocol/adapters/chain'
+import type { IWallet } from '../wallet/wallet'
+import { ethPersonalSignHash } from '../wallet/eip1193'
 import { contentDigestOf, originProofSignatureBase, pctEncode, signedRequestObject } from './sro'
-import { buildOriginProofAuth, ed25519OriginProofSigner, signOriginProof } from './sign'
+import {
+  buildOriginProofAuth,
+  ed25519OriginProofSigner,
+  signOriginProof,
+  walletOriginProofSigner,
+} from './sign'
 import { originProofFreshness, verifyOriginProof, verifyOriginProofDetailed } from './verify'
 
 const identity = createAnpIdentity('example.com')
@@ -298,6 +307,82 @@ describe('signOriginProof / verifyOriginProof', () => {
         resolver: resolverFor(identity.priv, identity.did),
       }),
     ).toBe(true)
+  })
+})
+
+describe('walletOriginProofSigner', () => {
+  /** 一个只认一条钥的 resolver：身份对不上就解析不出来。 */
+  function resolverFor(curve: 'ed25519' | 'secp256k1', bytes: Uint8Array, did: string): KeyResolver {
+    return {
+      async resolve(resolvedIdentity: string): Promise<ResolvedIdentityKey> {
+        if (resolvedIdentity !== did) throw new Error(`unknown identity ${resolvedIdentity}`)
+        return { curve, bytes, identity: did, anchor: { kind: 'fingerprint', thumbprint: 'test' }, docUrl: did }
+      },
+    }
+  }
+
+  const DID = 'did:wba:wallet.example:user:alice:e1_wallet'
+  const KEYID = `${DID}#key-1`
+
+  async function roundTrip(wallet: IWallet, curve: 'ed25519' | 'secp256k1'): Promise<boolean> {
+    const wire = meta({ sender_did: DID })
+    const auth = await buildOriginProofAuth({
+      method: 'direct.send',
+      meta: wire,
+      body: BODY,
+      signer: walletOriginProofSigner(wallet, KEYID),
+    })
+    return verifyOriginProof({
+      method: 'direct.send',
+      meta: wire,
+      body: BODY,
+      auth,
+      expectedAnchor: DID,
+      resolver: resolverFor(curve, await wallet.getPublicKey(), DID),
+    })
+  }
+
+  it('round-trips a local ed25519 keypair wallet', async () => {
+    // 这条证明 `IWallet` 就是 CLI 需要的那个接口：发送侧不必知道钥在本地还是
+    // 在钱包里，钥的形状由 wallet 自己交出来。
+    const priv = ed25519.utils.randomSecretKey()
+    expect(await roundTrip(keypairWallet(priv), 'ed25519')).toBe(true)
+  })
+
+  it('round-trips a secp256k1 keypair wallet, whose signature is raw r||s', async () => {
+    // `keypairWallet` 的 secp256k1 分支直接签，产出 64 字节；验签侧靠长度选到
+    // `secp256k1.verify(sig, msg, key)` 这条，不做 EIP-191 变换。
+    const priv = secp256k1.utils.randomSecretKey()
+    expect(await roundTrip(keypairWallet(priv, { curve: 'secp256k1' }), 'secp256k1')).toBe(true)
+  })
+
+  it('round-trips an EIP-191 wallet, whose signature is 65 bytes and carries recovery id v', async () => {
+    // `chainWallet` 走的就是这条：对签名底求个人消息哈希再签，尾部带 v。验签侧看到
+    // 65 字节会重算 `ethPersonalSignHash` 并剥掉 v，所以两侧的字节约定必须对得上，
+    // 而这正是"签名在本地过、在对端不过"最容易出岔子的地方。
+    const priv = secp256k1.utils.randomSecretKey()
+    const wallet: IWallet = {
+      async getPublicKey() {
+        return secp256k1.getPublicKey(priv, true)
+      },
+      async signMessage(message) {
+        const hash = ethPersonalSignHash(message)
+        const sig = secp256k1.sign(hash, priv, { prehash: false })
+        const expected = secp256k1.getPublicKey(priv, false)
+        const parsed = secp256k1.Signature.fromBytes(sig)
+        for (const rec of [0, 1]) {
+          const point = parsed.addRecoveryBit(rec).recoverPublicKey(hash)
+          if (Buffer.from(point.toBytes(false)).equals(Buffer.from(expected))) {
+            const out = new Uint8Array(65)
+            out.set(sig, 0)
+            out[64] = rec + 27
+            return out
+          }
+        }
+        throw new Error('could not recover pubkey')
+      },
+    }
+    expect(await roundTrip(wallet, 'secp256k1')).toBe(true)
   })
 })
 

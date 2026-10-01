@@ -249,6 +249,22 @@ export interface FetchErrorCodes {
   invalidDocument: ConnectxErrorCode
 }
 
+/**
+ * A non-GET request for {@link fetchControlledJson}. Absent = the plain GET the DID
+ * document and agent-description callers issue.
+ *
+ * The point of describing a POST here rather than writing a second fetch is that the
+ * policy has to hold for it *more* than for the others: an ANP message goes to a
+ * `serviceEndpoint` read out of a PEER's DID document, so the host is chosen by the
+ * peer, not by the caller. A second copy of the hop-by-hop validation is exactly where
+ * an SSRF hole would eventually appear.
+ */
+export interface ControlledRequest {
+  method: string
+  headers: Record<string, string>
+  body: string
+}
+
 export const DID_DOCUMENT_FETCH_CODES: FetchErrorCodes = {
   subject: 'DID document',
   blocked: 'did_resolve_blocked',
@@ -715,11 +731,17 @@ function subjectQueryTarget(document: Record<string, unknown>, did: string): str
  * — it needs this policy at least as much, and a second copy of the hop-by-hop
  * validation is exactly where an SSRF hole would eventually appear. `codes` chooses
  * which error codes come out, so neither caller reports the other's failure.
+ *
+ * `request` turns the GET into whatever the caller describes. A body is not followed
+ * across a redirect: RFC 9110 lets a 301/302 rewrite the method to GET, which would
+ * silently drop the body and read the peer's answer to a different question as if it
+ * answered this one.
  */
 export async function fetchControlledJson(
   url: string,
   options: ResolveDidOptions,
   codes: FetchErrorCodes,
+  request?: ControlledRequest,
 ): Promise<unknown> {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
   const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES
@@ -738,6 +760,14 @@ export async function fetchControlledJson(
 
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
+
+  // Computed once: every hop of one exchange sends the same thing.
+  const init: RequestInit = {
+    signal: controller.signal,
+    redirect: 'manual',
+    headers: request?.headers ?? DID_DOCUMENT_ACCEPT,
+    ...(request !== undefined ? { method: request.method, body: request.body } : {}),
+  }
 
   try {
     // Follow redirects MANUALLY, one hop at a time, so every host in the chain — not
@@ -766,11 +796,7 @@ export async function fetchControlledJson(
           // Explicit opt-in (allowUncontrolledFetch:true). The caller's connect
           // strategy is the caller's responsibility; the SDK has already run the
           // allowlist + address policy but does NOT pin through this fetcher.
-          res = await options.fetch(current, {
-            signal: controller.signal,
-            redirect: 'manual',
-            headers: DID_DOCUMENT_ACCEPT,
-          })
+          res = await options.fetch(current, init)
         } else if (addrs == null) {
           // No DNS resolver (browser) and no explicit pinned transport: the SDK
           // cannot pin the connect target, so remote resolution is refused. The
@@ -789,12 +815,7 @@ export async function fetchControlledJson(
           // refused by a host that is in fact reachable.
           res = await fetchFromAnyAddress(
             addrs,
-            (addr) =>
-              pinnedFetch(
-                current,
-                { signal: controller.signal, redirect: 'manual', headers: DID_DOCUMENT_ACCEPT },
-                addr,
-              ),
+            (addr) => pinnedFetch(current, init, addr),
             codes,
           )
         }
@@ -816,6 +837,16 @@ export async function fetchControlledJson(
       const location = res.headers.get('location')
 
       if (res.status >= 300 && res.status < 400 && location) {
+        // A body cannot survive this: RFC 9110 lets a 301/302 rewrite the method to
+        // GET, and even a 307/308 — which preserves it — would re-send a signed body to
+        // a host that never agreed to it. Refused rather than followed, with the
+        // `Location` in the message so the caller can address the endpoint directly.
+        if (request !== undefined) {
+          throw new ConnectxError(
+            codes.failed,
+            `Failed to fetch ${codes.subject} from ${current} (${res.status} redirect to ${new URL(location, current).toString()}); a request with a body is not followed`,
+          )
+        }
         if (!allowRedirects) {
           throw new ConnectxError(codes.failed, `Failed to fetch ${codes.subject} from ${current} (${res.status} redirect)`)
         }

@@ -10,6 +10,7 @@ import { serializeSignatureParams, signatureBaseBytes } from '../crypto/signatur
 import { ConnectxError } from '../errors'
 import type { AnpAuth, AnpMeta, AnpOriginProof } from './envelope'
 import { ORIGIN_PROOF_SCHEME } from './envelope'
+import type { IWallet } from '../wallet/wallet'
 import {
   ORIGIN_PROOF_COMPONENTS,
   ORIGIN_PROOF_LABEL,
@@ -91,5 +92,21 @@ export function ed25519OriginProofSigner(priv: Uint8Array, keyid: string): Origi
   return {
     keyid,
     sign: (message) => ed25519.sign(message, priv),
+  }
+}
+
+/**
+ * 任意 `IWallet` 的签发器——本地密钥、EIP-1193 钱包、别的链，都走这一条。
+ *
+ * 密钥在哪儿、是哪条曲线，是 `IWallet` 自己的事（`keypairWallet` 直接签、
+ * `chainWallet` 走 `personal_sign`），这里只把它的 `signMessage` 接到签名底上。
+ * 两条路产出的**字节形态不同而验签侧都认**：`crypto/verify.ts` 的
+ * `verifySignatureWithKey` 按签名长度分流（65 字节 = EIP-191 个人消息签名，
+ * 64 字节 = 原始 r||s），所以这里不需要、也不该按曲线分支。
+ */
+export function walletOriginProofSigner(wallet: IWallet, keyid: string): OriginProofSigner {
+  return {
+    keyid,
+    sign: (message) => wallet.signMessage(message),
   }
 }

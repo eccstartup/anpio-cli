@@ -4,6 +4,8 @@
 // `direct.send` 之类的业务校验在各自 Profile 里。两处都引同一份错误码表，
 // 服务端发的码与客户端读的码因此不可能对不上。
 
+import { ConnectxError } from '../errors'
+
 /** P1 §4.1 L125–127：`jsonrpc` MUST 精确等于这个字符串。 */
 export const JSONRPC_VERSION = '2.0'
 
@@ -443,4 +445,64 @@ export function isNotification(
   envelope: AnpRequest | AnpNotification,
 ): envelope is AnpNotification {
   return !Object.prototype.hasOwnProperty.call(envelope, 'id')
+}
+
+/** {@link buildMessageRequest} 的全部输入。 */
+export interface BuildMessageRequestInput {
+  /** 本次交换的 id（§5.2 L157：非空字符串）。与 `operation_id` 是两件事：这个让
+   *  **一次请求/响应**可对账，那个让**一次业务操作**幂等（P3 §8.2）。重试同一条消息
+   *  时 `operation_id` 不变，`id` 应当换一个新的。 */
+  id: string
+  /** 方法名（§5.5 L183–188：字符串、不以 `rpc.` 开头）。 */
+  method: string
+  meta: AnpMeta
+  /** `params.body`。省略即 `{}`——`anp.get_capabilities` 就是这样。 */
+  body?: Record<string, unknown>
+  /** 需要原发者证明的方法才带（P1 附录 A.1 L980–981）。 */
+  auth?: AnpAuth
+}
+
+/**
+ * 装配一个出站 Request（§4.1 L125–127、§5.1 L151、§6.1 L224–230）。
+ *
+ * 它存在的理由不是省几行，而是**出站信封只能有一处**：签名要绑的 `meta` / `body`
+ * 与实际发出去的必须是同一份字节，两处各拼一次就是"签的和你发的不是一回事"这一类
+ * 漏洞的入口。校验也只做**无条件**的那几条——`meta.target`、`auth` 是否必需由各
+ * Profile 决定，在这里硬塞等于把 P3 的规则写进 P1。
+ *
+ * 不变量是它自己的输出必须能过 {@link parseEnvelope}：同一个包既发出站请求又解析
+ * 入站请求，两份形状判断分家的代价是"自己发的自己收不了"。
+ */
+export function buildMessageRequest(input: BuildMessageRequestInput): AnpRequest {
+  if (typeof input.id !== 'string' || input.id.length === 0) {
+    throw new ConnectxError('message_invalid', 'Request id MUST be a non-empty string (P1 §5.2 L157)')
+  }
+  if (typeof input.method !== 'string' || input.method.length === 0) {
+    throw new ConnectxError('message_invalid', 'method MUST be a non-empty string (P1 §5.5 L183)')
+  }
+  if (input.method.startsWith('rpc.')) {
+    throw new ConnectxError(
+      'message_invalid',
+      `Method "${input.method}" uses the reserved "rpc." prefix (P1 §5.5 L188)`,
+    )
+  }
+  // §12.1 L776–777：未知**核心** `meta` 字段 MUST 拒绝。类型上 `AnpMeta` 已经限定，
+  // 但调用方可能是拼出来的对象（`as`、展开、JSON），所以这里再判一次。
+  const unknown = firstUnknownMetaField(input.meta as unknown as Record<string, unknown>)
+  if (unknown !== undefined) {
+    throw new ConnectxError(
+      'message_invalid',
+      `Unknown core meta field "${unknown}" (P1 §12.1 L776)`,
+    )
+  }
+
+  // 顺序照 §6.1 L224–230 写的 `{meta, auth, body}`。JSON 不关心键序，但让线上的
+  // 字节与规范里那份例子同形，才看得出"这就是那个信封"。
+  const params: AnpParams = {
+    meta: input.meta,
+    ...(input.auth !== undefined ? { auth: input.auth } : {}),
+    body: input.body ?? {},
+  }
+
+  return { jsonrpc: JSONRPC_VERSION, id: input.id, method: input.method, params }
 }
