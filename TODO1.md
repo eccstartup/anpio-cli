@@ -256,8 +256,9 @@
 - E2 命令面门禁：`help.test.ts` 已随 B1 一并搬来（两条不变量都在跑）。
   **缺口**：原文件的第三条门禁读 `skill/connectx/SKILL.md`，而这份 skill 没有搬过来，已随删除
   记录在此——要搬 skill 就把它一起恢复
-- **远程未配**（2026-10-01 用户裁定：**先不开远程，继续本地做 CLI**）。本地提交会累积，
-  CI 一次都没真跑过；要发版或想跑门禁时再回来开
+- **远程**：`origin` = `github.com/eccstartup/AgentX`，本地 `main` 与 `origin/main` 同步。
+  2026-10-01 已不再"先不开远程"（当时只做本地 CLI 阶段）。**但 CI 仍跑不了**：仓库里
+  没有 `.github/workflows`，`gh run list` 为空——所以门禁目前只能在本地按 job 分组跑
 - E3 **加的评审清单**：CLI 与服务端里**不得出现 `isDid()` 之类的身份类型分支**
   （[vendored-core.md](docs/design/vendored-core.md) §6.3）
 - E4 端到端：`connectx msg send` → `AgentXAgent` → `connectx msg listen` 收到
