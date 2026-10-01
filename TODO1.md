@@ -230,11 +230,30 @@
     已消费"服务端根本观察不到，被更强的不变量覆盖掉，**不是被忽略**）；`publish` / `get`
     两条幂等键的分工与"幂等记录 + OPK 分配"的原子写；§11.5 的两类重放状态一边一半
     （外层归服务端、init replay 归客户端，因为键含 `session_id`）。不建 init replay 表）
+  - ~~方法表接上 `anp.direct.e2ee.v2`~~（2026-10-01。v2 下的 `direct.send`：content_type 只
+    认 §3.6 那两个、`operation_id` MUST 等于 `message_id`（§3.7）、`params.auth` MUST 缺席
+    （§3.8）、**跳过** P3 的负载互斥校验（v2 正文是顶层的 E2EE 承载对象，没有 `payload`
+    这个键）。Base 那侧的设备 selector 从静态禁字段挪进 `directSendParams`——同一批字段在
+    v2 下是必填的。`MethodSpec` 因此长了两个钩子：`validateParams` 放在 `checkMethod`
+    **内部**（做成单独的 dispatch 调用，`stream/session.ts` 会静默漏掉，所以签名改成收
+    `params`，让漏掉的调用点变成编译错误），`deviceAddressed` 把"这次是设备定址的"与"要
+    满足什么资格"绑成**一个**前置条件（断成两处就会有两处各判一次，漏一处不报错）。
+    `rpc/eligibility.ts` 判 §4.1.1 四项，1017＝"这台设备不算数"、1016＝"引用关系不成立"。
+    重放**跳过**资格检查（§9.1 L630 要求重试拿到同一个结果）、跨域**不做**资格检查
+    （§10.7 L1388 把验两台设备写成**目标**服务的 MUST），两条理由都写在 `eligibilityFor` 上。
+    service 448 个测试）
+  - ~~取件面的设备维度~~（2026-10-01。`sync.delta` / `inbox.get` / `message.get_batch` 各收
+    一个选填 `body.device_id`，读侧套与订阅路**同一条**规则；**缺席按"没声明"处理，不是
+    "没有限制"**——默认放行就是默认泄漏。落成一条取表别名的 SQL 谓词 `deviceFilter`。
+    `msg inbox` 还没有 `--device`（改 HELP 会动文档站门禁），所以 CLI 只在 `msg listen`
+    的补齐里声明设备）
   - 还剩：两条 Key 方法进方法表（`targetScope` 两档不同）+ OPK 池与分配 + `bundle_id`
-    不可重定义检查（§6.2.2 L371）+ Mailbox 的设备维度 + 限流（§7.3 L598 是 MUST 的落点）
-  - ~~**动手前先留列**~~（2026-10-01 做了：`deliveries.recipient_device_id` 是 schema v7，
-    订阅推送按它筛连接——见 [e2ee-direct.md](docs/design/e2ee-direct.md) §4。取件面还没跟上，
-    等 `anp.direct.e2ee.v2` 进方法表时一起做）
+    不可重定义检查（§6.2.2 L371）+ 限流（§7.3 L598 是 MUST 的落点）
+  - **调用方身份没有答案**：§7.1 L476–477 要求已认证上下文认出确切的
+    `(sender_did, sender_device_id)`，而 §3.8 L140 又把 v2 的业务层证明关掉了。选择是
+    **不强求外层 hop**（它只会挡住正常的设备客户端，且它验的是一个服务 DID，拦不住谎报），
+    于是自报身份 + §4.1.1 资格，**只保证资格、不保证来源**——
+    见 [e2ee-direct.md](docs/design/e2ee-direct.md) §9 第 3 条
   - **挡住 v1 的**：无。两条 Key 方法同域即可跑，跨域部分随 C11
 - C13 P6 群组 E2EE：KeyPackage 状态机 + Device Delivery Queue
   - ~~设计~~（2026-10-01：[e2ee-group.md](docs/design/e2ee-group.md)。定下的是几个规范没

@@ -1185,8 +1185,14 @@ function assertDocumentProof(doc: DidDocument, did: string, mode: 'lenient' | 's
 /** Is `keyid` listed in the document's `relationship` list? DID Core allows the
  *  absolute method id or the DID-spec relative `#fragment` form, and an embedded
  *  method object counts when its `id` matches. Shared by the authentication check
- *  below and the continuity chain's recovery-key authorization (ANP-03 §2.5.5 rule
- *  2), so both apply one matching rule instead of two that can drift.
+ *  below, the continuity chain's recovery-key authorization (ANP-03 §2.5.5 rule 2),
+ *  and the device-manifest reader (P2 §5.5 rule 4 / §10.2.1), so all of them apply
+ *  one matching rule instead of several that can drift.
+ *
+ *  `keyAgreement` and `capabilityInvocation` are accepted because P2 §10.2.1 asks
+ *  WHICH relationships a device entry's key ids fall under, and reports the fact to
+ *  the E2EE Profile to judge — a reader that could only ask about two of the four
+ *  would be unable to express the answer.
  *
  *  The comparison is on RESOLVED DID URLs (`canonicalDidUrl`), the same rule
  *  `documentProofKey` uses: for a document whose id is `did:X`, `#key-1` and
@@ -1195,7 +1201,7 @@ function assertDocumentProof(doc: DidDocument, did: string, mode: 'lenient' | 's
  *  document's relative entry (ANP-2026-09-17-R01). */
 export function isMethodAuthorized(
   doc: Record<string, unknown>,
-  relationship: 'authentication' | 'assertionMethod',
+  relationship: 'authentication' | 'assertionMethod' | 'keyAgreement' | 'capabilityInvocation',
   keyid: string,
 ): boolean {
   const wanted = canonicalDidUrl(doc.id, keyid)

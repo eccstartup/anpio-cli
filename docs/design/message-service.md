@@ -742,11 +742,17 @@ Profile"的答案，混进一个 `x_` 值就把它变成另一个问题了。扩
 
 | 方法 | `body` | 结果 |
 |---|---|---|
-| `inbox.get` | `{limit?, skip?, include_read?}`，`limit` 默认 20 | `{messages: [...], total, has_more}` |
+| `inbox.get` | `{limit?, skip?, include_read?, device_id?}`，`limit` 默认 20 | `{messages: [...], total, has_more}` |
 | `inbox.mark_read` | `{message_ids: [...]}` | `{updated_count, message_ids, read_at}` |
-| `message.get_batch` | `{message_ids: [...]}`，≤ 100 且不重复 | `{items: [{message_id, message}], unavailable: [...]}` |
+| `message.get_batch` | `{message_ids: [...], device_id?}`，≤ 100 且不重复 | `{items: [{message_id, message}], unavailable: [...]}` |
 | `direct.get_history` | `{peer_did, since_seq?, limit?}` | `{messages: [...], has_more}` |
-| `sync.delta` | `{since, limit?}` | `{messages: [{seq, method, params}], next_since, has_more}` |
+| `sync.delta` | `{since, limit?, device_id?}` | `{messages: [{seq, method, params}], next_since, has_more}` |
+
+`device_id` 是 P5 之后加的第三列，**选填**，语义见 [e2ee-direct.md](e2ee-direct.md) §4：
+一台设备只能读到账号级那一批加上**投给它的**那一批（§10.7.1 L1407 的读侧）。**缺席不是
+"没有限制"**，是"没声明自己是谁"——那样就只有账号级的那批。订阅路的 `stream.auth` 早
+就是按这个规则推的，拉取这一侧跟上之后，同一条信箱的两半才说得出一致的答案。
+`inbox.mark_read` 没有这一项：已读状态是账号级的，它不是交付。
 
 表里是 `POST /anp-im/rpc` 上**可达**的那几个。流自己的两个方法
 （`stream.auth` / `stream.ack`，各自的 Profile 是 `x_agentx.stream.v1`）不在其中，因为

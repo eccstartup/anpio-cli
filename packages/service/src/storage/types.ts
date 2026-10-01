@@ -261,6 +261,33 @@ export interface InboxQuery {
   /** `false` drops incoming messages the owner has already read. Outgoing rows are
    *  never dropped: `read_at` has no meaning for them, so it cannot be the filter. */
   includeRead: boolean
+  /** Which device is asking, or `''` for "none declared". See {@link deviceFilter}. */
+  deviceId: string
+}
+
+/**
+ * Who sees which delivery: `recipient_device_id IS NULL OR recipient_device_id = ?`.
+ *
+ * This is P5 §10.7.1 L1407 read as a **read-side** rule as well as a push-side one. A
+ * `direct.send` in v2 puts a ciphertext in the mailbox of exactly one device; handing that
+ * row to a request that stands for a different device — or for no device at all — is the
+ * fan-out that clause forbids, and it is worse here than on the live path because the
+ * reader gets to keep it.
+ *
+ * `''` ("no device declared") therefore sees only the account-addressed rows, which is the
+ * same rule the live subscription applies (`stream/registry.ts` 的 `reaches`). One rule for
+ * both halves of one mailbox: `sync.delta` replays what the stream would have pushed, so a
+ * divergence here would make catch-up and live disagree about what this device was sent.
+ *
+ * A P3 message has no recipient device and is addressed to the account, so every device
+ * still receives it — §7.2.3 L421 wants exactly that.
+ *
+ * Takes the table alias rather than being a constant: three of the four queries alias the
+ * table, and a predicate pasted next to `d.` would read as `d.(…)` — a syntax error that
+ * only shows up at prepare time.
+ */
+export function deviceFilter(alias: string): string {
+  return `(${alias}.recipient_device_id IS NULL OR ${alias}.recipient_device_id = ?)`
 }
 
 export interface Storage {
@@ -290,8 +317,10 @@ export interface Storage {
    *  The sequence is assigned inside a transaction, so concurrent senders cannot both
    *  take the same number. */
   appendDelivery(delivery: Omit<DeliveryRecord, 'seq'>): DeliveryRecord
-  /** The owner's deliveries after `since`, in order. `limit` bounds one page. */
-  deliveriesSince(ownerDid: string, since: number, limit: number): DeliveryRecord[]
+  /** The owner's deliveries after `since`, in order, **for `deviceId`** — `''` means no
+   *  device was declared, so only the account-addressed rows come back (see
+   *  {@link deviceFilter}). `limit` bounds one page. */
+  deliveriesSince(ownerDid: string, deviceId: string, since: number, limit: number): DeliveryRecord[]
   /** The highest sequence this owner has, whether or not a device has read it. */
   headSeq(ownerDid: string): number
   /** How far this device has been advanced. 0 when it has never read. */
@@ -304,11 +333,12 @@ export interface Storage {
    *  the page: the global k-th row lies within the first k of one of the two. */
   inboxPage(ownerDid: string, query: InboxQuery): InboxRow[]
   /** How many rows `inboxPage` would return in total for the same filter. */
-  inboxSize(ownerDid: string, includeRead: boolean): number
-  /** Those of `messageIds` that belong in THIS owner's mailbox, in the order asked.
-   *  The mailbox is the scope, not a lookup helper: an id the owner never sent or
-   *  received must not be readable, and must not be markable either. */
-  inboxRows(ownerDid: string, messageIds: readonly string[]): InboxRow[]
+  inboxSize(ownerDid: string, query: Omit<InboxQuery, 'limit' | 'skip'>): number
+  /** Those of `messageIds` that belong in THIS owner's mailbox **as `deviceId`**, in the
+   *  order asked. The mailbox is the scope, not a lookup helper: an id the owner never sent
+   *  or received must not be readable, and must not be markable either — and an id that
+   *  belongs to another of the owner's devices is, for this caller, not readable. */
+  inboxRows(ownerDid: string, deviceId: string, messageIds: readonly string[]): InboxRow[]
   /** Mark messages read. Returns the ids that were not read before — an id the owner
    *  does not hold is skipped rather than recorded. */
   markRead(ownerDid: string, messageIds: readonly string[], readAt: string): string[]

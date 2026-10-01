@@ -311,6 +311,10 @@ describe('runListen', () => {
     await flush()
     serve(socket, { 'sync.delta': { messages: [], has_more: false } })
     await run
+    // The backfill names the same device as the handshake: the service filters the page by
+    // it (P5 §10.7.1 L1407), so a catch-up that stayed anonymous would replay the account's
+    // rows and drop this device's own.
+    expect(socket.request('sync.delta').params).toMatchObject({ body: { since: 7, device_id: 'laptop' } })
   })
 
   it('exits after the backfill with --once, without waiting for anything to arrive', async () => {

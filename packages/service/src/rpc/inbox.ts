@@ -32,10 +32,10 @@ const MAX_PAGE = 200
 const DEFAULT_PAGE = 20
 const DEFAULT_DELTA_PAGE = 100
 
-const INBOX_GET_FIELDS = ['limit', 'skip', 'include_read'] as const
+const INBOX_GET_FIELDS = ['limit', 'skip', 'include_read', 'device_id'] as const
 const MARK_READ_FIELDS = ['message_ids'] as const
-const GET_BATCH_FIELDS = ['message_ids'] as const
-const DELTA_FIELDS = ['since', 'limit'] as const
+const GET_BATCH_FIELDS = ['message_ids', 'device_id'] as const
+const DELTA_FIELDS = ['since', 'limit', 'device_id'] as const
 
 // ---- body 校验 ---------------------------------------------------------------
 
@@ -64,9 +64,33 @@ function idsFrom(body: Record<string, unknown>): string[] {
   return [...new Set(value.filter(isNonEmptyString))]
 }
 
+/** §9.3 加的那一项：`body.device_id`，**选填**。
+ *
+ *  取件面是在 P5 之后才有设备概念的。P5 §10.7.1 L1407 把"只投给
+ *  `meta.recipient_device_id`"写成 MUST，而订阅路已经照着做了（`stream/registry.ts` 的
+ *  `reaches`）——那么同一条信箱的另一半（拉取）不照做，密文就会从这一侧漏给同账号的另一台
+ *  设备。字段名沿用订阅握手那个 `device_id`，因为它们是同一台信箱的两半，而 `sync.delta`
+ *  补的正是订阅会推的那些帧。
+ *
+ *  **缺席不是"没有限制"**，是"调用方没有声明自己代表哪台设备"——那样就只看账号级的行。
+ *  这个方向（fail-closed）是刻意的：默认放行等于默认泄漏，而漏出去的密文收不回来。 */
+function deviceFieldRefusal(body: Record<string, unknown>): AnpRejection | undefined {
+  if (body.device_id !== undefined && !isNonEmptyString(body.device_id)) {
+    return anpRejection('anp.invalid_params_shape', 'body.device_id must be a non-empty string')
+  }
+  return undefined
+}
+
+/** 校验过之后取用；没声明就是 `''`，与 `delivery_cursor.device_id` 同一个约定。 */
+function deviceOf(body: Record<string, unknown>): string {
+  return isNonEmptyString(body.device_id) ? body.device_id : ''
+}
+
 export function validateInboxGetBody(body: Record<string, unknown>): AnpRejection | undefined {
   const unknown = unknownField(body, INBOX_GET_FIELDS)
   if (unknown !== undefined) return unknown
+  const device = deviceFieldRefusal(body)
+  if (device !== undefined) return device
   if (body.limit !== undefined && !isPage(body.limit, MAX_PAGE)) {
     return anpRejection('anp.invalid_params_shape', `body.limit must be an integer in 1..${MAX_PAGE}`)
   }
@@ -89,6 +113,8 @@ export function validateMarkReadBody(body: Record<string, unknown>): AnpRejectio
 export function validateGetBatchBody(body: Record<string, unknown>): AnpRejection | undefined {
   const unknown = unknownField(body, GET_BATCH_FIELDS)
   if (unknown !== undefined) return unknown
+  const device = deviceFieldRefusal(body)
+  if (device !== undefined) return device
   const parsed = idsOf(body.message_ids, 'message_ids', MAX_BATCH)
   return 'error' in parsed ? parsed.error : undefined
 }
@@ -96,6 +122,8 @@ export function validateGetBatchBody(body: Record<string, unknown>): AnpRejectio
 export function validateDeltaBody(body: Record<string, unknown>): AnpRejection | undefined {
   const unknown = unknownField(body, DELTA_FIELDS)
   if (unknown !== undefined) return unknown
+  const device = deviceFieldRefusal(body)
+  if (device !== undefined) return device
   if (!isCount(body.since)) {
     return anpRejection('anp.invalid_params_shape', 'body.since must be a non-negative integer')
   }
@@ -140,8 +168,9 @@ export function readInbox(storage: Storage, meta: AnpMeta, body: Record<string, 
   // §9.3 的 `include_read` 缺省为假，与 CLI 的默认一致：`msg inbox` 先给未读，
   // 要看全部得显式要求。
   const includeRead = body.include_read === true
-  const rows = storage.inboxPage(owner, { limit, skip, includeRead })
-  const total = storage.inboxSize(owner, includeRead)
+  const deviceId = deviceOf(body)
+  const rows = storage.inboxPage(owner, { limit, skip, includeRead, deviceId })
+  const total = storage.inboxSize(owner, { includeRead, deviceId })
   return {
     messages: rows.map(rowJson),
     total,
@@ -152,7 +181,7 @@ export function readInbox(storage: Storage, meta: AnpMeta, body: Record<string, 
 
 export function readBatch(storage: Storage, meta: AnpMeta, body: Record<string, unknown>): Record<string, unknown> {
   const ids = idsFrom(body)
-  const found = new Map(storage.inboxRows(ownerOf(meta), ids).map((row) => [row.messageId, row]))
+  const found = new Map(storage.inboxRows(ownerOf(meta), deviceOf(body), ids).map((row) => [row.messageId, row]))
   return {
     items: ids.flatMap((id) => {
       const row = found.get(id)
@@ -168,7 +197,7 @@ export function readDelta(storage: Storage, meta: AnpMeta, body: Record<string, 
   const since = isCount(body.since) ? body.since : 0
   const limit = isPage(body.limit, MAX_PAGE) ? body.limit : DEFAULT_DELTA_PAGE
   // 多要一行只为回答 `has_more`，多出来的那一行不进结果。
-  const records = storage.deliveriesSince(ownerOf(meta), since, limit + 1)
+  const records = storage.deliveriesSince(ownerOf(meta), deviceOf(body), since, limit + 1)
   const page = records.slice(0, limit)
   const last = page[page.length - 1]
   return {

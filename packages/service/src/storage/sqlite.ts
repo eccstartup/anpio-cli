@@ -9,6 +9,7 @@
 import { DatabaseSync, type StatementSync } from 'node:sqlite'
 import { ConnectxError } from '@agentx/core'
 import { SCHEMA, SCHEMA_VERSION } from './schema'
+import { deviceFilter } from './types'
 import type {
   DeliveryRecord,
   IdempotencyRow,
@@ -478,10 +479,12 @@ class SqliteStorage implements Storage {
     })
   }
 
-  deliveriesSince(ownerDid: string, since: number, limit: number): DeliveryRecord[] {
+  deliveriesSince(ownerDid: string, deviceId: string, since: number, limit: number): DeliveryRecord[] {
     const rows = this.stmt(
-      'SELECT * FROM deliveries WHERE owner_did = ? AND seq > ? ORDER BY seq LIMIT ?',
-    ).all(ownerDid, since, limit) as Row[]
+      `SELECT * FROM deliveries
+        WHERE owner_did = ? AND seq > ? AND ${deviceFilter('deliveries')}
+        ORDER BY seq LIMIT ?`,
+    ).all(ownerDid, since, deviceId, limit) as Row[]
     return rows.map(toDelivery)
   }
 
@@ -518,26 +521,26 @@ class SqliteStorage implements Storage {
   inboxPage(ownerDid: string, query: InboxQuery): InboxRow[] {
     const want = query.limit + query.skip
     const rows = [
-      ...this.incomingRows(ownerDid, want, query.includeRead),
+      ...this.incomingRows(ownerDid, query.deviceId, want, query.includeRead),
       ...this.outgoingRows(ownerDid, want),
     ]
     rows.sort(newestFirst)
     return rows.slice(query.skip, query.skip + query.limit)
   }
 
-  inboxSize(ownerDid: string, includeRead: boolean): number {
+  inboxSize(ownerDid: string, query: Omit<InboxQuery, 'limit' | 'skip'>): number {
     const row = this.stmt(
       `SELECT
          (SELECT COUNT(*) FROM deliveries d
             LEFT JOIN message_reads r
               ON r.owner_did = d.owner_did AND r.message_id = d.message_id
-           WHERE d.owner_did = ? AND (? = 1 OR r.read_at IS NULL))
+           WHERE d.owner_did = ? AND (? = 1 OR r.read_at IS NULL) AND ${deviceFilter('d')})
        + (SELECT COUNT(*) FROM messages WHERE sender_did = ?) AS total`,
-    ).get(ownerDid, includeRead ? 1 : 0, ownerDid) as Row
+    ).get(ownerDid, query.includeRead ? 1 : 0, query.deviceId, ownerDid) as Row
     return int(row.total)
   }
 
-  inboxRows(ownerDid: string, messageIds: readonly string[]): InboxRow[] {
+  inboxRows(ownerDid: string, deviceId: string, messageIds: readonly string[]): InboxRow[] {
     if (messageIds.length === 0) return []
     // `json_each` rather than an `IN (?, ?, …)`: the id list comes from the caller and
     // `msg read --all` hands over every unread id at once, so the arity is unbounded —
@@ -549,8 +552,8 @@ class SqliteStorage implements Storage {
            FROM deliveries d
            LEFT JOIN message_reads r
              ON r.owner_did = d.owner_did AND r.message_id = d.message_id
-          WHERE d.owner_did = ? AND d.message_id IN (SELECT value FROM json_each(?))`,
-      ).all(ownerDid, ids) as Row[]).map(toIncomingRow),
+          WHERE d.owner_did = ? AND ${deviceFilter('d')} AND d.message_id IN (SELECT value FROM json_each(?))`,
+      ).all(ownerDid, deviceId, ids) as Row[]).map(toIncomingRow),
       ...(this.stmt(
         `SELECT m.message_id, m.sender_did, m.target_did, m.content_type, m.body_json, m.accepted_at, r.read_at
            FROM messages m
@@ -591,16 +594,16 @@ class SqliteStorage implements Storage {
     })
   }
 
-  private incomingRows(ownerDid: string, limit: number, includeRead: boolean): InboxRow[] {
+  private incomingRows(ownerDid: string, deviceId: string, limit: number, includeRead: boolean): InboxRow[] {
     const rows = this.stmt(
       `SELECT d.owner_did, d.message_id, d.params_json, d.accepted_at, r.read_at
          FROM deliveries d
          LEFT JOIN message_reads r
            ON r.owner_did = d.owner_did AND r.message_id = d.message_id
-        WHERE d.owner_did = ? AND (? = 1 OR r.read_at IS NULL)
+        WHERE d.owner_did = ? AND ${deviceFilter('d')} AND (? = 1 OR r.read_at IS NULL)
         ORDER BY d.accepted_at DESC, d.message_id DESC
         LIMIT ?`,
-    ).all(ownerDid, includeRead ? 1 : 0, limit) as Row[]
+    ).all(ownerDid, deviceId, includeRead ? 1 : 0, limit) as Row[]
     return rows.map(toIncomingRow)
   }
 

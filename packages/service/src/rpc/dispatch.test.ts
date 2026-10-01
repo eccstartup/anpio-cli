@@ -3,15 +3,18 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  DidDeviceResolver,
   DidKeyResolver,
   buildMessageRequest,
   buildOriginProofAuth,
   createAnpIdentity,
   ed25519OriginProofSigner,
+  idempotencyKey,
   JSON_RPC_ERROR,
   type AnpMeta,
   type AnpRequest,
   type AnpSigningIdentity,
+  type DeviceResolver,
   type KeyResolver,
   type LocateOptions,
   type NonceStore,
@@ -162,6 +165,101 @@ function inboxMeta(overrides: Partial<AnpMeta> = {}): AnpMeta {
   }
 }
 
+// ---- P5 `anp.direct.e2ee.v2`（C12）---------------------------------------------
+// 这一族要的文档与上面那份**不是**同一个用途：v2 的调用不带 `origin_proof`（§3.8 L140），
+// 所以不验签，也就不需要 `DidKeyResolver` 认得它。这两份只服务设备资格——`deviceManifest`
+// 与它引用的两个关系在就行。
+
+const SENDER_DEVICE = 'dev-sender-7N3KQ2'
+const RECEIVER_DEVICE = 'dev-receiver-4B8XT'
+
+/** P2 §5.5 L236–268 那份文档的最小形状：两个验证方法，一个落在 `assertionMethod`（Bundle
+ *  证明用），一个落在 `keyAgreement`（建链用），清单把两者绑在这台设备上。 */
+function deviceDocument(did: string, deviceId: string): Record<string, unknown> {
+  const signing = `${did}#${deviceId}-sign`
+  const e2ee = `${did}#${deviceId}-e2ee`
+  return {
+    id: did,
+    verificationMethod: [
+      { id: signing, type: 'Multikey', controller: did, publicKeyMultibase: 'z6Mkexample' },
+      { id: e2ee, type: 'Multikey', controller: did, publicKeyMultibase: 'z6LSexample' },
+    ],
+    assertionMethod: [signing],
+    keyAgreement: [e2ee],
+    deviceManifest: {
+      type: 'ANPDeviceManifest',
+      devices: [
+        {
+          device_id: deviceId,
+          signing_key_id: signing,
+          e2ee_key_id: e2ee,
+          profiles: [
+            'anp.core.binding.v1',
+            'anp.identity.discovery.v1',
+            'anp.direct.base.v1',
+            'anp.direct.e2ee.v2',
+          ],
+        },
+      ],
+    },
+  }
+}
+
+/** 文档在、清单空：§4.1.1 第 1 项要看到的那种"当前清单里没有它"。
+ *
+ *  用空清单而不是**缺**文档：缺文档会让 `DidDeviceResolver` 回落到真的去解析这个 DID，
+ *  在这条路径上就是一次网络请求，而测试要证的是判定，不是解析。 */
+function noDevices(did: string): Record<string, unknown> {
+  return { id: did, deviceManifest: { type: 'ANPDeviceManifest', devices: [] } }
+}
+
+function deviceDocuments(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    [sender.did]: deviceDocument(sender.did, SENDER_DEVICE),
+    [receiver.did]: deviceDocument(receiver.did, RECEIVER_DEVICE),
+    ...overrides,
+  }
+}
+
+/** 与 `inlineResolver` 同一个手法：清单来自调用方的表，所以受理路径跑得起来又不起网络。 */
+function inlineDeviceResolver(documents: Record<string, unknown> = deviceDocuments()): DeviceResolver {
+  const base = new DidDeviceResolver()
+  return {
+    resolveDevice(identity: string, deviceId: string, opts: LocateOptions = {}) {
+      return base.resolveDevice(identity, deviceId, { ...opts, didDocument: documents[identity] })
+    },
+  }
+}
+
+/** §9.3 L819–825 那个形状：`operation_id` **等于** `message_id`（§3.7 L134），两个设备
+ *  selector 都在，安全模式是 `direct-e2ee`。 */
+function e2eeMeta(overrides: Partial<AnpMeta> = {}): AnpMeta {
+  return {
+    profile: 'anp.direct.e2ee.v2',
+    security_profile: 'direct-e2ee',
+    sender_did: sender.did,
+    target: { kind: 'agent', did: receiver.did },
+    operation_id: 'op-e2ee-1',
+    message_id: 'op-e2ee-1',
+    content_type: 'application/anp-direct-init+json',
+    sender_device_id: SENDER_DEVICE,
+    recipient_device_id: RECEIVER_DEVICE,
+    ...overrides,
+  }
+}
+
+/** v2 的请求**没有 `auth`**（§3.8 L140），所以不能走 `signed()`——它每次都造一份证明，
+ *  而在这里那正是要被拒的东西。 */
+function e2eeRequest(options: { meta?: AnpMeta; body?: Record<string, unknown>; id?: string } = {}): AnpRequest {
+  return buildMessageRequest({
+    id: options.id ?? 'req-e2ee',
+    method: 'direct.send',
+    meta: options.meta ?? e2eeMeta(),
+    // §16.1–16.4：E2EE 承载对象在 `body` **顶层**，没有 `payload` 这个键。本服务不看它。
+    body: options.body ?? { session_id: 'sess-1', suite: 'x25519-chacha20poly1305', ciphertext_b64u: 'AAAA' },
+  })
+}
+
 /** A really signed request. Only the key lookup is stubbed; the signature, the digest and
  *  the freshness window are the real code paths. */
 async function signed(
@@ -204,7 +302,13 @@ interface Harness {
 }
 
 function harness(
-  overrides: { storage?: Storage; locator?: ServiceLocator; nonceStore?: NonceStore; relay?: Relay } = {},
+  overrides: {
+    storage?: Storage
+    locator?: ServiceLocator
+    nonceStore?: NonceStore
+    relay?: Relay
+    deviceResolver?: DeviceResolver
+  } = {},
 ): Harness {
   const storage = overrides.storage ?? openStorage({ path: ':memory:' })
   const logs: string[] = []
@@ -217,6 +321,7 @@ function harness(
     objects: openObjectStore({ directory: mkdtempSync(join(tmpdir(), 'agentx-dispatch-')), maxBytes: 1024 }),
     resolver: inlineResolver(DOCUMENTS),
     locator: overrides.locator ?? locator(publishedBySender()),
+    deviceResolver: overrides.deviceResolver ?? inlineDeviceResolver(),
     nonceStore: overrides.nonceStore ?? createHttpNonceStore(storage),
     ...(overrides.relay !== undefined ? { relay: overrides.relay } : {}),
     log: (line) => logs.push(line),
@@ -285,7 +390,9 @@ describe('malformed input', () => {
 describe('the method table decides what reaches the write', () => {
   it('refuses an unsupported profile with 1001 and stores nothing', async () => {
     const h = harness()
-    const outcome = await h.call(await signed({ meta: meta({ profile: 'anp.direct.e2ee.v2' }) }))
+    // C12 put `anp.direct.e2ee.v2` into this method's `profiles`, so the counterexample has
+    // to be one that is genuinely not implemented.
+    const outcome = await h.call(await signed({ meta: meta({ profile: 'anp.direct.e2ee.v3' }) }))
     expect(outcome.json?.error?.data?.anp_code).toBe('anp.unsupported_profile')
     expect(h.storage.headSeq(receiver.did)).toBe(0)
   })
@@ -354,7 +461,7 @@ describe('accepting a direct message', () => {
 
     expect(h.storage.dueOutbox(NOW.toISOString(), 10)).toEqual([])
 
-    const delivered = h.storage.deliveriesSince(receiver.did, 0, 10)
+    const delivered = h.storage.deliveriesSince(receiver.did, '', 0, 10)
     expect(delivered).toHaveLength(1)
     expect(delivered[0]?.method).toBe('direct.incoming')
 
@@ -382,7 +489,7 @@ describe('accepting a direct message', () => {
     const h = harness()
     const request = await signed()
     await h.call(request)
-    const delivered = h.storage.deliveriesSince(receiver.did, 0, 1)[0]
+    const delivered = h.storage.deliveriesSince(receiver.did, '', 0, 1)[0]
     const params = JSON.parse(delivered?.paramsJson ?? '{}') as { auth?: unknown }
     expect(params.auth).toEqual(request.params.auth)
   })
@@ -393,7 +500,7 @@ describe('accepting a direct message', () => {
     const retry = await h.call({ ...(await signed()), id: 'req-2' })
     expect(retry.json?.result?.accepted).toBe(true)
     // 两行意味着收件人会读两遍同一条消息，而这正是 §8.2 L444–450 要避免的。
-    expect(h.storage.deliveriesSince(receiver.did, 0, 10)).toHaveLength(1)
+    expect(h.storage.deliveriesSince(receiver.did, '', 0, 10)).toHaveLength(1)
   })
 
   it('carries conversation_id through to the result when the body has one', async () => {
@@ -510,6 +617,145 @@ describe('the body rules of P3 §6', () => {
       await signed({ meta: meta({ content_type: 'application/octet-stream' }), body: { payload_b64u: 'AAAA' } }),
     )
     expect(outcome.json?.result?.accepted).toBe(true)
+  })
+})
+
+/**
+ * P5 §10.7：本地受理一颗 v2 密文时要做的四件事——验两台设备的资格、按设备寻址落投递、
+ * 让幂等键带上设备段、把 `recipient_device_id` 回显出去。正文本身不在这里：本服务不解密
+ * （§10.7 L1392），`body` 是什么由收件设备判。
+ */
+describe('a device-addressed direct message (P5 anp.direct.e2ee.v2)', () => {
+  it('accepts the §9.3 init without an origin proof, and files no device-less delivery', async () => {
+    // §3.8 L140 禁 `auth`，所以这条请求是**没有证明**被受理的。放行它的不是"免认证"，
+    // 而是这个 Profile 不要求业务层证明（§4.3 L161）——它能收下的理由写在下面两条。
+    const h = harness()
+    const outcome = await h.call(e2eeRequest())
+
+    expect(outcome.json?.error).toBeUndefined()
+    expect(outcome.json?.result).toMatchObject({
+      accepted: true,
+      message_id: 'op-e2ee-1',
+      operation_id: 'op-e2ee-1',
+      target_did: receiver.did,
+      recipient_device_id: RECEIVER_DEVICE,
+    })
+    expect(h.storage.headSeq(receiver.did)).toBe(1)
+  })
+
+  it('files the delivery against the named device, so a sibling device never sees it', async () => {
+    // §10.7 L1391：密文只进 `(recipient_did, recipient_device_id)` 这一个信箱，§10.7.1
+    // L1407 禁止 fan-out。推送那一步按这一列筛连接（C12 的前一块），所以这里验的是它的来源。
+    const h = harness()
+    await h.call(e2eeRequest())
+    const [delivered] = h.storage.deliveriesSince(receiver.did, RECEIVER_DEVICE, 0, 10)
+    expect(delivered?.recipientDeviceId).toBe(RECEIVER_DEVICE)
+  })
+
+  it('refuses a sender device the DID no longer lists, with 1017 and nothing stored', async () => {
+    // §4.1.1 第 1 项在**每次操作**的前置上（L171），不是启动时校验一次。这里把清单换空
+    // 就是"设备被摘了"，而它不能静默变成一次成功——投递行落下去就没有撤回的办法。
+    const h = harness({
+      deviceResolver: inlineDeviceResolver(deviceDocuments({ [sender.did]: noDevices(sender.did) })),
+    })
+    const outcome = await h.call(e2eeRequest())
+
+    expect(outcome.json?.error?.data?.anp_code).toBe('anp.device_not_eligible')
+    expect(h.storage.headSeq(receiver.did)).toBe(0)
+  })
+
+  it('refuses a recipient device whose key binding does not hold, with 1016', async () => {
+    // 收件人的设备**由我们自己**解释（收件人住在本服务上），所以这一半也是我们的判断。
+    // 条目还在清单里，坏的是它的 `e2ee_key_id` 没有被 `keyAgreement` 引用——所以这不是
+    // 1017（"没有这台设备"），是 1016（"引用关系不成立"）。
+    const broken = deviceDocument(receiver.did, RECEIVER_DEVICE)
+    broken.keyAgreement = [`${receiver.did}#some-other-key`]
+    const h = harness({ deviceResolver: inlineDeviceResolver(deviceDocuments({ [receiver.did]: broken })) })
+
+    const outcome = await h.call(e2eeRequest())
+    expect(outcome.json?.error?.data?.anp_code).toBe('anp.device_binding_invalid')
+    expect(h.storage.headSeq(receiver.did)).toBe(0)
+  })
+
+  it('puts both device selectors in the idempotency key (§10.7 L1391 第 3 项)', async () => {
+    // 用键本身来断言，而不是编一个"同一个 operation_id 发往两台设备"的场景——§3.7 L134
+    // 要求 `operation_id` **等于** `message_id`，而 P5 的每份密文都带自己那一对 id，
+    // 所以那样两个请求在规范里根本不存在。能观察到的事实是键，那就直接看键。
+    const h = harness()
+    const outcome = await h.call(e2eeRequest())
+    expect(outcome.json?.error).toBeUndefined()
+
+    const scope = {
+      senderDid: sender.did,
+      targetScope: receiver.did,
+      method: 'direct.send',
+      operationId: 'op-e2ee-1',
+    }
+    const withDevices = idempotencyKey({
+      ...scope,
+      deviceSelectors: [SENDER_DEVICE, RECEIVER_DEVICE],
+    })
+    expect(h.storage.idempotentRow(withDevices)).toBeDefined()
+    // 少了设备段的那个键必须**不在**库里。它若在，说明键退回到 Base 的四段形状，
+    // 而那正是"设备定址不被计入"的定义。
+    expect(h.storage.idempotentRow(idempotencyKey(scope))).toBeUndefined()
+  })
+
+  it('replays a retry of an operation it already accepted, device check and all', async () => {
+    // §9.1 L630：重放要得到**同一个**结果。资格是当下的事实（§4.1.1 L171），所以一次早就
+    // 受理过的重试不会因为设备后来被摘掉而变成错误——那会让"重试"变成另一件事，而调用方
+    // 手里没有任何东西能区分这两种结局。
+    const h = harness()
+    const first = await h.call(e2eeRequest())
+
+    const bothGone = deviceDocuments({ [sender.did]: noDevices(sender.did), [receiver.did]: noDevices(receiver.did) })
+    const stripped = harness({ storage: h.storage, deviceResolver: inlineDeviceResolver(bothGone) })
+    const retry = await stripped.call(e2eeRequest({ id: 'req-e2ee-2' }))
+
+    expect(retry.json?.error).toBeUndefined()
+    expect(retry.json?.result).toEqual(first.json?.result)
+    expect(h.storage.deliveriesSince(receiver.did, RECEIVER_DEVICE, 0, 10)).toHaveLength(1)
+  })
+
+  it('does not verify the peer devices when the recipient lives elsewhere', async () => {
+    // §10.7 L1388 把"验两台设备"写成**目标服务**的 MUST。我们在这里再查一遍，等于拿一份
+    // 我们无权解释的清单替对端做主。本用例让双方设备都不在本地清单里，但请求照样转发出去
+    // 并拿到对端的答复——所以"受理了"这件事本身就是那个断言的证据。
+    const asked: string[] = []
+    const bothGone = deviceDocuments({ [sender.did]: noDevices(sender.did), [receiver.did]: noDevices(receiver.did) })
+    const h = harness({
+      deviceResolver: inlineDeviceResolver(bothGone),
+      relay: {
+        async forward(_request, targetDid) {
+          asked.push(targetDid)
+          return {
+            kind: 'answered',
+            result: {
+              accepted: true,
+              message_id: 'op-e2ee-1',
+              operation_id: 'op-e2ee-1',
+              target_did: receiver.did,
+              recipient_device_id: RECEIVER_DEVICE,
+              accepted_at: NOW.toISOString(),
+            },
+          }
+        },
+      },
+    })
+    const outcome = await h.call(e2eeRequest())
+
+    expect(asked).toEqual([receiver.did])
+    expect(outcome.json?.result?.recipient_device_id).toBe(RECEIVER_DEVICE)
+    expect(h.storage.headSeq(receiver.did)).toBe(0)
+  })
+
+  it('never runs the P3 payload rule on a v2 body', async () => {
+    // §16.1–16.4 的正文在顶层，没有 `body.payload`。让它跑，等于每一条合法的 v2 请求都被
+    // 自己的正文校验拒掉——所以这条用例只要"受理了"就是那个断言的证据。
+    const h = harness()
+    const outcome = await h.call(e2eeRequest({ body: { session_id: 's', recipient_bundle_id: 'b' } }))
+    expect(outcome.json?.error).toBeUndefined()
+    expect(h.storage.deliveriesSince(receiver.did, RECEIVER_DEVICE, 0, 10)[0]?.paramsJson).toContain('"session_id":"s"')
   })
 })
 
@@ -755,6 +1001,76 @@ describe('the pick-up extension surface (§9)', () => {
     const outcome = await asOwner(h, 'inbox.get', { 'include-read': true })
     expect(outcome.json?.error?.code).toBe(1003)
   })
+
+  it('refuses a device_id that is not a usable device name', async () => {
+    const h = harness()
+    const outcome = await asOwner(h, 'inbox.get', { limit: 20, device_id: '' })
+    expect(outcome.json?.error?.data?.anp_code).toBe('anp.invalid_params_shape')
+  })
+
+  // ---- 设备维度（P5 §10.7.1 L1407 的读侧）---------------------------------------
+  //
+  // 订阅路早就按设备筛连接了（`stream/registry.ts` 的 `reaches`）。这三条验的是同一条信箱
+  // 的**另一半**：拉取。不筛就是"密文进了正确的设备、又从这一侧泄给整台账号"——比推送那侧
+  // 更糟，因为读者把它收下了。
+
+  /** 一条投给 `RECEIVER_DEVICE` 的 v2 密文，落在 `receiver` 的信箱里。 */
+  async function seedCipher(h: Harness): Promise<void> {
+    const accepted = await h.call(e2eeRequest())
+    expect(accepted.json?.error).toBeUndefined()
+  }
+
+  it('replays a device-addressed delivery to that device, and only to it', async () => {
+    const h = harness()
+    await seedCipher(h)
+
+    const mine = await asOwner(h, 'sync.delta', { since: 0, device_id: RECEIVER_DEVICE })
+    const rows = (mine.json?.result?.messages ?? []) as { params: { meta: { recipient_device_id?: string } } }[]
+    expect(rows).toHaveLength(1)
+    expect(rows[0]?.params.meta.recipient_device_id).toBe(RECEIVER_DEVICE)
+
+    // 兄弟设备：同一封信箱、同一个 `since`，什么都拿不到。
+    const sibling = await asOwner(h, 'sync.delta', { since: 0, device_id: 'dev-some-other' })
+    expect(sibling.json?.result?.messages).toEqual([])
+    // 没声明设备的调用方也一样。**缺席不是"没有限制"**——那正是这条 MUST 要堵的口子。
+    const undeclared = await asOwner(h, 'sync.delta', { since: 0 })
+    expect(undeclared.json?.result?.messages).toEqual([])
+  })
+
+  it('keeps a device-addressed message out of a sibling device inbox page', async () => {
+    const h = harness()
+    // 一条账号级的 P3 消息打底：两种调用方都该看见它，差别只在密文那一条。
+    await seed(h)
+    await seedCipher(h)
+
+    const ids = async (body: Record<string, unknown>): Promise<string[]> => {
+      const outcome = await asOwner(h, 'inbox.get', body)
+      const rows = (outcome.json?.result?.messages ?? []) as { message_id: string }[]
+      return rows.map((row) => row.message_id).sort()
+    }
+
+    expect(await ids({ limit: 20, device_id: RECEIVER_DEVICE })).toEqual(['msg-1', 'op-e2ee-1'])
+    expect(await ids({ limit: 20, device_id: 'dev-some-other' })).toEqual(['msg-1'])
+    expect((await asOwner(h, 'inbox.get', { limit: 20, device_id: 'dev-some-other' })).json?.result?.total).toBe(1)
+  })
+
+  it('will not hand a sibling device the ciphertext by id either', async () => {
+    const h = harness()
+    await seedCipher(h)
+
+    // 设备知道 `message_id`（它就在 `direct.send` 的应答里）也不该能按 id 取回别人的密文。
+    const mine = await asOwner(h, 'message.get_batch', {
+      message_ids: ['op-e2ee-1'],
+      device_id: RECEIVER_DEVICE,
+    })
+    expect(((mine.json?.result?.items ?? []) as unknown[]).length).toBe(1)
+
+    const sibling = await asOwner(h, 'message.get_batch', {
+      message_ids: ['op-e2ee-1'],
+      device_id: 'dev-some-other',
+    })
+    expect(sibling.json?.result).toEqual({ items: [], unavailable: ['op-e2ee-1'] })
+  })
 })
 
 describe('capability discovery (P1 §8.2)', () => {
@@ -781,9 +1097,10 @@ describe('capability discovery (P1 §8.2)', () => {
         'anp.attachment.v1',
         'anp.core.binding.v1',
         'anp.direct.base.v1',
+        'anp.direct.e2ee.v2',
         'anp.group.base.v2',
       ],
-      supported_security_profiles: ['transport-protected'],
+      supported_security_profiles: ['direct-e2ee', 'transport-protected'],
     })
   })
 
@@ -797,6 +1114,8 @@ describe('capability discovery (P1 §8.2)', () => {
       'text/plain',
       'application/json',
       'application/anp-attachment-manifest+json',
+      'application/anp-direct-init+json',
+      'application/anp-direct-cipher+json',
     ])
   })
 

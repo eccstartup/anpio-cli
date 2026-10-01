@@ -213,7 +213,7 @@ describe('deliveries', () => {
     expect(store.headSeq('did:web:nobody')).toBe(0)
   })
 
-  it('keeps the recipient device on the row, and absence means the whole account', () => {
+  it('keeps the recipient device on the row, and filters the read by it', () => {
     // P5 §10.7 L1391: a ciphertext is queued for one device, and §10.7.1 L1407 forbids
     // handing it to a sibling. A P3 message has no device at all, which is a different
     // fact from "device" being an empty string — `toDelivery` has to keep them apart.
@@ -234,9 +234,16 @@ describe('deliveries', () => {
       acceptedAt: '2026-10-01T00:00:01Z',
     })
 
-    const page = store.deliveriesSince('did:web:a', 0, 10)
-    expect(page[0]?.recipientDeviceId).toBe('dev-1')
-    expect(page[1]?.recipientDeviceId).toBeUndefined()
+    // The device that owns the ciphertext sees both rows: its own, and the account's.
+    const asDev1 = store.deliveriesSince('did:web:a', 'dev-1', 0, 10)
+    expect(asDev1.map((record) => record.messageId)).toEqual(['m1', 'm2'])
+    expect(asDev1[0]?.recipientDeviceId).toBe('dev-1')
+    expect(asDev1[1]?.recipientDeviceId).toBeUndefined()
+
+    // A caller that declared no device — and a sibling that declared a different one —
+    // get the account's row only. That second case is the one §10.7.1 L1407 is about.
+    expect(store.deliveriesSince('did:web:a', '', 0, 10).map((r) => r.messageId)).toEqual(['m2'])
+    expect(store.deliveriesSince('did:web:a', 'dev-2', 0, 10).map((r) => r.messageId)).toEqual(['m2'])
   })
 
   it('pages after a sequence, in order', () => {
@@ -251,10 +258,10 @@ describe('deliveries', () => {
       })
     }
 
-    const page = store.deliveriesSince('did:web:a', 2, 2)
+    const page = store.deliveriesSince('did:web:a', '', 2, 2)
     expect(page.map((record) => record.seq)).toEqual([3, 4])
     expect(page.map((record) => record.messageId)).toEqual(['m2', 'm3'])
-    expect(store.deliveriesSince('did:web:a', 5, 10)).toEqual([])
+    expect(store.deliveriesSince('did:web:a', '', 5, 10)).toEqual([])
   })
   it('advances a cursor per device and never backwards', () => {
     const store = open()
@@ -536,7 +543,7 @@ describe('the v6 → v7 migration', () => {
     // The row written before the column existed is a P3 delivery, so it must read back
     // with no device rather than with an empty one — that difference is what decides who
     // the frame is pushed to (registry.ts `reaches`).
-    const [record] = store.deliveriesSince('did:web:a', 0, 10)
+    const [record] = store.deliveriesSince('did:web:a', '', 0, 10)
     expect(record?.messageId).toBe('m1')
     expect(record?.recipientDeviceId).toBeUndefined()
 

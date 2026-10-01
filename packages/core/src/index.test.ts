@@ -139,6 +139,10 @@ const MAIN = [
   'DidServiceLocator',
   'DidKeyResolver',
   'isDidIdentity',
+  // P2 §5.5 的设备清单：解析器与那条扩展的类型判别值同一族——判"这台设备算不算数"
+  // 要读的正是这一条，把类型名留在包里会让调用方各写一遍字面量
+  'DEVICE_MANIFEST_TYPE',
+  'DidDeviceResolver',
   // P2 发现：静态 hint 与运行时能力分开持有，§8.3 的"以运行时为准"有名字
   'ANP_MESSAGE_SERVICE_TYPE',
   'discoverMessageService',

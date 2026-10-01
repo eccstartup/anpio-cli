@@ -105,7 +105,7 @@ export function createStreamSession(deps: StreamSessionDeps): StreamSession {
 
       /** The two transport methods, run through the same layers as everything else. */
       async function transportFrame(envelope: AnpRequest, spec: MethodSpec): Promise<void> {
-        const refused = checkMethod(spec, envelope.params.meta)
+        const refused = checkMethod(spec, envelope.params)
         if (refused !== undefined) {
           emit(errorResponse(envelope.id, refused))
           return

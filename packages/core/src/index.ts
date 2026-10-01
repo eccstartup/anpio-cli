@@ -244,6 +244,8 @@ export type {
 } from './message/discovery'
 export { idempotencyKey, idempotencyVerdict, idempotencyScopeFromMeta } from './message/idempotency'
 export type { IdempotencyScope, IdempotencyRecord, IdempotencyVerdict } from './message/idempotency'
+export { DEVICE_MANIFEST_TYPE, DidDeviceResolver } from './message/devices'
+export type { DeviceEntry, DeviceRelationship, DeviceResolver } from './message/devices'
 // P1 附录 A.3 的 Signed Request Object 与它的摘要。服务端的幂等指纹就用它——
 // 它已经覆盖 method / meta / body 的全部内容，另算一份摘要等于有两种"等价"。
 export { signedRequestObject, canonicalizeSignedRequestObject, contentDigestOf } from './message/sro'

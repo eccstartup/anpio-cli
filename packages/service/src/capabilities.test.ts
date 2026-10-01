@@ -10,9 +10,10 @@ describe('serviceCapabilities', () => {
       'anp.attachment.v1',
       'anp.core.binding.v1',
       'anp.direct.base.v1',
+      'anp.direct.e2ee.v2',
       'anp.group.base.v2',
     ])
-    expect(capabilities.securityProfiles).toEqual(['transport-protected'])
+    expect(capabilities.securityProfiles).toEqual(['direct-e2ee', 'transport-protected'])
     expect(capabilities.extensionProfiles).toEqual(['x_agentx.inbox.v1', 'x_agentx.stream.v1'])
     expect(capabilities.extensionMethods).toEqual([
       'inbox.get',
@@ -56,11 +57,18 @@ describe('capabilitiesResult', () => {
         'anp.attachment.v1',
         'anp.core.binding.v1',
         'anp.direct.base.v1',
+        'anp.direct.e2ee.v2',
         'anp.group.base.v2',
       ],
-      supported_security_profiles: ['transport-protected'],
+      supported_security_profiles: ['direct-e2ee', 'transport-protected'],
       limits: { max_request_bytes: '2048', max_message_bytes: '2048' },
-      supported_content_types: ['text/plain', 'application/json', 'application/anp-attachment-manifest+json'],
+      supported_content_types: [
+        'text/plain',
+        'application/json',
+        'application/anp-attachment-manifest+json',
+        'application/anp-direct-init+json',
+        'application/anp-direct-cipher+json',
+      ],
     })
   })
 

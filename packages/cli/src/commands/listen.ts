@@ -477,7 +477,14 @@ async function authenticate(connection: StreamConnection, arrivals: Arrivals, co
 async function delta(connection: StreamConnection, arrivals: Arrivals, context: SessionContext, since: number): Promise<Step> {
   let cursor = since
   for (;;) {
-    const page = await request(connection, arrivals, context, SYNC_DELTA, { since: cursor, limit: DELTA_PAGE })
+    const page = await request(connection, arrivals, context, SYNC_DELTA, {
+      since: cursor,
+      limit: DELTA_PAGE,
+      // 补的是**这台设备**错过的东西。服务端按 `device_id` 筛交付行（§10.7.1 L1407），
+      // 不声明就只看得到账号级的那批——而同一台信箱的实时那一半是按设备推的，两边必须
+      // 用同一个名字，否则补课会把别的设备的密文也拖进来，或者把自己那条漏掉。
+      device_id: context.options.device,
+    })
     if (page.kind !== 'frame') return page
     const entries = Array.isArray(page.frame.messages) ? page.frame.messages : []
     for (const entry of entries) {

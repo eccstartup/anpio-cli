@@ -108,8 +108,10 @@ export interface StoreDirectInput {
 /**
  * 写下一条私聊消息与收件人的投递记录，返回 §7.1.3 L366–372 的成功 `result`。
  *
- * 结果**以 DID 为范围**（L378）：不含设备 selector、不含逐设备结果，所以这里只有一份
- * 投递记录，收件人是 `meta.target.did`。
+ * 结果**以 DID 为范围**（L378）：不含逐设备的结果数组，所以这里只有一份投递记录。P5
+ * §10.7 L1394 另外要求 v2 的应答带上 `recipient_device_id`——它也同样不是数组：一条
+ * `direct.send` 只承载**一台**接收设备的密文（§3.7 L136 要求每台各自的密文带自己唯一的
+ * id 对，所以逐设备投递是并列的若干次调用，不是一次调用里的若干段）。
  */
 export function storeDirectMessage(storage: Storage, input: StoreDirectInput): Record<string, unknown> {
   const { meta } = input
@@ -117,6 +119,10 @@ export function storeDirectMessage(storage: Storage, input: StoreDirectInput): R
   const messageId = meta.message_id ?? ''
   const senderDid = meta.sender_did ?? ''
   const conversationId = input.body.conversation_id
+  // §10.7 L1394：回显 **MUST** 等于请求。所以这一项取自 `meta`（请求里写了什么就回什么），
+  // 不是取自投递行——两者今天必然相同，但"回显等于请求"说的是请求。
+  const deviceEcho =
+    meta.recipient_device_id !== undefined ? { recipient_device_id: meta.recipient_device_id } : {}
 
   // §8.2 L444–450 的消息级重复识别，也就是流程图里 M1 →「按重复消息策略处理」那一格。
   // 本实现的策略跟 §9.1 L630 给操作级的那个一样：把已经在那儿的消息**报回去**，不再存
@@ -137,6 +143,7 @@ export function storeDirectMessage(storage: Storage, input: StoreDirectInput): R
       operation_id: meta.operation_id,
       target_did: existing.targetDid,
       accepted_at: existing.acceptedAt,
+      ...deviceEcho,
       ...(existing.conversationId !== undefined ? { conversation_id: existing.conversationId } : {}),
     }
   }
@@ -214,6 +221,7 @@ export function storeDirectMessage(storage: Storage, input: StoreDirectInput): R
     operation_id: meta.operation_id,
     target_did: targetDid,
     accepted_at: acceptedAt,
+    ...deviceEcho,
     // §7.1.3 L374–376：`conversation_id` 是 MAY，有就原样回。
     ...(typeof conversationId === 'string' ? { conversation_id: conversationId } : {}),
   }

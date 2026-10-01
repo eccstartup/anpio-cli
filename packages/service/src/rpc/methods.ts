@@ -12,11 +12,19 @@ import {
   anpRejection,
   ConnectxError,
   type AnpMeta,
+  type AnpParams,
   type AnpRejection,
   type AnpTarget,
   type AnpTargetKind,
 } from '@agentx/core'
 import { DIRECT_AUTH_CODES, GROUP_AUTH_CODES, P1_AUTH_CODES, type AuthErrorCodes } from './auth'
+import {
+  DIRECT_E2EE_PROFILE,
+  DIRECT_E2EE_SECURITY_PROFILE,
+  directSendDeviceAddressed,
+  directSendParams,
+} from './e2ee'
+import type { DeviceAddressed } from './eligibility'
 import {
   ATTACHMENT_ABORT_OBJECT,
   ATTACHMENT_COMMIT_OBJECT,
@@ -112,11 +120,27 @@ export interface MethodSpec {
   requiresOriginProof(meta: AnpMeta): boolean
   /** 证明不通过时用哪一对码（P1 §10.3 L706 vs P3 §11 L599–600）。 */
   authCodes: AuthErrorCodes
+  /** Profile 层对 `params` 的校验——**整个** `params`，因为有些规则同时要看 `meta` 与
+   *  `auth`。缺省表示这个方法没有这一类规则。
+   *
+   *  两个静态数组（`requiredMeta` / `forbiddenMeta`）表达不了的东西都在这里：`direct.send`
+   *  在 Base 下禁设备 selector、在 v2 下要求它，同一个字段两套相反的要求，只有在知道
+   *  `meta.profile` 之后才判得了。
+   *
+   *  它在 `checkMethod` 的最后一步跑，不是单独一次调用——**这是有意的**。"这个方法还有
+   *  哪些 MUST 没查"必须只有一个答案，而它一旦分开，流上那条路径（`stream/session.ts`）
+   *  就会漏掉它，且不会有任何东西红。 */
+  validateParams?(params: AnpParams): AnpRejection | undefined
   /** Profile 层对 `body` 的校验。缺省表示这个方法没有正文规则。
    *
    *  签名收 `meta` 而不只是 `body`：`direct.send` 的正文规则要用 `content_type` 判
    *  负载字段对不对得上，而那是 `meta` 里的。 */
   validateBody?(body: Record<string, unknown>, meta: AnpMeta): AnpRejection | undefined
+  /** 这次调用是不是**设备定址**的（P5 §9.3 L823–824）。`undefined` = 不是。
+   *
+   *  只有设备定址的调用才把设备 selector 放进幂等键（§9.1 L639），也只有它才要验那两台
+   *  设备的资格（§10.7 L1388）。两件后果都从这里出，见 {@link DeviceAddressed}。 */
+  deviceAddressed?(meta: AnpMeta): DeviceAddressed | undefined
   /** Profile 定义的幂等 `target_scope`（P1 §9.1 L635 + P3 §8.2 L437–442）。
    *  `undefined` 表示这个方法不改状态，也就不进幂等台账。 */
   targetScope?: (meta: AnpMeta, body: Record<string, unknown>) => string
@@ -149,25 +173,43 @@ const GET_CAPABILITIES_SPEC: MethodSpec = {
   authCodes: P1_AUTH_CODES,
 }
 
-/** 直连私聊。`meta.target.kind` 必须是 `agent`（P3 §5.1 L172）。 */
+/**
+ * 直连私聊。`meta.target.kind` 必须是 `agent`（P3 §5.1 L172）。
+ *
+ * **两个 Profile 走同一个方法名**（P3 §4.3 L161 的 Overlay 规矩）：P5 的
+ * `anp.direct.e2ee.v2` 不新开一个方法，它把 `direct.send` 最外层那套 wire 契约换掉。所以
+ * 下面每一处要看 `profile` 说话的地方都是**同一件事的两面**，而不是两个方法的差异。
+ *
+ * v2 那条路上本服务做的事只有一件：把这颗不透明密文放进收件设备的邮箱（§10.7 L1391）。
+ * 它不解密、不重加密、不 fan-out（§10.7 L1392），也不解析正文——包括不去查 §3.7 那两个
+ * id 与正文里的字段对不对得上，那是收件设备的事。
+ */
 const DIRECT_SEND_SPEC: MethodSpec = {
   name: DIRECT_SEND,
   targetMode: 'agent-addressed',
-  profiles: ['anp.direct.base.v1'],
-  securityProfiles: ['transport-protected'],
+  profiles: ['anp.direct.base.v1', DIRECT_E2EE_PROFILE],
+  securityProfiles: ['transport-protected', DIRECT_E2EE_SECURITY_PROFILE],
   requiredMeta: ['sender_did', 'operation_id', 'message_id', 'content_type'],
-  // P3 §7.1.2 L362：设备 selector 只属于 P5 v2。P1 §10.3 L724 说 Base 操作收到 selector
-  // 就按"非法参数"处理——1015–1018 那四个码专给设备定址 Overlay，这里不许用。
-  forbiddenMeta: ['sender_device_id', 'recipient_device_id'],
+  // 两个 selector 在 Base 下禁、在 v2 下必带，静态数组表达不了，所以在 `validateParams`
+  // 里（`e2ee.ts`）。这里留空不是"没有规则"，规则连同 v2 那份一起写在那一处。
+  forbiddenMeta: [],
   // P3 §6.4 L290 要求 base + transport-protected 必须带 `auth`。P3 §4.3 L161 让
   // `anp.direct.e2ee.v2` 整个覆盖掉这条强制要求（该 Overlay 用建链材料与 AAD 认证发送方，
-  // 为的是保住更强的可否认性）。那个 profile 是 C12 的，届时加进上面的 `profiles` 即可，
-  // 判断保持写在这一处。
-  requiresOriginProof: (meta) => meta.profile !== 'anp.direct.e2ee.v2',
+  // 为的是保住更强的可否认性），§3.8 L140 进一步禁止 v2 出现 `auth`。
+  requiresOriginProof: (meta) => meta.profile !== DIRECT_E2EE_PROFILE,
   authCodes: DIRECT_AUTH_CODES,
+  validateParams: directSendParams,
   // P3 §6 的负载互斥规则与 P4 §7.6 逐字相同，所以两个 Profile 共用一份（`payload.ts`）。
-  validateBody: (body, meta) => validatePayloadBody(body, meta.content_type ?? ''),
-  // P3 §8.2 L437–442：`(sender_did, target.did, method, operation_id)`。
+  //
+  // **v2 不走它**，而且不是因为"以后再说"：`payloadFieldRequiredBy` 对任何 `+json` 都要
+  // `body.payload`，而 v2 的正文是 E2EE 承载对象**放在顶层**（§16.1–16.4：`session_id`
+  // / `suite` / `recipient_bundle_id` / `ciphertext_b64u` …），没有 `payload` 这个键。
+  // 让它在这里跑，等于每一条合法的 v2 请求都被自己的正文校验拒掉。
+  validateBody: (body, meta) =>
+    meta.profile === DIRECT_E2EE_PROFILE ? undefined : validatePayloadBody(body, meta.content_type ?? ''),
+  deviceAddressed: directSendDeviceAddressed,
+  // P3 §8.2 L437–442：`(sender_did, target.did, method, operation_id)`。P5 §10.7 L1391 在
+  // 这四段之后加上两台设备，那一段由 `deviceAddressed` 交出去，这里照旧。
   targetScope: (meta) => {
     const target = meta.target
     // dispatch 已经查过目标绑定（1014），所以这里必定存在。抛而不是兜一个空串：
@@ -518,11 +560,16 @@ export function targetBindingHolds(spec: MethodSpec, target: AnpTarget | undefin
  * 哪些 `meta` 字段、以及目标建模模式（§6.2.5.1 L382）。`parseEnvelope` 已经保证 `meta`
  * 是个对象、`target` 的形状合法、`kind` 是三个词之一，所以这里只判"这个方法要不要求"。
  *
+ * 收的是整个 `params` 而不是 `meta`：中间要跑 `validateParams`（它同时看 `meta` 与
+ * `auth`），而"查全这个方法的 MUST"必须**只有一处入口**——收 `meta` 的话，那一处就成了
+ * 可选的、能被下一个调用点忘掉的散装检查。
+ *
  * **缺失 `target` 报 1003，不是 1014**：L382 那条 MUST 说的是"`kind` 与声明的模式不一致"，
  * 前提是 `target` 在；一个连 `target` 都没有的请求，错的是 `params` 的形状（§10.3 L704）。
  * 这是本实现的读法，规范没有为"该有却没有"单独配码。
  */
-export function checkMethod(spec: MethodSpec, meta: AnpMeta): AnpRejection | undefined {
+export function checkMethod(spec: MethodSpec, params: AnpParams): AnpRejection | undefined {
+  const { meta } = params
   if (!spec.profiles.includes(meta.profile)) {
     return anpRejection('anp.unsupported_profile', `${spec.name} does not implement profile ${meta.profile}`)
   }
@@ -542,6 +589,13 @@ export function checkMethod(spec: MethodSpec, meta: AnpMeta): AnpRejection | und
       return anpRejection('anp.invalid_params_shape', `${spec.name} forbids meta.${field}`)
     }
   }
+
+  // Profile 层那条按 `meta.profile` 分派的规则在 target 之前：它判的是"这两个 Profile 各自
+  // 的字段要求"（设备 selector 在不在、`content_type` 是哪一类、`auth` 该不该在），而那些
+  // 字段与 `target` 无关。target 那几条判的是**目标建模模式**，是另一回事；v2 请求缺
+  // `target` 时该收到的是 1003（形状），不是 1014。
+  const profileRefusal = spec.validateParams?.(params)
+  if (profileRefusal !== undefined) return profileRefusal
 
   // §6.2.5 L341 与 §6.2.5.1 L377–380：target 必不必填，由建模模式决定。L1068 再补一条
   // ——只要这个方法要 `origin_proof`，`meta.target` 就 MUST 存在，因为 `@target-uri` 要用

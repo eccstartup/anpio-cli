@@ -68,7 +68,7 @@ describe('the two tables the inbox merges', () => {
     receive(store, BOB, ALICE, 'from-alice', at(1))
     send(store, BOB, ALICE, 'to-alice', at(2))
 
-    const page = store.inboxPage(BOB, { limit: 20, skip: 0, includeRead: true })
+    const page = store.inboxPage(BOB, { limit: 20, skip: 0, includeRead: true, deviceId: '' })
 
     expect(ids(page)).toEqual(['to-alice', 'from-alice'])
     expect(page[0]?.direction).toBe('outgoing')
@@ -82,14 +82,14 @@ describe('the two tables the inbox merges', () => {
   it('keeps a message the owner sent out of the other mailbox', () => {
     const store = openStorage({ path: ':memory:' })
     send(store, BOB, ALICE, 'one-way', at(1))
-    expect(ids(store.inboxPage(ALICE, { limit: 20, skip: 0, includeRead: true }))).toEqual([])
+    expect(ids(store.inboxPage(ALICE, { limit: 20, skip: 0, includeRead: true, deviceId: '' }))).toEqual([])
     store.close()
   })
 
   it('carries the delivery body through to the row', () => {
     const store = openStorage({ path: ':memory:' })
     receive(store, BOB, ALICE, 'm1', at(1), { payload: { kind: 'ping' } })
-    const [row] = store.inboxPage(BOB, { limit: 20, skip: 0, includeRead: true })
+    const [row] = store.inboxPage(BOB, { limit: 20, skip: 0, includeRead: true, deviceId: '' })
     expect(JSON.parse(row?.bodyJson ?? '{}')).toEqual({ payload: { kind: 'ping' } })
     expect(row?.contentType).toBe('text/plain')
     store.close()
@@ -102,10 +102,10 @@ describe('paging', () => {
     for (let i = 0; i < 5; i++) receive(store, BOB, ALICE, `in-${i}`, at(i))
     for (let i = 0; i < 5; i++) send(store, BOB, ALICE, `out-${i}`, at(5 + i))
 
-    const all = ids(store.inboxPage(BOB, { limit: 20, skip: 0, includeRead: true }))
+    const all = ids(store.inboxPage(BOB, { limit: 20, skip: 0, includeRead: true, deviceId: '' }))
     const paged: string[] = []
     for (let skip = 0; skip < all.length; skip += 3) {
-      paged.push(...ids(store.inboxPage(BOB, { limit: 3, skip, includeRead: true })))
+      paged.push(...ids(store.inboxPage(BOB, { limit: 3, skip, includeRead: true, deviceId: '' })))
     }
     // `skip` is an offset over a merged, time-ordered list, so an unstable order would
     // show up here as a duplicate plus a hole rather than as a failure.
@@ -120,11 +120,11 @@ describe('paging', () => {
     receive(store, BOB, ALICE, 'in-1', at(1))
     send(store, BOB, ALICE, 'out-0', at(2))
 
-    expect(store.inboxSize(BOB, true)).toBe(3)
+    expect(store.inboxSize(BOB, { includeRead: true, deviceId: '' })).toBe(3)
     store.markRead(BOB, ['in-0'], at(9))
-    expect(store.inboxSize(BOB, false)).toBe(2)
-    expect(store.inboxSize(BOB, true)).toBe(3)
-    expect(store.inboxPage(BOB, { limit: 20, skip: 0, includeRead: false })).toHaveLength(2)
+    expect(store.inboxSize(BOB, { includeRead: false, deviceId: '' })).toBe(2)
+    expect(store.inboxSize(BOB, { includeRead: true, deviceId: '' })).toBe(3)
+    expect(store.inboxPage(BOB, { limit: 20, skip: 0, includeRead: false, deviceId: '' })).toHaveLength(2)
     store.close()
   })
 })
@@ -137,9 +137,9 @@ describe('reading by id', () => {
 
     // `hers` belongs to Alice's mailbox, so Bob asking for it gets nothing back — a
     // message id is not a capability.
-    const rows = store.inboxRows(BOB, ['mine', 'hers'])
+    const rows = store.inboxRows(BOB, '', ['mine', 'hers'])
     expect(ids(rows)).toEqual(['mine'])
-    expect(ids(store.inboxRows(BOB, ['mine', 'mine']))).toEqual(['mine'])
+    expect(ids(store.inboxRows(BOB, '', ['mine', 'mine']))).toEqual(['mine'])
     store.close()
   })
 })
@@ -154,7 +154,7 @@ describe('marking read', () => {
     // Already read: the FIRST read is when it was read, so a second call changes nothing.
     expect(store.markRead(BOB, ['in-0'], at(10))).toEqual([])
 
-    const rows = store.inboxPage(BOB, { limit: 20, skip: 0, includeRead: true })
+    const rows = store.inboxPage(BOB, { limit: 20, skip: 0, includeRead: true, deviceId: '' })
     expect(rows[0]?.readAt).toBe(at(9))
     store.close()
   })
@@ -172,7 +172,7 @@ describe('marking read', () => {
     receive(store, BOB, ALICE, 'in-0', at(0))
     send(store, BOB, ALICE, 'out-0', at(1))
 
-    const before = store.inboxPage(BOB, { limit: 20, skip: 0, includeRead: true })
+    const before = store.inboxPage(BOB, { limit: 20, skip: 0, includeRead: true, deviceId: '' })
     // A message the owner sent was never unread for the owner; nothing marked it, so
     // the honest answer is null rather than a timestamp nobody produced.
     expect(before.find((row) => row.messageId === 'out-0')?.readAt).toBeNull()

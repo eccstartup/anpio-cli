@@ -4,6 +4,7 @@
 // `group.send` 的正文互斥规则逐字相同，各写一遍就等着某次只改了其中一边。
 
 import { anpRejection, type AnpRejection } from '@agentx/core'
+import { DIRECT_CIPHER_CONTENT_TYPE, DIRECT_INIT_CONTENT_TYPE } from './e2ee'
 
 /** P3 §6.3 L281–285 / P4 §7.6 L438–442：三个负载字段，**恰好**出现一个。 */
 export const PAYLOAD_FIELDS = ['text', 'payload', 'payload_b64u'] as const
@@ -35,12 +36,19 @@ function payloadFieldRequiredBy(contentType: string): string | undefined {
  *
  * 这份清单**不是**准入白名单，见上面那段：任何 `content_type` 都能被转发。这里列的是
  * 规范点名要求支持的那几个——P3 的两个，加上 P4 §7.6 L432–436 MUST 支持的三个里多出来的
- * 附件清单类型。
+ * 附件清单类型，再加上 P5 §3.6 L120 MUST 收的那两个。
+ *
+ * 后面这两个与前面三个不同类：它们不是负载字段的载体，`body` 里根本**没有** `payload`
+ * （见 `direct.send` 在 v2 下跳过 `validatePayloadBody`）。列在这里是因为这个字段问的是
+ * "你收哪些内容类型"，而本服务确实收这两类——不列，一个按 §8.2.2 自我检查的客户端就会
+ * 以为发不了 `direct_init`。粒度粗是这条清单本身的性质，逐 Profile 的准入由方法表判。
  */
 export const ACCEPTED_CONTENT_TYPES: readonly string[] = [
   'text/plain',
   'application/json',
   'application/anp-attachment-manifest+json',
+  DIRECT_INIT_CONTENT_TYPE,
+  DIRECT_CIPHER_CONTENT_TYPE,
 ]
 
 function isUnpaddedBase64Url(value: string): boolean {

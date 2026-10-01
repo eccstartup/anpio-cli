@@ -10,6 +10,7 @@
 
 import {
   contentDigestOf,
+  DidDeviceResolver,
   DidKeyResolver,
   DidServiceLocator,
   idempotencyKey,
@@ -22,6 +23,7 @@ import {
   type AnpParams,
   type AnpRejection,
   type AnpRequest,
+  type DeviceResolver,
   type KeyResolver,
   type LocateOptions,
   type NonceStore,
@@ -38,6 +40,8 @@ import { acceptOperation } from './accept'
 import { authenticate, callerAnchor } from './auth'
 import { DIRECT_SEND, GET_CAPABILITIES, lookupMethod, checkMethod, type MethodSpec } from './methods'
 import { storeDirectMessage } from './direct'
+import type { DeviceAddressed } from './eligibility'
+import { checkDevice, isRejection } from './eligibility'
 import { GROUP_HANDLERS } from './groups'
 import { ATTACHMENT_HANDLERS } from './attachments'
 import type { ObjectStore } from '../objects'
@@ -72,6 +76,10 @@ export interface DispatchDeps {
    *  Defaults to core's `DidServiceLocator`; a test substitutes one that answers from an
    *  inline document, which is what keeps the cross-domain path testable without a network. */
   locator?: ServiceLocator
+  /** Reads a DID's `deviceManifest` to answer "is this device eligible right now"
+   *  (P5 §4.1.1). Defaults to core's `DidDeviceResolver`; a test substitutes one that
+   *  answers from an inline document, same reason as `resolver` and `locator`. */
+  deviceResolver?: DeviceResolver
   /** 跨域外层签名的重放缓存（P8 §6.2.2 第 8 步、federation.md §2.2）。默认为本服务自己
    *  `Storage` 上的 `http_nonces` 表。 */
   nonceStore?: NonceStore
@@ -109,6 +117,7 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
   const relay = deps.relay
   const resolverOptions = deps.resolverOptions ?? deps.config.didResolution
   const locator = deps.locator ?? new DidServiceLocator()
+  const deviceResolver = deps.deviceResolver ?? new DidDeviceResolver()
   const nonceStore = deps.nonceStore ?? createHttpNonceStore(deps.storage)
   const now = deps.now ?? (() => new Date())
   const log = deps.log ?? ((line: string): void => void process.stderr.write(`${line}\n`))
@@ -252,8 +261,12 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
     }
 
     const { meta, body } = envelope.params
-    const refused = checkMethod(spec, meta)
+    const refused = checkMethod(spec, envelope.params)
     if (refused !== undefined) return errorResponse(envelope.id, refused)
+
+    // §9.3 L823–824 / §9.1 L639：这次调用按不按设备定址，是这个方法自己的判断。问一次、
+    // 两处用——幂等键的两段设备，以及下面那次资格检查。
+    const addressed = spec.deviceAddressed?.(meta)
 
     const at = now()
 
@@ -306,8 +319,19 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
       // 旧 DID 才查得到；`idempotency.ts` 里有完整的说明）。转发之前要拿它查一次记录，
       // 所以在这里算出来，而不是留在 `acceptOperation` 的参数里当内联表达式。
       const key = idempotencyKey(
-        idempotencyScopeFromMeta({ meta, targetScope: spec.targetScope(meta, body), method: spec.name }),
+        idempotencyScopeFromMeta({
+          meta,
+          targetScope: spec.targetScope(meta, body),
+          method: spec.name,
+          // §9.1 L639：只有设备定址的 Overlay 才把设备段放进键。Base 那些调用这里拿到
+          // `undefined`，于是键里没有设备——"同一个逻辑操作从两台设备发出"仍是一件事。
+          ...(addressed !== undefined ? { deviceSelectors: [...addressed.selectors] } : {}),
+        }),
       )
+
+      // §9.1 L630：这条键上已经有过一条**被受理**的记录，这次就是重放。读一次，两处用：
+      // 出站要跳过（`relayFor`），设备资格也要跳过（见下面那一段）。
+      const replayed = deps.storage.idempotentRow(key) !== undefined
 
       // P8 §3.2：请求在**事务外**同步转发——对端接受了才落库（§3.3 的"是不是本服务"
       // 由 relay 一并判掉，是本服务时它返回 `local`，一个字节都不发）。
@@ -316,9 +340,15 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
       // 正文校验都已经过了，此刻转发的是**已经认证过的**请求；再往前走一步就是
       // `acceptOperation` 的事务，网络往返进不去。对端拒绝时我们什么都不写，调用方拿
       // 同一个 `operation_id` 重试即是一次干净的再来。
-      const relayed = await relayFor(spec, envelope, key)
+      const relayed = await relayFor(spec, envelope, key, replayed)
       if (relayed.kind === 'refused') return errorResponse(envelope.id, relayed.rejection)
       const forwarded = relayed.kind === 'answered' ? relayed.result : undefined
+
+      // P5 §4.1.1 / §10.7 L1388：本地收下这颗密文之前，先确认两台设备此刻都算数。
+      if (addressed !== undefined && !replayed && forwarded === undefined) {
+        const ineligible = await eligibilityFor(addressed, meta)
+        if (ineligible !== undefined) return errorResponse(envelope.id, ineligible)
+      }
 
       const outcome = acceptOperation({
         storage: deps.storage,
@@ -362,18 +392,65 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
    * 两族今天都落在本地受理上，且都是**响亮的失败**（群不存在、授权不在）而不是静默走错
    * 域——C13 / 后续那一块接上时改的只是这一行判断。
    *
-   * `key` 是这次操作的幂等键：**已经记过账的操作不再出站**。那份记录里的结果就是对端的
-   * 答复，重试要的是它。不查这一下，每次重试都会再打扰对端一遍——而对端若正好不可达，
-   * 那句 1012 会让调用方以为这颗消息没被受理，事实上它早就被受理过了。§9.1 L630 说的
-   * "重试得到同一结果"包括不重做网络那一跳。查表在这里、判定在 `acceptOperation` 里，
-   * 两处看的都是同一行，所以"重放"与"同键不同语义"仍然由后者说了算。
+   * `replayed` 是这次调用在幂等台账上已经有过记录——**已经记过账的操作不再出站**。那份
+   * 记录里的结果就是对端的答复，重试要的是它。不查这一下，每次重试都会再打扰对端一遍
+   * ——而对端若正好不可达，那句 1012 会让调用方以为这颗消息没被受理，事实上它早就被受理
+   * 过了。§9.1 L630 说的"重试得到同一结果"包括不重做网络那一跳。判定在 `acceptOperation`
+   * 里，两处看的都是同一行，所以"重放"与"同键不同语义"仍然由后者说了算。
    */
-  async function relayFor(spec: MethodSpec, envelope: AnpRequest, key: string): Promise<ForwardOutcome> {
+  async function relayFor(
+    spec: MethodSpec,
+    envelope: AnpRequest,
+    key: string,
+    replayed: boolean,
+  ): Promise<ForwardOutcome> {
     if (relay === undefined || spec.name !== DIRECT_SEND) return LOCAL
-    if (deps.storage.idempotentRow(key) !== undefined) return LOCAL
+    if (replayed) return LOCAL
     const targetDid = envelope.params.meta.target?.did
     if (targetDid === undefined || targetDid === '') return LOCAL
     return relay.forward(envelope, targetDid)
+  }
+
+  /**
+   * P5 §4.1.1：这次调用点名的**两台**设备，此刻算不算数。
+   *
+   * 位置与 `relayFor` 并列——都在 `acceptOperation` 之前，因为它是两次网络往返（要解析
+   * 发送方与收件人各自的 DID 文档），而那个事务里不许有 I/O。
+   *
+   * 调用点替这里挡掉了三种不该查的情形，每一种都有硬理由：
+   *
+   *   - **不是设备定址的调用**（`addressed === undefined`）：Base 没有设备可言。
+   *   - **跨域**（`forwarded !== undefined`）：§10.7 L1388 把"验两台设备"写成**目标服务**
+   *     的 MUST。收到那颗密文的是对端，它的清单归它解释；我们在这里再查一遍，等于拿一份
+   *     我们无权解释的清单替对端做主——那份清单里没有那台设备时，我们回的那个码是在说
+   *     对端的用户不合法，而它可能只是换了一台设备。
+   *   - **重放**（`replayed`）：资格是**当下**的事实（§4.1.1 L171 说它是每次操作的前置），
+   *     而 §9.1 L630 要重放得到**同一个**结果。一次早就受理过的重试，不该因为发送方后来
+   *     把设备摘了而变成错误——那会让"重试"变成另一件事，而调用方手里没有任何东西能区分
+   *     这两种结局。
+   *
+   * 先查发送方的设备：它才是这次调用的主张，也是调用方能自己改的那一半。收件人的设备不在
+   * 它的控制下，说"你的设备不合格"比说"对方的设备不合格"更接近它要做的事。
+   */
+  async function eligibilityFor(addressed: DeviceAddressed, meta: AnpMeta): Promise<AnpRejection | undefined> {
+    const [senderDeviceId, recipientDeviceId] = addressed.selectors
+    // `checkMethod` 已经让 `direct.send` 必带 `sender_did` 与 `target`，所以这两个串在
+    // 这里都拿得到——不是"大概"，是那一步的 MUST 保证的。
+    const pairs = [
+      { identity: meta.sender_did ?? '', deviceId: senderDeviceId },
+      { identity: meta.target?.did ?? '', deviceId: recipientDeviceId },
+    ]
+    for (const { identity, deviceId } of pairs) {
+      const outcome = await checkDevice({
+        resolver: deviceResolver,
+        requirement: addressed.requirement,
+        identity,
+        deviceId,
+        opts: resolverOptions,
+      })
+      if (isRejection(outcome)) return outcome
+    }
+    return undefined
   }
 
   /**
