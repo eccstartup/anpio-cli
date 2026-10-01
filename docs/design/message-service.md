@@ -57,17 +57,22 @@
                     └──────────────┬──────────────────────┘
                                    ▼
                     ┌─────────────────────────────────────┐
+                    │  方法表（MethodSpec）                 │
+                    │   profile / 必填字段 / target.kind    │
+                    └──────────────┬──────────────────────┘
+                                   ▼
+                    ┌─────────────────────────────────────┐
                     │  Auth（P1 附录 A + P8 §6）           │
                     │   origin_proof 验签 + caller anchor  │
                     └──────────────┬──────────────────────┘
                                    ▼
                     ┌─────────────────────────────────────┐
-                    │  Idempotency                         │
-                    │   (sender_did, target, method, op)   │
+                    │  正文形状（按 method）                │
                     └──────────────┬──────────────────────┘
                                    ▼
                     ┌─────────────────────────────────────┐
-                    │  Dispatcher（按 method 分派）         │
+                    │  Idempotency + Dispatcher            │
+                    │   (sender_did, target, method, op)   │
                     └──────────────┬──────────────────────┘
                                    ▼
    ┌───────────────┬───────────────┼───────────────┬───────────────┐
@@ -116,6 +121,10 @@ HTTP 层用 `node:http` 自己写路由：整个服务只有**两个**端点
 
 **存储接口化**：`Storage` 是一个 interface，`sqlite` 是 v1 唯一实现。
 Postgres 的事等真需要多实例时再说，现在不做抽象层之上的抽象。
+
+**上图的层序就是实现里的顺序**（`rpc/dispatch.ts` 的 `createDispatch()`），而且顺序本身
+是设计：方法表在认证**之前**（能判的自己判掉，省一次出站 DID 解析），正文校验在认证
+**之后**（正文要读调用方自带、又尚未验签的 `content_type`）。理由写在 §8.1。
 
 ## 3. 信封校验（P1）—— 全部 MUST
 
@@ -335,7 +344,8 @@ Profile 另行定义，本服务不做。
 
 ## 7. 存储
 
-`node:sqlite`，WAL 模式。表（草案）：
+`node:sqlite`，WAL 模式。表（v2，已建；建表语句是 `storage/schema.ts` 里的
+`SCHEMA`，改动要一起改两处）：
 
 ```sql
 -- 幂等台账：先查这张表，再谈其他
@@ -348,12 +358,18 @@ CREATE TABLE idempotency (
 );
 
 -- 私聊消息（明文 P3 与密文 P5 同一张表，靠 security_profile 区分）
+--
+-- 主键是 §8.2 L444–450 给消息级重复识别定义的三元组，**不是** `message_id` 单列：
+-- 那个标识是发送方自己起的（P1 §6.2.7 L402），两个发送方撞上同一个是合法的，P5
+-- L1398 更让一条逻辑消息对每台接收设备各带一个外层 `message_id`。只拿它当主键，
+-- 第二次插入会被约束拒掉——一个本该正常受理的请求变成 500。
 CREATE TABLE messages (
-  message_id TEXT PRIMARY KEY, sender_did TEXT NOT NULL, target_did TEXT NOT NULL,
+  message_id TEXT NOT NULL, sender_did TEXT NOT NULL, target_did TEXT NOT NULL,
   profile TEXT NOT NULL, security_profile TEXT NOT NULL,
   content_type TEXT NOT NULL, body_json TEXT NOT NULL,
   sender_device_id TEXT, recipient_device_id TEXT,
-  conversation_id TEXT, accepted_at TEXT NOT NULL
+  conversation_id TEXT, accepted_at TEXT NOT NULL,
+  PRIMARY KEY (sender_did, target_did, message_id)
 );
 CREATE INDEX messages_target ON messages (target_did, accepted_at);
 
@@ -417,12 +433,22 @@ CREATE TABLE attachment_slots (
 );
 
 -- 出站：direct.incoming / group.* 推送的重试队列
+--
+-- 存收件人的 **DID**，不是解析出来的 endpoint：endpoint 由 locator 从 DID 现推，而
+-- 重试必须重新推一遍（域可能已经换了入口服务），把写入那一刻的答案钉在行里，就是往
+-- 一个可能早就失效的地址重发。
 CREATE TABLE outbox (
-  seq INTEGER PRIMARY KEY AUTOINCREMENT, endpoint_uri TEXT NOT NULL,
+  seq INTEGER PRIMARY KEY AUTOINCREMENT, recipient_did TEXT NOT NULL,
   payload_json TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
   next_attempt_at TEXT NOT NULL, last_error TEXT
 );
 ```
+
+**版本**：版本号记在 SQLite 自己的 `user_version` 上（`SCHEMA_VERSION`），**比本构建新
+的文件直接拒开**——本构建会读到它认识的表、静默忽略新版本依赖的列。上表是 v2；从 v1
+（`messages` 单列主键 + `outbox.endpoint_uri`）升级的两步都是 SQLite 无法原位改的，
+所以走一次迁移：主键变宽是**严格超集**，行照抄不会撞；`outbox` 只有重试状态，直接丢弃
+重建。两个 `IF NOT EXISTS` 之外的语句与 `user_version` 落在同一个事务里，成功之后才盖章。
 
 **事务**：`Storage` 上有一个 `transaction()`，**可重入**——已经在事务里再进来就是加入
 外层，只有最外层提交。理由是两个粒度的错位：§8.1 要求的原子单位是**一次操作**
@@ -453,6 +479,40 @@ P3 §5.4 规定这些 **MUST NOT** 成为线协议语义——它们可以存在
 `acceptOperation`（§6），第 2 步的写入即 `acceptOperation` 的 `perform()`。
 C5 要做的只剩下方法表（`target_scope`、要哪一对错误码、要不要 `origin_proof`）
 与第 4 步。
+
+C5 落地的受理路径是 `createDispatch()`，各层的**顺序**本身是设计的一部分：
+
+```
+parseRequestText → 是 Notification？→ lookupMethod → checkMethod → authenticate
+  → 正文形状 → acceptOperation（幂等查表 + perform 写库）
+```
+
+- **`checkMethod` 在认证之前**：方法表能判的（Profile / security_profile / 必填字段 /
+  `target.kind`）不需要钥，先判掉就少一次 DID 解析，也少一次可以被填爆的解析。
+- **认证在正文之前**：正文校验要读 `content_type`，而那是**调用方自己带来**的字段。
+  没验签就拿它做判断，等于让未认证的一方指挥本服务，所以顺序反过来。
+- 方法表是**数据**（`MethodSpec`）不是 `switch`：`targetMode` 一个字段同时给出
+  `target.kind` 该是什么、`target` 可不可以省、以及 §6.2.5.1 L381–382 的
+  `anp.invalid_target_binding` 从哪来。
+- `requiresOriginProof(meta)` 是**按方法按 Profile** 的函数而不是布尔：`direct.send`
+  在 Base 下要证明，在 `anp.direct.e2ee.v2` 下不要（P3 §4.3 L161，那个 overlay 用自己的
+  钥材料认证发送方）。C5 的表里这个分支还走不到——`profiles` 先一步拒掉那个 overlay——
+  C12 把它加进 `profiles` 时这一行必须一起生效。
+
+**C5 明确没做的两件 MUST**，各有理由，都留给拥有那份信息的那一步：
+
+- **P1 §7.3 L491–499**（计数器 / 序号 / 逻辑时钟 / epoch / generation 必须编成十进制
+  字符串）是**按字段种类**立的规矩，不是字段名清单，而 `direct.send` 没有这类字段——
+  第一个实例是 C9 的 `group_state_version` / `group_event_seq`，那时才落。
+- **P3 §5.5 L208**（`meta.target.did` 已被替代时回 `anp.did_superseded`）要有**连续性
+  的来源**：本服务不是 DID 权威（那是 DID 服务的事），手上没有更新链。现在做，等于在
+  每次受理上挂一次不缓存的出站链查询。C4 已经留好了位置——`perform` 抛出即可——等
+  连续性知识从哪来定下来再接。
+
+两处**本实现的取舍**（规范列了拒绝、没给码），写在这里而不是散在代码里：
+`meta.target` 缺失按 §6.2.5.1 L379–380 判 **1003** 而不是 1014（1014 说的是 `kind`
+与方法的建模模式**不符**，缺 target 是形状问题）；正文三个载荷字段违反互斥（P3 §7.1.4
+L386–387）也按 **1003**，而 1009 留给真正不支持的 content type。
 
 第 4 步失败**不改变**第 3 步已经发出的成功语义——这正是 §1 那条"成功语义被切小"的用法。
 失败的推送进 `outbox`，按退避重试。
@@ -713,10 +773,15 @@ AGENTX_KEY_FILE         服务签名钥（跨域时签外层请求）
 AGENTX_DB               SQLite 路径，默认 ./agentx.db
 AGENTX_OBJECT_DIR       附件对象目录
 AGENTX_MAX_BODY         请求体上限，默认 1 MiB（附件走数据面，不经这里）
+AGENTX_ALLOWED_DID_HOSTS  允许出站解析 DID 文档的域，逗号/空白分隔，**默认空**
+AGENTX_DID_DEV_HOSTS      联调放宽：这些域可以解析私有地址、可以用 http
 ```
 
 **没有配置项能关掉 `origin_proof` 校验。** 要联调就配一个宽松的 DID 解析策略，
-不要开后门——那扇门会在某次部署里被忘掉。
+不要开后门——那扇门会在某次部署里被忘掉。放宽正好是这两个变量：`ALLOWED_DID_HOSTS`
+默认**为空**，也就是默认只认随请求带进来的内联文档，任何出站解析都被拒（fail-closed）；
+`DID_DEV_HOSTS` 是给本地联调用的，它同时把域名加进白名单、并允许私有地址与明文 http。
+两者都要求**逐个点名**，所以没有哪个取值能让解析变成无界的。
 
 ## 15. 实现顺序
 

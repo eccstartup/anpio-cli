@@ -115,7 +115,7 @@ describe('acceptOperation', () => {
     })
 
     expect(outcome.kind).toBe('new')
-    expect(storage.message('m-1')).toBeDefined()
+    expect(storage.message(SENDER, TARGET, 'm-1')).toBeDefined()
     // The delivery accessor runs a transaction of its own; if it had not joined the
     // enclosing one, the row would still be here — but see the rollback test below,
     // which is what actually distinguishes the two.
@@ -138,7 +138,7 @@ describe('acceptOperation', () => {
       }),
     ).toThrow('delivery target refused')
 
-    expect(storage.message('m-1')).toBeUndefined()
+    expect(storage.message(SENDER, TARGET, 'm-1')).toBeUndefined()
     expect(storage.headSeq(TARGET)).toBe(0)
     expect(storage.idempotentRow(keyFor('op-1'))).toBeUndefined()
   })

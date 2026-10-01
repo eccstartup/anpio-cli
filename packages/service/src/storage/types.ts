@@ -65,7 +65,11 @@ export interface DeliveryRecord {
 
 export interface OutboxEntry {
   seq: number
-  endpointUri: string
+  /** The recipient's DID, NOT a resolved endpoint. The push resolves it through the
+   *  locator on every attempt, because a domain can move its ingress service between
+   *  the enqueue and the retry; pinning the answer from the first attempt would make
+   *  the retry aim at an address that may no longer be anyone's. */
+  recipientDid: string
   payloadJson: string
   attempts: number
   nextAttemptAt: string
@@ -90,7 +94,10 @@ export interface Storage {
   rememberIdempotent(row: IdempotencyRow): void
 
   insertMessage(message: StoredMessage): void
-  message(messageId: string): StoredMessage | undefined
+  /** One message by the triple §8.2 L444–450 scopes message-level duplicate recognition
+   *  over. `message_id` alone is not a key: it is the sender's own label, so two senders
+   *  may pick the same one. */
+  message(senderDid: string, targetDid: string, messageId: string): StoredMessage | undefined
 
   /** Append one delivery and return the record with the sequence this owner was given.
    *  The sequence is assigned inside a transaction, so concurrent senders cannot both

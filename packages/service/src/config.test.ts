@@ -99,3 +99,37 @@ describe('optional paths', () => {
     expect('objectDir' in blank).toBe(false)
   })
 })
+
+describe('AGENTX_ALLOWED_DID_HOSTS / AGENTX_DID_DEV_HOSTS', () => {
+  it('defaults to resolving nothing at all', () => {
+    // The fail-closed default, and the one worth stating out loud: with no allowlist the
+    // resolver refuses every remote document, so only inline documents verify.
+    const config = loadConfig({})
+    expect(config.didResolution.allowedHosts).toEqual([])
+    expect('allowPrivateHosts' in config.didResolution).toBe(false)
+    expect('allowInsecureTransport' in config.didResolution).toBe(false)
+  })
+
+  it('splits on commas and whitespace, because both get typed at a shell', () => {
+    const config = loadConfig({ AGENTX_ALLOWED_DID_HOSTS: 'a.example, b.example  c.example' })
+    expect(config.didResolution.allowedHosts).toEqual(['a.example', 'b.example', 'c.example'])
+  })
+
+  it('treats an empty value as unset rather than as a host named ""', () => {
+    expect(loadConfig({ AGENTX_ALLOWED_DID_HOSTS: '' }).didResolution.allowedHosts).toEqual([])
+  })
+
+  it('puts dev hosts in the allowlist as well as in the two relaxations', () => {
+    // The relaxations lift a gate; they do not widen the allowlist. A host only named
+    // there would be opted in to nothing and would still never be fetched.
+    const config = loadConfig({ AGENTX_ALLOWED_DID_HOSTS: 'public.example', AGENTX_DID_DEV_HOSTS: 'localhost' })
+    expect(config.didResolution.allowedHosts).toEqual(['public.example', 'localhost'])
+    expect(config.didResolution.allowPrivateHosts).toEqual(['localhost'])
+    expect(config.didResolution.allowInsecureTransport).toEqual(['localhost'])
+  })
+
+  it('does not repeat a host named in both variables', () => {
+    const config = loadConfig({ AGENTX_ALLOWED_DID_HOSTS: 'localhost', AGENTX_DID_DEV_HOSTS: 'localhost' })
+    expect(config.didResolution.allowedHosts).toEqual(['localhost'])
+  })
+})

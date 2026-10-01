@@ -115,14 +115,24 @@
   另把幂等记录存的东西说清楚：存**操作结果**不存信封（重试带自己的 `id`）。
   11 个测试。同一批把 core 幂等模块里那串**过期的行号**修了——它引的是旧版 P1 §9，
   最大一处把 L641 写成"L646–648"，而那里是 §9.2 的重试清单一角）
-- C5 `direct.send` 全流程 + `direct.incoming` 异步推送 + `outbox` 退避重试
-  （含 C2 挪过来的两行：target 建模模式 §6.2.5.1 L382、§7.3 L491–499 计数器；
-  含 C3 挪过来的**方法表 + 解析器接线**：哪些方法要求 `origin_proof`（P3 §4.3 L161 还有
-  一条覆盖——`meta.profile = anp.direct.e2ee.v2` 时 P3 的 proof 强制要求由 P5 覆盖），
-  以及给方法配哪一对码。生产用的 `DidKeyResolver` 选项要跟着进 `config.ts`：
-  core 的 `allowedHosts` 是**必填**的 SSRF 允许清单，所以需要一个
-  `AGENTX_ALLOWED_DID_HOSTS`（缺省＝不做远程解析，fail closed），联调再用一个显式的
-  私有/明文主机开关，而不是把校验关掉）
+- ~~C5a `direct.send` 受理路径：方法表 + 认证接线 + DID 解析策略~~（2026-10-01。
+  `rpc/methods.ts`＝`MethodSpec` 数据表 + `checkMethod`（Profile / security_profile / 必填字段 /
+  `target.kind`；§6.2.5 L341 + §6.2.5.1 L377–380 + A.4 L1068 取并成一条
+  `needsTarget = targetMode !== 'endpoint-local' || requiresOriginProof(meta)`，
+  `kind` 不符回 §10.3 L722 的 1014，缺 target 回 1003——规范列了拒绝、没给码，取舍记在
+  §8.1）。`rpc/direct.ts`＝正文互斥 + 落库 + 消息级重复识别；`rpc/dispatch.ts`＝
+  `createDispatch()`，层序 parse → 方法表 → 认证 → 正文 → `acceptOperation`，理由在 §8.1。
+  `config.ts` 补 DID 解析策略：`AGENTX_ALLOWED_DID_HOSTS` 默认空＝只认内联文档，
+  `AGENTX_DID_DEV_HOSTS` 是联调放宽（同时进白名单、允许私有地址与明文 http）。
+  存储顺手修了一处**设计缺陷**：`messages` 主键原为 `message_id` 单列，而 §8.2 L444–450
+  给消息级重复识别定的三元组才是键——那个标识是发送方自己起的（P1 §6.2.7 L402），撞名合法，
+  旧主键会把本该正常受理的第二次发送变成 500。同批 `outbox.endpoint_uri` → `recipient_did`
+  （重试必须重新解析，钉住的 endpoint 可能已失效），两者合一个 v2 迁移。148 个测试）
+- C5b `direct.incoming` 异步推送 + `outbox` 退避重试
+  （**§7.3 L491–499** 是**按字段种类**立的十进制字符串规矩，`direct.send` 没有这类字段——
+  第一个实例是 C9 的 `group_state_version` / `group_event_seq`，挪给 C9；
+  **P3 §5.5 L208** 的"target 已被替代"要先有**连续性来源**：本服务不是 DID 权威、手上没有
+  更新链，现在做等于每次受理挂一次不缓存的出站链查询。`perform()` 抛出的接缝已留好）
 - C6 取件扩展面 + 游标（`delivery_cursor`）
 - C7 **订阅路**：`GET /anp-im/stream` + 订阅者注册表 + 补齐期间缓冲与背压
   （时序见 [realtime.md](docs/design/realtime.md) §5.2/§5.3）

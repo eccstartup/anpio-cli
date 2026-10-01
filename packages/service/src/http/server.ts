@@ -1,9 +1,9 @@
 // The HTTP layer: routing, body reading, and nothing else.
 //
-// Everything above it — envelope validation, auth, idempotency, dispatch — arrives with
-// C2 onward behind the `handleRpc` seam below. Keeping the transport this thin is what
-// lets the router be tested without a database and the RPC surface be tested without
-// reaching into a handler (see http/server.test.ts).
+// Everything above it — envelope validation, the method table, auth, idempotency — lives
+// behind the `handleRpc` seam below, which `main.ts` fills with `createDispatch`. Keeping
+// the transport this thin is what lets the router be tested without a database and the RPC
+// surface be tested without opening a socket (see http/server.test.ts and rpc/dispatch.test.ts).
 //
 // Routes and the status codes that are NOT 200 are message-service.md §2.1.
 

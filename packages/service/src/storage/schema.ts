@@ -8,8 +8,12 @@
 
 /** Bumped when a statement below changes in a way that existing files cannot absorb.
  *  Stored in SQLite's own `user_version`, so a file written by a later build is
- *  recognisable as such. */
-export const SCHEMA_VERSION = 1
+ *  recognisable as such. The step from one version to the next lives in `sqlite.ts`,
+ *  next to the code that decides whether to run it.
+ *
+ *  v2: `messages` gained a composite primary key and `outbox` traded a pinned endpoint
+ *  for the recipient's DID. Neither is an in-place change for SQLite. */
+export const SCHEMA_VERSION = 2
 
 export const SCHEMA: readonly string[] = [
   // ---- idempotency -----------------------------------------------------------
@@ -33,8 +37,13 @@ export const SCHEMA: readonly string[] = [
   // ---- messages --------------------------------------------------------------
   // 私聊消息：明文 P3 与密文 P5 同一张表，靠 security_profile 区分。The service never
   // reads `body_json`; for P5/P6 it is opaque bytes by construction.
+  //
+  // 主键是 §8.2 L444–450 给消息级重复识别定义的那个三元组，**不是** `message_id` 单列。
+  // 那个标识是发送方自己起的（P1 §6.2.7 L402），两个发送方撞上同一个是合法的；P5
+  // L1398 更让一条逻辑消息对每台接收设备各带一个外层 `message_id`。只拿它当主键，
+  // 第二次插入就会被约束拒掉——一个本该正常受理的请求变成 500。
   `CREATE TABLE IF NOT EXISTS messages (
-     message_id          TEXT PRIMARY KEY,
+     message_id          TEXT NOT NULL,
      sender_did          TEXT NOT NULL,
      target_did          TEXT NOT NULL,
      profile             TEXT NOT NULL,
@@ -44,7 +53,8 @@ export const SCHEMA: readonly string[] = [
      sender_device_id    TEXT,
      recipient_device_id TEXT,
      conversation_id     TEXT,
-     accepted_at         TEXT NOT NULL
+     accepted_at         TEXT NOT NULL,
+     PRIMARY KEY (sender_did, target_did, message_id)
    )`,
   `CREATE INDEX IF NOT EXISTS messages_target ON messages (target_did, accepted_at)`,
 
@@ -149,9 +159,13 @@ export const SCHEMA: readonly string[] = [
 
   // ---- outbox ----------------------------------------------------------------
   // 出站：direct.incoming / group.* 推送的重试队列。
+  //
+  // 存的是收件人的 **DID**，不是解析出来的 endpoint：endpoint 由 locator 从 DID 现推，
+  // 而重试必须重新推一遍（域可能已经换了入口服务），把写入那一刻的答案钉在行里，
+  // 重试就是往一个可能早就失效的地址重发。
   `CREATE TABLE IF NOT EXISTS outbox (
      seq              INTEGER PRIMARY KEY AUTOINCREMENT,
-     endpoint_uri     TEXT NOT NULL,
+     recipient_did    TEXT NOT NULL,
      payload_json     TEXT NOT NULL,
      attempts         INTEGER NOT NULL DEFAULT 0,
      next_attempt_at  TEXT NOT NULL,

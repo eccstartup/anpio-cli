@@ -7,8 +7,10 @@
 //
 // The rule §14 states in prose is enforced by what this file does NOT have: there is no
 // switch that turns `origin_proof` verification off. A local integration test relaxes the
-// DID resolution policy instead, which is a policy on the resolver and not a hole in the
-// auth path.
+// DID resolution policy instead — `AGENTX_DID_DEV_HOSTS` names hosts that may be private
+// or speak plain http — which is a policy on the resolver and not a hole in the auth path.
+// Those hosts still have to be named one by one, so no value of it makes resolution
+// unbounded; the allowlist is exact at every setting.
 
 import { ConnectxError } from '@agentx/core'
 
@@ -23,6 +25,22 @@ export interface ListenAddress {
   port: number
 }
 
+/**
+ * 远程解析 DID 文档时的网络边界。字段与 core 的 `ResolveDidOptions` 同名，所以这里算出来
+ * 的就是解析器选项本身，中间不再有一层转写。
+ *
+ * core 把 `allowedHosts` 定成**必填**的（`resolveDid.ts:431`：清单为空就拒绝任何远程解析），
+ * 所以这里没有"不填就放行"这一档。两个变量都不设时本服务只认内联文档、一封外来消息都验
+ * 不过——对消息服务来说，"什么也解析不了"是安全的，"什么都能解析"不是，缺省落在前者。
+ */
+export interface DidResolution {
+  /** 精确主机名，没有通配。 */
+  allowedHosts: string[]
+  /** 本地联调才设的一对豁免：这些主机免掉"解析到私有地址"与"必须走 https"两道闸。 */
+  allowPrivateHosts?: string[]
+  allowInsecureTransport?: string[]
+}
+
 export interface Config {
   /** Where the HTTP server binds. */
   listen: ListenAddress
@@ -33,6 +51,8 @@ export interface Config {
    *  It is what a cross-domain caller authenticates and the `did` of `group.create`'s
    *  target (P4 §8.1.2 L625). */
   serviceDid: string
+  /** How far outbound DID resolution is allowed to reach. */
+  didResolution: DidResolution
   /** The key that signs outbound cross-domain requests (P8, C11). Absent means this
    *  deployment does not call other domains. */
   keyFile?: string
@@ -72,6 +92,32 @@ function parsePositive(raw: string | undefined, name: string, fallback: number):
     throw new ConnectxError('invalid_argument', `${name} must be a positive integer (got ${JSON.stringify(raw)})`)
   }
   return value
+}
+
+/** 逗号或空白分隔的主机名清单。空串按缺席处理——`X=` 是 shell 事故，不是"一个叫空串的
+ *  主机"；两种读法的结果都是空清单，但写成缺席才不用解释一个不存在的元素。 */
+function parseHosts(raw: string | undefined): string[] {
+  if (raw === undefined) return []
+  return raw.split(/[\s,]+/).filter((host) => host !== '')
+}
+
+/**
+ * 两个变量算成一份解析器策略。
+ *
+ * 联调主机**同时进 `allowedHosts`**：那两个豁免放宽的是闸门，不是允许清单，不进清单就
+ * 永远解析不到。反过来，清单本身始终是精确主机名——没有为了联调就出现通配或者"跳过
+ * 检查"的分支。
+ */
+function parseDidResolution(env: NodeJS.ProcessEnv): DidResolution {
+  const devHosts = parseHosts(env.AGENTX_DID_DEV_HOSTS)
+  const resolution: DidResolution = {
+    allowedHosts: [...new Set([...parseHosts(env.AGENTX_ALLOWED_DID_HOSTS), ...devHosts])],
+  }
+  if (devHosts.length > 0) {
+    resolution.allowPrivateHosts = devHosts
+    resolution.allowInsecureTransport = devHosts
+  }
+  return resolution
 }
 
 /** The public base URL with any trailing slash removed, so `publicUrl + '/anp-im/rpc'`
@@ -129,6 +175,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     listen,
     publicUrl,
     serviceDid: env.AGENTX_SERVICE_DID ?? didWebFor(publicUrl),
+    didResolution: parseDidResolution(env),
     dbPath: env.AGENTX_DB ?? DEFAULT_DB,
     maxBody: parsePositive(env.AGENTX_MAX_BODY, 'AGENTX_MAX_BODY', DEFAULT_MAX_BODY),
   }

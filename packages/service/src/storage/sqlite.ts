@@ -40,12 +40,58 @@ function schemaVersion(db: DatabaseSync): number {
 }
 
 /**
+ * v1 → v2.
+ *
+ * Both changes are ones SQLite cannot make in place, which is why they are the version
+ * bump and not an `ALTER`.
+ *
+ * `messages`' primary key was `message_id`. §8.2 L444–450 scopes message-level duplicate
+ * recognition by `(sender_did, target.did, message_id)` — the label is the sender's own
+ * (P1 §6.2.7 L402), so two senders picking the same one is legal, and the old key refused
+ * the second as a constraint violation. The new key is a strict superset, so copying the
+ * rows over cannot collide.
+ *
+ * `outbox.endpoint_uri` was a resolved endpoint pinned when the entry was written; a retry
+ * has to resolve the recipient's DID again (C5b). The table holds nothing but retry state,
+ * so it is dropped and left to `SCHEMA` to recreate rather than migrated.
+ */
+function migrateV1ToV2(db: DatabaseSync): void {
+  db.exec(
+    `CREATE TABLE messages_v2 (
+       message_id          TEXT NOT NULL,
+       sender_did          TEXT NOT NULL,
+       target_did          TEXT NOT NULL,
+       profile             TEXT NOT NULL,
+       security_profile    TEXT NOT NULL,
+       content_type        TEXT NOT NULL,
+       body_json           TEXT NOT NULL,
+       sender_device_id    TEXT,
+       recipient_device_id TEXT,
+       conversation_id     TEXT,
+       accepted_at         TEXT NOT NULL,
+       PRIMARY KEY (sender_did, target_did, message_id)
+     )`,
+  )
+  db.exec(
+    `INSERT INTO messages_v2
+       SELECT message_id, sender_did, target_did, profile, security_profile, content_type,
+              body_json, sender_device_id, recipient_device_id, conversation_id, accepted_at
+         FROM messages`,
+  )
+  // The index on the old table goes with it; `SCHEMA` recreates every index by name.
+  db.exec('DROP TABLE messages')
+  db.exec('ALTER TABLE messages_v2 RENAME TO messages')
+  db.exec('DROP TABLE IF EXISTS outbox')
+}
+
+/**
  * A file written by a newer build is refused instead of opened: this build would read
  * the tables it knows and silently ignore a column the newer one depends on. A fresh
  * file (version 0) gets the schema; a file at the current version is left alone.
  *
- * There is no migration path yet, and none is needed until SCHEMA_VERSION moves — at
- * which point the step is added HERE, where both sides of it are visible.
+ * Every step runs inside this transaction and before `SCHEMA`, so a file that has just
+ * been migrated is then topped up with whatever `IF NOT EXISTS` statements it is missing
+ * and stamped with the version only once all of that succeeded.
  */
 function applySchema(db: DatabaseSync): void {
   const version = schemaVersion(db)
@@ -59,6 +105,7 @@ function applySchema(db: DatabaseSync): void {
   }
   db.exec('BEGIN IMMEDIATE')
   try {
+    if (version === 1) migrateV1ToV2(db)
     for (const statement of SCHEMA) db.exec(statement)
     // `user_version` takes a literal, so the constant is interpolated rather than bound.
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
@@ -103,7 +150,7 @@ function toDelivery(row: Row): DeliveryRecord {
 function toOutbox(row: Row): OutboxEntry {
   const entry: OutboxEntry = {
     seq: int(row.seq),
-    endpointUri: text(row.endpoint_uri),
+    recipientDid: text(row.recipient_did),
     payloadJson: text(row.payload_json),
     attempts: int(row.attempts),
     nextAttemptAt: text(row.next_attempt_at),
@@ -208,8 +255,10 @@ class SqliteStorage implements Storage {
     )
   }
 
-  message(messageId: string): StoredMessage | undefined {
-    const row = this.stmt('SELECT * FROM messages WHERE message_id = ?').get(messageId) as Row | undefined
+  message(senderDid: string, targetDid: string, messageId: string): StoredMessage | undefined {
+    const row = this.stmt(
+      'SELECT * FROM messages WHERE sender_did = ? AND target_did = ? AND message_id = ?',
+    ).get(senderDid, targetDid, messageId) as Row | undefined
     return row === undefined ? undefined : toMessage(row)
   }
 
@@ -260,8 +309,8 @@ class SqliteStorage implements Storage {
 
   enqueueOutbox(draft: Omit<OutboxEntry, 'seq' | 'attempts' | 'lastError'>): number {
     const result = this.stmt(
-      'INSERT INTO outbox (endpoint_uri, payload_json, next_attempt_at) VALUES (?, ?, ?)',
-    ).run(draft.endpointUri, draft.payloadJson, draft.nextAttemptAt)
+      'INSERT INTO outbox (recipient_did, payload_json, next_attempt_at) VALUES (?, ?, ?)',
+    ).run(draft.recipientDid, draft.payloadJson, draft.nextAttemptAt)
     return int(result.lastInsertRowid)
   }
 
