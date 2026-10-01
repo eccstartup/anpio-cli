@@ -16,6 +16,10 @@ import type {
   InboxRow,
   OutboxEntry,
   Storage,
+  StoredAttachmentGrant,
+  StoredAttachmentObject,
+  StoredAttachmentSlot,
+  StoredDownloadTicket,
   StoredGroup,
   StoredGroupEvent,
   StoredGroupMember,
@@ -143,6 +147,12 @@ function applySchema(db: DatabaseSync): void {
     // position the message was accepted at, which only the row can still know.
     addColumnIfMissing(db, 'messages', 'group_event_seq', 'INTEGER')
     addColumnIfMissing(db, 'messages', 'group_state_version', 'INTEGER')
+    // v5. attachments.md §3: the data plane's PUT is a plain HTTP request with no
+    // `origin_proof` behind it, so the unguessable half of `upload_uri` is that request's
+    // whole credential and has to be on the row. The default is what SQLite insists on for
+    // `ADD COLUMN … NOT NULL`; the partial unique index in `SCHEMA` excludes the empty
+    // string precisely so the rows this backfills cannot collide with each other.
+    addColumnIfMissing(db, 'attachment_slots', 'upload_token', "TEXT NOT NULL DEFAULT ''")
     for (const statement of SCHEMA) db.exec(statement)
     // `user_version` takes a literal, so the constant is interpolated rather than bound.
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
@@ -218,6 +228,70 @@ function toOutbox(row: Row): OutboxEntry {
   const lastError = maybeText(row.last_error)
   if (lastError !== undefined) entry.lastError = lastError
   return entry
+}
+
+/** One upload slot. The five optional columns are omitted rather than set to `undefined`:
+ *  `undefined` means "the PUT has not happened yet", and a caller spreading the row must
+ *  not have that turn into a present-but-empty value. */
+function toAttachmentSlot(row: Row): StoredAttachmentSlot {
+  const slot: StoredAttachmentSlot = {
+    attachmentId: text(row.attachment_id),
+    slotId: text(row.slot_id),
+    ownerDid: text(row.owner_did),
+    uploadToken: text(row.upload_token),
+    commitToken: text(row.commit_token),
+    objectEncryptionMode: text(row.object_encryption_mode),
+    messageSecurityProfile: text(row.message_security_profile),
+    state: text(row.state),
+    expiresAt: text(row.expires_at),
+  }
+  const objectUri = maybeText(row.object_uri)
+  if (objectUri !== undefined) slot.objectUri = objectUri
+  const size = maybeInt(row.size)
+  if (size !== undefined) slot.size = size
+  const digest = maybeText(row.digest)
+  if (digest !== undefined) slot.digest = digest
+  const committedAt = maybeText(row.committed_at)
+  if (committedAt !== undefined) slot.committedAt = committedAt
+  return slot
+}
+
+function toAttachmentGrant(row: Row): StoredAttachmentGrant {
+  const grant: StoredAttachmentGrant = {
+    messageId: text(row.message_id),
+    attachmentId: text(row.attachment_id),
+    objectUri: text(row.object_uri),
+    messageSecurityProfile: text(row.message_security_profile),
+    createdAt: text(row.created_at),
+  }
+  const messageTargetDid = maybeText(row.message_target_did)
+  if (messageTargetDid !== undefined) grant.messageTargetDid = messageTargetDid
+  const groupDid = maybeText(row.group_did)
+  if (groupDid !== undefined) grant.groupDid = groupDid
+  return grant
+}
+
+function toDownloadTicket(row: Row): StoredDownloadTicket {
+  const ticket: StoredDownloadTicket = {
+    tokenHash: text(row.token_hash),
+    attachmentId: text(row.attachment_id),
+    objectUri: text(row.object_uri),
+    requesterDid: text(row.requester_did),
+    messageId: text(row.message_id),
+    messageSecurityProfile: text(row.message_security_profile),
+    // SQLite has no boolean type; 0/1 is the storage and this is the only place that
+    // decides which numbers mean what.
+    oneTime: int(row.one_time) !== 0,
+    issuedAt: text(row.issued_at),
+    expiresAt: text(row.expires_at),
+  }
+  const messageTargetDid = maybeText(row.message_target_did)
+  if (messageTargetDid !== undefined) ticket.messageTargetDid = messageTargetDid
+  const groupDid = maybeText(row.group_did)
+  if (groupDid !== undefined) ticket.groupDid = groupDid
+  const consumedAt = maybeText(row.consumed_at)
+  if (consumedAt !== undefined) ticket.consumedAt = consumedAt
+  return ticket
 }
 
 /**
@@ -643,6 +717,165 @@ class SqliteStorage implements Storage {
       `INSERT INTO group_events (group_did, event_seq, event_type, payload_json, occurred_at)
        VALUES (?, ?, ?, ?, ?)`,
     ).run(event.groupDid, event.eventSeq, event.eventType, event.payloadJson, event.occurredAt)
+  }
+
+  // ---- attachments (P7, C10) -------------------------------------------------
+
+  insertAttachmentSlot(slot: StoredAttachmentSlot): void {
+    // Plain INSERT: `(attachment_id, slot_id)` is the whole key, so a conflict means two
+    // `create_slot` calls minted the same slot id at once — an id-space collision to
+    // surface, not to overwrite.
+    this.stmt(
+      `INSERT INTO attachment_slots
+         (attachment_id, slot_id, owner_did, upload_token, object_encryption_mode,
+          message_security_profile, commit_token, state, expires_at, object_uri, size, digest, committed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      slot.attachmentId,
+      slot.slotId,
+      slot.ownerDid,
+      slot.uploadToken,
+      slot.objectEncryptionMode,
+      slot.messageSecurityProfile,
+      slot.commitToken,
+      slot.state,
+      slot.expiresAt,
+      slot.objectUri ?? null,
+      slot.size ?? null,
+      slot.digest ?? null,
+      slot.committedAt ?? null,
+    )
+  }
+
+  attachmentSlot(attachmentId: string, slotId: string): StoredAttachmentSlot | undefined {
+    const row = this.stmt(
+      'SELECT * FROM attachment_slots WHERE attachment_id = ? AND slot_id = ?',
+    ).get(attachmentId, slotId) as Row | undefined
+    return row === undefined ? undefined : toAttachmentSlot(row)
+  }
+
+  attachmentSlotByUploadToken(uploadToken: string): StoredAttachmentSlot | undefined {
+    // The empty string is the "no token" the v5 migration backfills, and it must not be a
+    // lookup key: an upload addressed by nothing would be an upload addressed by anything.
+    if (uploadToken === '') return undefined
+    const row = this.stmt('SELECT * FROM attachment_slots WHERE upload_token = ?').get(uploadToken) as
+      | Row
+      | undefined
+    return row === undefined ? undefined : toAttachmentSlot(row)
+  }
+
+  attachmentSlotByObjectUri(objectUri: string): StoredAttachmentSlot | undefined {
+    const row = this.stmt('SELECT * FROM attachment_slots WHERE object_uri = ?').get(objectUri) as
+      | Row
+      | undefined
+    return row === undefined ? undefined : toAttachmentSlot(row)
+  }
+
+  recordAttachmentUpload(attachmentId: string, slotId: string, size: number, digest: string): void {
+    // `state = 'uploaded'` rather than a second call: the row's claim about the bytes and
+    // the bytes' arrival are one fact, and splitting them would let a crash between the
+    // two leave a slot that says `pending` with a digest on it.
+    this.stmt(
+      `UPDATE attachment_slots
+          SET size = ?, digest = ?, state = 'uploaded'
+        WHERE attachment_id = ? AND slot_id = ?`,
+    ).run(size, digest, attachmentId, slotId)
+  }
+
+  setAttachmentSlotState(attachmentId: string, slotId: string, state: string, committedAt?: string): void {
+    // `COALESCE` keeps a `committed_at` that is already on the row: the only caller that
+    // passes a timestamp is the commit, and the abort that follows must not blank it.
+    this.stmt(
+      `UPDATE attachment_slots
+          SET state = ?, committed_at = COALESCE(?, committed_at)
+        WHERE attachment_id = ? AND slot_id = ?`,
+    ).run(state, committedAt ?? null, attachmentId, slotId)
+  }
+
+  insertAttachmentObject(object: StoredAttachmentObject): void {
+    // `OR IGNORE`, and that is the content-addressing paying off: the same bytes uploaded
+    // through two slots produce one digest, so the second commit finds the row already
+    // there and has nothing to add. `committed_at` stays the first, which is when those
+    // bytes actually became available.
+    this.stmt(
+      'INSERT OR IGNORE INTO attachment_objects (digest, size, committed_at) VALUES (?, ?, ?)',
+    ).run(object.digest, object.size, object.committedAt)
+  }
+
+  attachmentObject(digest: string): StoredAttachmentObject | undefined {
+    const row = this.stmt('SELECT * FROM attachment_objects WHERE digest = ?').get(digest) as Row | undefined
+    if (row === undefined) return undefined
+    return { digest: text(row.digest), size: int(row.size), committedAt: text(row.committed_at) }
+  }
+
+  insertAttachmentGrant(grant: StoredAttachmentGrant): void {
+    // `OR IGNORE` on the §7.2 L434 triple: a manifest that lists the same
+    // `(attachment_id, object_uri)` twice names one attachment, and the second listing
+    // must not turn an accepted message into a constraint violation.
+    this.stmt(
+      `INSERT OR IGNORE INTO attachment_grants
+         (message_id, attachment_id, object_uri, message_security_profile,
+          message_target_did, group_did, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      grant.messageId,
+      grant.attachmentId,
+      grant.objectUri,
+      grant.messageSecurityProfile,
+      grant.messageTargetDid ?? null,
+      grant.groupDid ?? null,
+      grant.createdAt,
+    )
+  }
+
+  attachmentGrant(messageId: string, attachmentId: string, objectUri: string): StoredAttachmentGrant | undefined {
+    const row = this.stmt(
+      'SELECT * FROM attachment_grants WHERE message_id = ? AND attachment_id = ? AND object_uri = ?',
+    ).get(messageId, attachmentId, objectUri) as Row | undefined
+    return row === undefined ? undefined : toAttachmentGrant(row)
+  }
+
+  insertDownloadTicket(ticket: StoredDownloadTicket): void {
+    // Plain INSERT: the hash comes from 32 random bytes, so a conflict is a code error
+    // rather than a request one, and overwriting would hand the second requester the
+    // first one's binding.
+    this.stmt(
+      `INSERT INTO download_tickets
+         (token_hash, attachment_id, object_uri, requester_did, message_id,
+          message_security_profile, message_target_did, group_did, one_time,
+          issued_at, expires_at, consumed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      ticket.tokenHash,
+      ticket.attachmentId,
+      ticket.objectUri,
+      ticket.requesterDid,
+      ticket.messageId,
+      ticket.messageSecurityProfile,
+      ticket.messageTargetDid ?? null,
+      ticket.groupDid ?? null,
+      ticket.oneTime ? 1 : 0,
+      ticket.issuedAt,
+      ticket.expiresAt,
+      ticket.consumedAt ?? null,
+    )
+  }
+
+  downloadTicket(tokenHash: string): StoredDownloadTicket | undefined {
+    const row = this.stmt('SELECT * FROM download_tickets WHERE token_hash = ?').get(tokenHash) as
+      | Row
+      | undefined
+    return row === undefined ? undefined : toDownloadTicket(row)
+  }
+
+  consumeDownloadTicket(tokenHash: string, consumedAt: string): boolean {
+    // `AND consumed_at IS NULL`: redemption is the first one. Two concurrent GETs with the
+    // same `one_time` ticket both reach here, and only one may be the redemption — the
+    // other's `changes` is 0, which is how the caller tells them apart.
+    const result = this.stmt(
+      'UPDATE download_tickets SET consumed_at = ? WHERE token_hash = ? AND consumed_at IS NULL',
+    ).run(consumedAt, tokenHash)
+    return result.changes > 0
   }
 
   enqueueOutbox(draft: Omit<OutboxEntry, 'seq' | 'attempts' | 'lastError'>): number {

@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { connect } from 'node:net'
 import { loadConfig } from '../config'
+import { Readable } from 'node:stream'
+import { OBJECTS_PATH, UPLOAD_PATH } from '../rpc/attachments'
+import type { DataPlaneHandler } from '../dataplane'
 import { createServer, RPC_PATH, STREAM_PATH, WELL_KNOWN_PATH, type RpcHandler, type RunningServer } from './server'
 
 /** A config bound to an OS-chosen port, so a test never collides with a real service. */
@@ -264,5 +267,96 @@ describe('binding', () => {
     running = createServer({ config: loadConfig({ AGENTX_LISTEN: `127.0.0.1:${port}`, AGENTX_DB: ':memory:' }), handleRpc: echo })
     await expect(running.listen()).resolves.toBeUndefined()
     void base
+  })
+})
+
+describe('the P7 data-plane routes', () => {
+  /** The routes are wired through the same `createServer` seam as `handleRpc`; `undefined`
+   *  is how a test asks what an unwired surface answers. */
+  async function startPlane(options: { upload?: DataPlaneHandler; object?: DataPlaneHandler } = {}): Promise<string> {
+    running = createServer({
+      config: testConfig(),
+      handleRpc: echo,
+      ...(options.upload !== undefined ? { handleUpload: options.upload } : {}),
+      ...(options.object !== undefined ? { handleObject: options.object } : {}),
+    })
+    await running.listen()
+    return `http://127.0.0.1:${running.address.port}`
+  }
+
+  it('hands the upload its token and the bytes that arrived', async () => {
+    const seen: { resource: string; body: string }[] = []
+    const base = await startPlane({
+      upload: async (request) => {
+        const chunks: Buffer[] = []
+        for await (const chunk of request.body) chunks.push(Buffer.from(chunk))
+        seen.push({ resource: request.resource, body: Buffer.concat(chunks).toString() })
+        return { status: 200 }
+      },
+    })
+    const res = await fetch(`${base}${UPLOAD_PATH}/tok-1`, { method: 'PUT', body: 'the bytes' })
+    expect(res.status).toBe(200)
+    expect(seen).toEqual([{ resource: 'tok-1', body: 'the bytes' }])
+  })
+
+  it('answers 405 with an Allow, because the route takes exactly one method', async () => {
+    const base = await startPlane({ upload: () => ({ status: 200 }) })
+    const res = await fetch(`${base}${UPLOAD_PATH}/tok-1`)
+    expect(res.status).toBe(405)
+    expect(res.headers.get('allow')).toBe('PUT')
+  })
+
+  it('sends an object as bytes with the length the store reported', async () => {
+    const bytes = Buffer.from('object bytes')
+    const base = await startPlane({
+      object: () => ({
+        status: 200,
+        contentType: 'application/octet-stream',
+        headers: { 'content-disposition': 'attachment' },
+        stream: { read: Readable.from([bytes]), length: bytes.byteLength },
+      }),
+    })
+    const res = await fetch(`${base}${OBJECTS_PATH}/obj-1`, { headers: { authorization: 'Bearer t' } })
+    expect(res.status).toBe(200)
+    expect(res.headers.get('content-type')).toBe('application/octet-stream')
+    expect(res.headers.get('content-length')).toBe(String(bytes.byteLength))
+    expect(res.headers.get('content-disposition')).toBe('attachment')
+    expect(Buffer.from(await res.arrayBuffer()).equals(bytes)).toBe(true)
+  })
+
+  it('decodes the segment, so the token a client was handed is the token it sends back', async () => {
+    const seen: string[] = []
+    const base = await startPlane({
+      upload: (request) => {
+        seen.push(request.resource)
+        return { status: 200 }
+      },
+    })
+    // `%2F` decodes to a slash, which would otherwise be read as a second path segment.
+    await fetch(`${base}${UPLOAD_PATH}/a%20b`, { method: 'PUT', body: '' })
+    expect(seen).toEqual(['a b'])
+  })
+
+  it('answers 400 for a segment that cannot be decoded, rather than crashing', async () => {
+    const base = await startPlane({ object: () => ({ status: 200 }) })
+    const res = await fetch(`${base}${OBJECTS_PATH}/%zz`)
+    expect(res.status).toBe(400)
+  })
+
+  it('answers 501 when the route is not wired, which is not the same as a missing route', async () => {
+    const base = await startPlane()
+    const upload = await fetch(`${base}${UPLOAD_PATH}/tok-1`, { method: 'PUT', body: '' })
+    expect(upload.status).toBe(501)
+    const object = await fetch(`${base}${OBJECTS_PATH}/obj-1`)
+    expect(object.status).toBe(501)
+  })
+
+  it('closes the connection on a refusal, because a refused PUT still has a body in flight', async () => {
+    const base = await startPlane({
+      upload: () => ({ status: 413, contentType: 'application/json', body: '{"anp_code":"x"}' }),
+    })
+    const res = await fetch(`${base}${UPLOAD_PATH}/tok-1`, { method: 'PUT', body: 'a lot of bytes' })
+    expect(res.status).toBe(413)
+    expect(res.headers.get('connection')).toBe('close')
   })
 })

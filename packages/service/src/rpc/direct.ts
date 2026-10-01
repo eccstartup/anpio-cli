@@ -9,6 +9,7 @@
 
 import { buildMessageNotification, type AnpAuth, type AnpMeta, type AnpParams } from '@agentx/core'
 import type { DeliveryRecord, Storage } from '../storage/types'
+import { attachmentGrantsFor, insertAttachmentGrants } from './attachments'
 
 // `direct.send` 的正文规则就是 P3 §6.3 那条负载互斥规则，与 P4 §7.6 逐字相同，所以它住在
 // `payload.ts` 里，两个 Profile 共用一份。
@@ -131,6 +132,24 @@ export function storeDirectMessage(storage: Storage, input: StoreDirectInput): R
     ...(typeof conversationId === 'string' ? { conversationId } : {}),
     acceptedAt,
   })
+
+  // §9.2 L656：承载附件清单的消息被受理之后，发送方侧系统 **MUST** 为每个附件创建一条
+  // Access Grant。必须与消息行同一个事务——事务外面就会出现"消息收下了、附件还不能下载"
+  // 的中间态，而那个中间态客户端判断不出来（它只知道消息成功了）。
+  //
+  // 上面那条重复消息的分支没有这一步，是对的：它的 Grant 在**第一次**受理时就已经落了，
+  // 重放一条通知不会多长出一条授权。
+  insertAttachmentGrants(
+    storage,
+    attachmentGrantsFor({
+      contentType: meta.content_type ?? '',
+      securityProfile: meta.security_profile,
+      body: input.body,
+      messageId,
+      targetDid,
+      createdAt: acceptedAt,
+    }),
+  )
 
   // §7.2.3 的字段表只写一遍：投递行与出站通知用的是**同一份** `params`，两处各拼一次
   // 就是将来某次改动只改了一边的入口。

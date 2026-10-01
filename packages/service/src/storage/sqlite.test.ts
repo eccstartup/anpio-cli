@@ -329,3 +329,157 @@ describe('outbox', () => {
     expect(store.dueOutbox('2026-10-01T00:00:01Z', 2)).toHaveLength(2)
   })
 })
+
+describe('attachment slots, objects and the authorization chain (P7, C10)', () => {
+  const SLOT = {
+    attachmentId: 'att-1',
+    slotId: 'slot-1',
+    ownerDid: 'did:web:a.example',
+    uploadToken: 'upload-token',
+    commitToken: 'commit-token',
+    objectEncryptionMode: 'none',
+    messageSecurityProfile: 'transport-protected',
+    state: 'pending',
+    expiresAt: '2026-10-01T00:15:00.000Z',
+    objectUri: 'https://a.example/anp-im/objects/obj-1',
+  }
+
+  it('round-trips a slot and leaves the columns nothing has filled in absent', () => {
+    const store = open()
+    store.insertAttachmentSlot(SLOT)
+
+    const slot = store.attachmentSlot('att-1', 'slot-1')
+    expect(slot?.state).toBe('pending')
+    expect(slot?.objectUri).toBe(SLOT.objectUri)
+    // Absent, not `undefined`: "this slot has no digest yet" is a fact the row does not state.
+    expect('size' in (slot ?? {})).toBe(false)
+    expect('digest' in (slot ?? {})).toBe(false)
+    expect('committedAt' in (slot ?? {})).toBe(false)
+  })
+
+  it('finds a slot by the two tokens the data plane holds, and by nothing else', () => {
+    const store = open()
+    store.insertAttachmentSlot(SLOT)
+    expect(store.attachmentSlotByUploadToken('upload-token')?.slotId).toBe('slot-1')
+    // The empty string is what the v5 migration backfills for rows written before this
+    // column existed, so it must not be a key that finds one of them.
+    expect(store.attachmentSlotByUploadToken('')).toBeUndefined()
+    expect(store.attachmentSlotByObjectUri(SLOT.objectUri)?.slotId).toBe('slot-1')
+  })
+
+  it('records what the upload stream saw, then the terminal state with its time', () => {
+    const store = open()
+    store.insertAttachmentSlot(SLOT)
+    store.recordAttachmentUpload('att-1', 'slot-1', 12, 'digest-1')
+
+    const uploaded = store.attachmentSlot('att-1', 'slot-1')
+    expect(uploaded?.state).toBe('uploaded')
+    expect(uploaded?.size).toBe(12)
+    expect(uploaded?.digest).toBe('digest-1')
+
+    store.setAttachmentSlotState('att-1', 'slot-1', 'committed', '2026-10-01T00:00:05.000Z')
+    expect(store.attachmentSlot('att-1', 'slot-1')?.committedAt).toBe('2026-10-01T00:00:05.000Z')
+  })
+
+  it('indexes a committed object by its digest, so the same bytes are one row', () => {
+    const store = open()
+    store.insertAttachmentObject({ digest: 'digest-1', size: 12, committedAt: '2026-10-01T00:00:00.000Z' })
+    expect(store.attachmentObject('digest-1')?.size).toBe(12)
+    expect(store.attachmentObject('never')).toBeUndefined()
+  })
+
+  it('keys a grant by the triple, because one attachment id may recur across messages', () => {
+    const store = open()
+    const grant = {
+      attachmentId: 'att-1',
+      objectUri: 'https://a.example/anp-im/objects/obj-1',
+      messageSecurityProfile: 'transport-protected',
+      messageTargetDid: 'did:web:b.example',
+      createdAt: '2026-10-01T00:00:00.000Z',
+    }
+    store.insertAttachmentGrant({ ...grant, messageId: 'msg-1' })
+    // §7.2 L432–433: the same `attachment_id` in another message is a different grant, not a
+    // collision.
+    store.insertAttachmentGrant({ ...grant, messageId: 'msg-2' })
+
+    expect(store.attachmentGrant('msg-1', 'att-1', grant.objectUri)?.messageTargetDid).toBe('did:web:b.example')
+    expect(store.attachmentGrant('msg-2', 'att-1', grant.objectUri)?.messageId).toBe('msg-2')
+    expect(store.attachmentGrant('msg-3', 'att-1', grant.objectUri)).toBeUndefined()
+  })
+
+  it('stores a ticket under its hash, and only one caller consumes a one-time ticket', () => {
+    const store = open()
+    store.insertDownloadTicket({
+      tokenHash: 'hash-1',
+      attachmentId: 'att-1',
+      objectUri: 'https://a.example/anp-im/objects/obj-1',
+      requesterDid: 'did:web:b.example',
+      messageId: 'msg-1',
+      messageSecurityProfile: 'transport-protected',
+      messageTargetDid: 'did:web:b.example',
+      oneTime: true,
+      issuedAt: '2026-10-01T00:00:00.000Z',
+      expiresAt: '2026-10-01T00:05:00.000Z',
+    })
+
+    const ticket = store.downloadTicket('hash-1')
+    expect(ticket?.oneTime).toBe(true)
+    expect('groupDid' in (ticket ?? {})).toBe(false)
+    expect('consumedAt' in (ticket ?? {})).toBe(false)
+
+    // The check and the write are one statement, so the second caller loses even if it
+    // arrives at the same instant as the first.
+    expect(store.consumeDownloadTicket('hash-1', '2026-10-01T00:00:01.000Z')).toBe(true)
+    expect(store.consumeDownloadTicket('hash-1', '2026-10-01T00:00:02.000Z')).toBe(false)
+    expect(store.downloadTicket('hash-1')?.consumedAt).toBe('2026-10-01T00:00:01.000Z')
+    expect(store.consumeDownloadTicket('hash-never-issued', '2026-10-01T00:00:01.000Z')).toBe(false)
+  })
+})
+
+describe('the v4 → v5 migration', () => {
+  /** A file as v4 wrote it: `attachment_slots` has no `upload_token`, and the three tables
+   *  the authorization chain needs are missing entirely. */
+  function writeV4(path: string): void {
+    const db = new DatabaseSync(path)
+    db.exec(`CREATE TABLE attachment_slots (
+       attachment_id              TEXT NOT NULL,
+       slot_id                    TEXT NOT NULL,
+       owner_did                  TEXT NOT NULL,
+       object_encryption_mode     TEXT NOT NULL,
+       message_security_profile   TEXT NOT NULL,
+       commit_token               TEXT NOT NULL,
+       state                      TEXT NOT NULL,
+       expires_at                 TEXT NOT NULL,
+       object_uri                 TEXT,
+       size                       INTEGER,
+       digest                     TEXT,
+       committed_at               TEXT,
+       PRIMARY KEY (attachment_id, slot_id)
+     )`)
+    db.exec(`INSERT INTO attachment_slots
+       (attachment_id, slot_id, owner_did, object_encryption_mode, message_security_profile,
+        commit_token, state, expires_at)
+       VALUES ('att-old', 'slot-old', 'did:web:a.example', 'none', 'transport-protected',
+               'tok', 'pending', '2026-10-01T00:15:00.000Z')`)
+    db.exec('PRAGMA user_version = 4')
+    db.close()
+  }
+
+  it('adds the upload token to the rows that predate it, and the three new tables', () => {
+    const path = join(dir, 'v4.db')
+    writeV4(path)
+
+    const store = open(path)
+    const slot = store.attachmentSlot('att-old', 'slot-old')
+    // Not a usable token: the empty string is the "no token on this row" the migration
+    // backfills, and the partial unique index in `SCHEMA` excludes exactly that value.
+    expect(slot?.uploadToken).toBe('')
+    expect(store.attachmentSlotByUploadToken('')).toBeUndefined()
+
+    // The three tables arrive from `SCHEMA`'s `IF NOT EXISTS` pass, which is why the version
+    // has to move for a file that needs no column change.
+    expect(store.attachmentObject('never')).toBeUndefined()
+    expect(store.attachmentGrant('msg', 'att', 'uri')).toBeUndefined()
+    expect(store.downloadTicket('hash')).toBeUndefined()
+  })
+})

@@ -27,6 +27,7 @@ import {
   type AnpRejection,
 } from '@agentx/core'
 import type { DeliveryRecord, Storage } from '../storage/types'
+import { attachmentGrantsFor, insertAttachmentGrants } from './attachments'
 import { isNonEmptyString, unknownField } from './body'
 import { validatePayloadBody } from './payload'
 import { AnpRefusal, refusal } from './refusal'
@@ -1108,6 +1109,21 @@ function sendToGroup(ctx: GroupContext): Record<string, unknown> {
     groupEventSeq,
     groupStateVersion,
   })
+
+  // §9.2 L656：`group.send` 由 Group Host 接受后，**为每个附件创建一条 Access Grant**，
+  // 而 Group Host 就是本服务。与消息行、群事件在同一个事务里——这就是 C9 与 C10 的接口线。
+  // 上面那条重复消息的分支同样不做：Grant 在第一次受理时已经落了。
+  insertAttachmentGrants(
+    ctx.storage,
+    attachmentGrantsFor({
+      contentType: ctx.meta.content_type ?? '',
+      securityProfile: ctx.meta.security_profile,
+      body: ctx.body,
+      messageId,
+      groupDid: view.groupDid,
+      createdAt: ctx.acceptedAt,
+    }),
+  )
 
   const receipt = groupReceipt({
     receiptType: RECEIPT_MESSAGE,

@@ -11,7 +11,20 @@ describe('loadConfig defaults', () => {
     expect(config.maxBody).toBe(1024 * 1024)
     // Optional paths stay out of the object rather than becoming ''.
     expect('keyFile' in config).toBe(false)
-    expect('objectDir' in config).toBe(false)
+    // `objectDir` has no absent state: it is derived from the database path.
+    expect(config.objectDir).toBe('objects')
+  })
+})
+
+describe('AGENTX_OBJECT_DIR', () => {
+  it('defaults to a directory beside the database file', () => {
+    expect(loadConfig({ AGENTX_DB: '/var/agentx/agentx.db' }).objectDir).toBe('/var/agentx/objects')
+    expect(loadConfig({ AGENTX_DB: 'agentx.db' }).objectDir).toBe('objects')
+  })
+
+  it('falls back to the working directory for an in-memory database', () => {
+    // `:memory:` has no "beside": there is no file to sit next to.
+    expect(loadConfig({ AGENTX_DB: ':memory:' }).objectDir).toBe('./objects')
   })
 })
 
@@ -110,9 +123,11 @@ describe('optional paths', () => {
     expect(set.keyFile).toBe('/keys/agentx.pem')
     expect(set.objectDir).toBe('/var/agentx/objects')
 
+    // An empty value is a shell accident, not a path: `objectDir` falls back to the
+    // derivation rather than becoming ''.
     const blank = loadConfig({ AGENTX_KEY_FILE: '', AGENTX_OBJECT_DIR: '' })
     expect('keyFile' in blank).toBe(false)
-    expect('objectDir' in blank).toBe(false)
+    expect(blank.objectDir).toBe('objects')
   })
 })
 

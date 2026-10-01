@@ -121,6 +121,92 @@ export interface StoredGroupEvent {
   occurredAt: string
 }
 
+/**
+ * One upload slot, halfway through its §10.1 lifecycle (attachments.md §2).
+ *
+ * `state` is `pending` | `uploaded` | `committed` | `aborted`. `expired` is deliberately
+ * NOT a state: an expiry is a reading of `expiresAt` taken when the slot is used, so a
+ * row cannot disagree with the clock (attachments.md §8).
+ */
+export interface StoredAttachmentSlot {
+  attachmentId: string
+  slotId: string
+  ownerDid: string
+  /** The unguessable half of `upload_uri`, and the data plane's ONLY credential: the PUT
+   *  is a plain HTTP request from a plain HTTP client, so it carries no `origin_proof`
+   *  and none could be required of it (attachments.md §3). */
+  uploadToken: string
+  commitToken: string
+  objectEncryptionMode: string
+  /** The security profile the SENDER intends to carry the manifest under (§10.2.2
+   *  `intended_message_security_profile`). Checked against `objectEncryptionMode` at
+   *  creation (§10.2.2 L875). */
+  messageSecurityProfile: string
+  state: string
+  expiresAt: string
+  /** Issued at creation, before the bytes exist: it is a locator, not a claim that the
+   *  object is there (§7.5 L489, §10.1 L826). */
+  objectUri?: string
+  /** Filled in by the PUT as it streams, so `commit_object` can check what arrived. */
+  size?: number
+  digest?: string
+  /** The time of the TERMINAL transition — commit or abort, whichever happened. One column
+   *  rather than two because `state` already says which: the response's `committed_at` and
+   *  `aborted_at` are the same fact about a row that has only one ending. */
+  committedAt?: string
+}
+
+/** One committed object. The bytes live on the filesystem addressed by `digest`; this
+ *  row is the index that says "these bytes exist", not the container for them
+ *  (attachments.md §4). */
+export interface StoredAttachmentObject {
+  digest: string
+  size: number
+  committedAt: string
+}
+
+/**
+ * One Access Grant (P7 §9.2 L652–664).
+ *
+ * Keyed by the triple §7.2 L434 requires — `attachment_id` alone is only unique within one
+ * Attachment Message and may legally recur across messages (L432–433).
+ *
+ * Created when the message carrying the manifest is ACCEPTED (§9.2 L656), in the same
+ * transaction: outside it there would be a window in which the message exists and its
+ * attachments cannot be downloaded, and nothing in that window would tell the client.
+ */
+export interface StoredAttachmentGrant {
+  messageId: string
+  attachmentId: string
+  objectUri: string
+  messageSecurityProfile: string
+  /** Private context: the original message's target agent DID. */
+  messageTargetDid?: string
+  /** Group context: the group the original message went to. */
+  groupDid?: string
+  createdAt: string
+}
+
+/** One issued download ticket (P7 §9.4 L681–689).
+ *
+ *  Only the token's SHA-256 is stored: it is a bearer credential, and the ledger is not
+ *  the place for one in the clear (attachments.md §7). */
+export interface StoredDownloadTicket {
+  tokenHash: string
+  attachmentId: string
+  objectUri: string
+  requesterDid: string
+  messageId: string
+  messageSecurityProfile: string
+  messageTargetDid?: string
+  groupDid?: string
+  oneTime: boolean
+  issuedAt: string
+  expiresAt: string
+  /** Set when a `one_time` ticket has been redeemed. */
+  consumedAt?: string
+}
+
 export interface OutboxEntry {
   seq: number
   /** The recipient's DID, NOT a resolved endpoint. The push resolves it through the
@@ -256,6 +342,43 @@ export interface Storage {
    *  table an ordered replay source even though its sequence numbers are not contiguous
    *  (group messages take numbers without leaving an event row). */
   appendGroupEvent(event: StoredGroupEvent): void
+
+  // ---- attachments (P7, C10) -------------------------------------------------
+  //
+  // The bytes are NOT here — they are on the filesystem, addressed by digest
+  // (attachments.md §4). These four tables are the authorization and lifecycle ledger
+  // that has to be transactional: the Grant has to appear in the same transaction that
+  // accepts the message which carries its manifest.
+
+  insertAttachmentSlot(slot: StoredAttachmentSlot): void
+  attachmentSlot(attachmentId: string, slotId: string): StoredAttachmentSlot | undefined
+  /** The data plane's only lookup: the PUT is addressed by the upload token, which is
+   *  the one credential that request has. */
+  attachmentSlotByUploadToken(uploadToken: string): StoredAttachmentSlot | undefined
+  /** The download route's lookup. `object_uri` is issued at creation and is unique to
+   *  one slot, so it is both the route parameter and the lookup key. */
+  attachmentSlotByObjectUri(objectUri: string): StoredAttachmentSlot | undefined
+  /** Record what the PUT received. Also the transition into `uploaded`. */
+  recordAttachmentUpload(attachmentId: string, slotId: string, size: number, digest: string): void
+  /** Transition into `committed` (or `aborted`). A terminal state; never moved back. */
+  setAttachmentSlotState(attachmentId: string, slotId: string, state: string, committedAt?: string): void
+
+  /** Index a committed object. A content-addressed store makes this idempotent: the same
+   *  bytes uploaded twice are one row and one file. */
+  insertAttachmentObject(object: StoredAttachmentObject): void
+  attachmentObject(digest: string): StoredAttachmentObject | undefined
+
+  /** Create one Access Grant. Inserted after the message row, in its transaction. */
+  insertAttachmentGrant(grant: StoredAttachmentGrant): void
+  attachmentGrant(messageId: string, attachmentId: string, objectUri: string): StoredAttachmentGrant | undefined
+
+  insertDownloadTicket(ticket: StoredDownloadTicket): void
+  /** By the SHA-256 of the token the client presented, never by the token itself. */
+  downloadTicket(tokenHash: string): StoredDownloadTicket | undefined
+  /** Redeem a `one_time` ticket. Returns whether THIS call was the redemption — the check
+   *  and the write are one statement, so two concurrent GETs with the same ticket cannot
+   *  both pass a separate "has it been consumed" read. */
+  consumeDownloadTicket(tokenHash: string, consumedAt: string): boolean
 
   enqueueOutbox(draft: Omit<OutboxEntry, 'seq' | 'attempts' | 'lastError'>): number
   /** Entries due at or before `now`, oldest first. */

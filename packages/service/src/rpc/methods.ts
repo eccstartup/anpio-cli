@@ -18,6 +18,20 @@ import {
 } from '@agentx/core'
 import { DIRECT_AUTH_CODES, GROUP_AUTH_CODES, P1_AUTH_CODES, type AuthErrorCodes } from './auth'
 import {
+  ATTACHMENT_ABORT_OBJECT,
+  ATTACHMENT_COMMIT_OBJECT,
+  ATTACHMENT_CREATE_SLOT,
+  ATTACHMENT_GET_DOWNLOAD_TICKET,
+  ATTACHMENT_PROFILE,
+  ATTACHMENT_SECURITY_PROFILE,
+  attachmentScope,
+  ticketScope,
+  validateAbortBody,
+  validateCommitBody,
+  validateCreateSlotBody,
+  validateTicketBody,
+} from './attachments'
+import {
   GROUP_ADD,
   GROUP_CREATE,
   GROUP_GET_INFO,
@@ -377,6 +391,69 @@ const GROUP_SEND_SPEC = groupSpec({
   targetScope: groupScope,
 })
 
+/**
+ * 附件与对象传输（P7 `anp.attachment.v1`，C10）。
+ *
+ * 四条都是 **service-scoped**（§10.1 L797–798）：目标是公开服务的 `serviceDid`，不是某个
+ * agent、也不是群——对象与消息是两回事，`create_slot` 的时候连消息都还没有。`targetMode`
+ * 只判 `kind`，"`target.did` 就是这个 serviceDid"由处理器自己判（`requireServiceTarget()`），
+ * 因为那条 MUST 要的是配置里的值，不是方法表构造时就有的东西。
+ *
+ * **都要 `origin_proof`，这是本实现的选择。** §10.1 L800 说 v1 **不要求**在 Object 控制服务
+ * 端再验一次终端业务证明——那一跳由 P8 的 `serviceDid + HTTP Message Signatures` 保证
+ * （L799）。同域没有那一跳，于是只剩 `meta.sender_did` 这个自报字段，而 `get_download_ticket`
+ * 要拿它去判"你是不是有权的那个请求者"。所以同域这一侧仍然要 proof；跨域那一侧等 C11 把外层
+ * 服务认证做出来，那时它才成为一条独立的放行路径（`attachments.md` §6）。
+ *
+ * **幂等作用域**：前三条取 `attachment_id`（各自只针对一个槽位所属的附件），
+ * `get_download_ticket` 取 §7.2 L434 的三元组——票据的绑定键与授权记录的键是同一个，没有
+ * 理由各取一套。四条都改状态（最后一条要落一行票据），所以四条都进幂等台账。
+ */
+function attachmentSpec(
+  name: string,
+  validateBody: (body: Record<string, unknown>, meta: AnpMeta) => AnpRejection | undefined,
+  targetScope: (meta: AnpMeta, body: Record<string, unknown>) => string,
+): MethodSpec {
+  return {
+    name,
+    targetMode: 'service-scoped',
+    profiles: [ATTACHMENT_PROFILE],
+    securityProfiles: [ATTACHMENT_SECURITY_PROFILE],
+    requiredMeta: ['sender_did', 'operation_id'],
+    // §10.1 L802：这几条方法的 wire 模型里没有设备 selector，设备认证与路由上下文都是
+    // 部署私有信息。§9.4 L691 与 §10.5.3 L1035 在票据那一侧又说了一遍。所以带上了就拒。
+    forbiddenMeta: ['sender_device_id', 'recipient_device_id'],
+    requiresOriginProof: () => true,
+    authCodes: P1_AUTH_CODES,
+    validateBody,
+    targetScope,
+  }
+}
+
+const ATTACHMENT_CREATE_SLOT_SPEC = attachmentSpec(
+  ATTACHMENT_CREATE_SLOT,
+  (body) => validateCreateSlotBody(body),
+  attachmentScope,
+)
+
+const ATTACHMENT_COMMIT_OBJECT_SPEC = attachmentSpec(
+  ATTACHMENT_COMMIT_OBJECT,
+  (body) => validateCommitBody(body),
+  attachmentScope,
+)
+
+const ATTACHMENT_ABORT_OBJECT_SPEC = attachmentSpec(
+  ATTACHMENT_ABORT_OBJECT,
+  (body) => validateAbortBody(body),
+  attachmentScope,
+)
+
+const ATTACHMENT_GET_DOWNLOAD_TICKET_SPEC = attachmentSpec(
+  ATTACHMENT_GET_DOWNLOAD_TICKET,
+  (body, meta) => validateTicketBody(body, meta),
+  ticketScope,
+)
+
 /** `POST /anp-im/rpc` 认得的方法。两个传输方法**不在其中**——理由写在 `stream.ts`。 */
 const METHODS: readonly MethodSpec[] = [
   GET_CAPABILITIES_SPEC,
@@ -390,6 +467,10 @@ const METHODS: readonly MethodSpec[] = [
   GROUP_UPDATE_PROFILE_SPEC,
   GROUP_UPDATE_POLICY_SPEC,
   GROUP_SEND_SPEC,
+  ATTACHMENT_CREATE_SLOT_SPEC,
+  ATTACHMENT_COMMIT_OBJECT_SPEC,
+  ATTACHMENT_ABORT_OBJECT_SPEC,
+  ATTACHMENT_GET_DOWNLOAD_TICKET_SPEC,
   INBOX_GET_SPEC,
   INBOX_MARK_READ_SPEC,
   MESSAGE_GET_BATCH_SPEC,

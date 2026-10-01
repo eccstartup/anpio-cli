@@ -41,7 +41,12 @@ describe('the service entry', () => {
 describe('what counts as a profile of the service', () => {
   it('advertises the spec profiles and keeps every extension out of them', () => {
     const built = entry()
-    expect(built.profiles).toEqual(['anp.core.binding.v1', 'anp.direct.base.v1', 'anp.group.base.v2'])
+    expect(built.profiles).toEqual([
+      'anp.attachment.v1',
+      'anp.core.binding.v1',
+      'anp.direct.base.v1',
+      'anp.group.base.v2',
+    ])
     expect(built.securityProfiles).toEqual(['transport-protected'])
     // §13 L834–838: a client that reads these is deciding what it may send, and an
     // `x_agentx.*` value there would make a spec-only service look like it spoke them.

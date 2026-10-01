@@ -31,6 +31,8 @@ import { authenticate, callerAnchor } from './auth'
 import { DIRECT_SEND, GET_CAPABILITIES, lookupMethod, checkMethod, type MethodSpec } from './methods'
 import { storeDirectMessage } from './direct'
 import { GROUP_HANDLERS } from './groups'
+import { ATTACHMENT_HANDLERS } from './attachments'
+import type { ObjectStore } from '../objects'
 import { AnpRefusal } from './refusal'
 import { INBOX_GET, INBOX_MARK_READ, MESSAGE_GET_BATCH, SYNC_DELTA, markRead, readBatch, readDelta, readInbox } from './inbox'
 import { errorResponse, failureId, noResponse, parseRequestText, successResponse } from './envelope'
@@ -40,6 +42,15 @@ export interface DispatchDeps {
    *  outbound resolver policy. */
   config: Config
   storage: Storage
+  /**
+   * 附件对象的字节（P7，C10）。
+   *
+   * **必填而不是可选**：`attachment.create_slot` 一进方法表，`anp.attachment.v1` 就出现在
+   * `.well-known` 与 `anp.get_capabilities` 里（能力是从方法表推出来的）。一个宣告实现了
+   * 这个 Profile、却在 `commit_object` 上无处落字节的服务，比一个不宣告它的服务坏得多。
+   * 所以要么给，要么那四条方法不该在表里。
+   */
+  objects: ObjectStore
   /** Defaults to core's `DidKeyResolver`. A test substitutes one that answers from an
    *  inline document, which is what keeps the accept path testable without a network. */
   resolver?: KeyResolver
@@ -110,27 +121,40 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
       case INBOX_MARK_READ:
         return markRead(deps.storage, meta, body, acceptedAt)
       default: {
-        // `group.*` 那一族不在这里枚举：它们的处理器按方法名查（`groups.ts`），因为九个
-        // 方法在这一层完全同形，逐个写一个 `case` 只是把同一段构造抄九遍，而漏抄一个的
-        // 表现是"某个群方法莫名 500"。查不到才是不一致——方法表里有它，处理器表里没有。
+        // `group.*` 与 `attachment.*` 两族都不在这里逐个枚举：它们的处理器按方法名查
+        // （`groups.ts` / `attachments.ts`），因为同族的方法在这一层完全同形，逐个写一个
+        // `case` 只是把同一段构造抄若干遍，而漏抄一个的表现是"某个方法莫名 500"。查不到
+        // 才是不一致——方法表里有它，处理器表里没有。
         const group = GROUP_HANDLERS[spec.name]
-        if (group === undefined) {
-          // 方法表里有它、这里两处都没有分支：两张表不一致，是代码错，不是请求错。
-          throw new Error(`no handler for ${spec.name}`)
+        if (group !== undefined) {
+          return group({
+            storage: deps.storage,
+            serviceDid: deps.config.serviceDid,
+            meta,
+            body,
+            ...(auth !== undefined ? { auth } : {}),
+            acceptedAt,
+            // 与幂等指纹是**同一个**摘要：`group_receipt.payload_digest` 要证明的就是
+            // "这次被受理的请求是这一份"，而 §9.1 的指纹要判的也是同一件事。各算一次除了
+            // 多一趟哈希，还留下两处会各自漂移的定义。
+            requestDigest,
+            onDelivery: (record) => pending.push(record),
+          })
         }
-        return group({
-          storage: deps.storage,
-          serviceDid: deps.config.serviceDid,
-          meta,
-          body,
-          ...(auth !== undefined ? { auth } : {}),
-          acceptedAt,
-          // 与幂等指纹是**同一个**摘要：`group_receipt.payload_digest` 要证明的就是
-          // "这次被受理的请求是这一份"，而 §9.1 的指纹要判的也是同一件事。各算一次除了
-          // 多一趟哈希，还留下两处会各自漂移的定义。
-          requestDigest,
-          onDelivery: (record) => pending.push(record),
-        })
+        const attachment = ATTACHMENT_HANDLERS[spec.name]
+        if (attachment !== undefined) {
+          return attachment({
+            storage: deps.storage,
+            serviceDid: deps.config.serviceDid,
+            publicUrl: deps.config.publicUrl,
+            objects: deps.objects,
+            meta,
+            body,
+            acceptedAt,
+          })
+        }
+        // 方法表里有它、这里两处都没有分支：两张表不一致，是代码错，不是请求错。
+        throw new Error(`no handler for ${spec.name}`)
       }
     }
   }

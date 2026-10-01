@@ -12,10 +12,16 @@
 // Those hosts still have to be named one by one, so no value of it makes resolution
 // unbounded; the allowlist is exact at every setting.
 
+import { dirname, join } from 'node:path'
 import { ConnectxError } from '@agentx/core'
 
 /** 1 MiB, §14. Attachments travel on the data plane and never through this limit. */
 const DEFAULT_MAX_BODY = 1024 * 1024
+
+/** 64 MiB, attachments.md §4. Deliberately NOT `DEFAULT_MAX_BODY`: a control-plane
+ *  envelope is a few KiB and an object is a few MiB, so one number for both would be
+ *  wrong for one of them. */
+const DEFAULT_MAX_OBJECT_BYTES = 64 * 1024 * 1024
 
 const DEFAULT_LISTEN = '127.0.0.1:8787'
 const DEFAULT_DB = './agentx.db'
@@ -58,10 +64,16 @@ export interface Config {
   keyFile?: string
   /** SQLite file, or `:memory:`. */
   dbPath: string
-  /** Where attachment objects are written (P7, C10). */
-  objectDir?: string
+  /** Where attachment objects are written (P7, C10). Always present: `AGENTX_OBJECT_DIR`
+   *  or the derivation in {@link defaultObjectDir}. Unlike `keyFile` this has no "absent"
+   *  state — a service that cannot store an object cannot implement `anp.attachment.v1`,
+   *  and the method table has no switch for that. */
+  objectDir: string
   /** Request body cap in bytes. */
   maxBody: number
+  /** Cap on one attachment object's bytes (P7, C10). Enforced while the upload stream is
+   *  read rather than after it is buffered — see `AGENTX_MAX_BODY` for the same reason. */
+  maxObjectBytes: number
 }
 
 /** `host:port`, with the host allowed to be an IPv6 literal in brackets. The port is
@@ -191,19 +203,39 @@ function impliedPublicUrl(listen: ListenAddress): string {
   )
 }
 
+/**
+ * `AGENTX_OBJECT_DIR` 不给就用数据库文件旁边那个目录（attachments.md §4）：对象与它所属的
+ * 那个库是一份状态的两半，让它们默认待在一起，备份与搬迁才不会只搬走一半。
+ *
+ * `:memory:` 没有"旁边"，退回 `./objects`——与 `AGENTX_DB` 的缺省 `./agentx.db` 落在同一个
+ * 工作目录，也是 `.gitignore` 里那一条。
+ */
+function defaultObjectDir(dbPath: string): string {
+  if (dbPath === ':memory:') return './objects'
+  return join(dirname(dbPath), 'objects')
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const listen = parseListen(env.AGENTX_LISTEN ?? DEFAULT_LISTEN)
   const publicUrl = normalizeUrl(env.AGENTX_PUBLIC_URL ?? impliedPublicUrl(listen), 'AGENTX_PUBLIC_URL')
+  const dbPath = env.AGENTX_DB ?? DEFAULT_DB
 
   const config: Config = {
     listen,
     publicUrl,
     serviceDid: parseServiceDid(env.AGENTX_SERVICE_DID ?? didWebFor(publicUrl)),
     didResolution: parseDidResolution(env),
-    dbPath: env.AGENTX_DB ?? DEFAULT_DB,
+    dbPath,
+    objectDir: env.AGENTX_OBJECT_DIR !== undefined && env.AGENTX_OBJECT_DIR !== ''
+      ? env.AGENTX_OBJECT_DIR
+      : defaultObjectDir(dbPath),
     maxBody: parsePositive(env.AGENTX_MAX_BODY, 'AGENTX_MAX_BODY', DEFAULT_MAX_BODY),
+    maxObjectBytes: parsePositive(
+      env.AGENTX_MAX_OBJECT_BYTES,
+      'AGENTX_MAX_OBJECT_BYTES',
+      DEFAULT_MAX_OBJECT_BYTES,
+    ),
   }
   if (env.AGENTX_KEY_FILE !== undefined && env.AGENTX_KEY_FILE !== '') config.keyFile = env.AGENTX_KEY_FILE
-  if (env.AGENTX_OBJECT_DIR !== undefined && env.AGENTX_OBJECT_DIR !== '') config.objectDir = env.AGENTX_OBJECT_DIR
   return config
 }

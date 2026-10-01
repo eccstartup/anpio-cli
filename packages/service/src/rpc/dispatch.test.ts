@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   DidKeyResolver,
   buildMessageRequest,
@@ -13,6 +16,7 @@ import {
   type LocateOptions,
 } from '@agentx/core'
 import { loadConfig } from '../config'
+import { openObjectStore } from '../objects'
 import { openStorage } from '../storage/sqlite'
 import { createDispatch } from './dispatch'
 import { buildServiceEntry } from '../well-known'
@@ -115,6 +119,10 @@ function harness(overrides: { storage?: Storage } = {}): Harness {
   const handle = createDispatch({
     config: loadConfig({}),
     storage,
+    // 这个文件里的方法没有一条会碰对象字节，但 `DispatchDeps` 要求它：一个广告了
+    // `anp.attachment.v1` 的服务必须真的能存下字节（`dispatch.ts` 里有说明）。路径必须是
+    // 真的可写目录，所以给一个系统临时目录；这个文件里没人往里写东西。
+    objects: openObjectStore({ directory: mkdtempSync(join(tmpdir(), 'agentx-dispatch-')), maxBytes: 1024 }),
     resolver: inlineResolver(DOCUMENTS),
     log: (line) => logs.push(line),
     now: () => NOW,
@@ -596,7 +604,12 @@ describe('capability discovery (P1 §8.2)', () => {
     expect(outcome.json?.error).toBeUndefined()
     expect(outcome.json?.result).toMatchObject({
       service_did: 'did:web:127.0.0.1%3A8787',
-      supported_profiles: ['anp.core.binding.v1', 'anp.direct.base.v1', 'anp.group.base.v2'],
+      supported_profiles: [
+        'anp.attachment.v1',
+        'anp.core.binding.v1',
+        'anp.direct.base.v1',
+        'anp.group.base.v2',
+      ],
       supported_security_profiles: ['transport-protected'],
     })
   })

@@ -23,8 +23,16 @@
  *  the `group_member` object `group.get_info` returns), and `messages` gains the two
  *  position columns a group message has to be able to report (see the table below). All
  *  four are nullable, so `ALTER TABLE ADD COLUMN` is enough and no table has to be
- *  rebuilt. */
-export const SCHEMA_VERSION = 4
+ *  rebuilt.
+ *
+ *  v5: `attachment_slots` gains `upload_token` — the data plane's only credential
+ *  (attachments.md §3) — and the three tables the P7 authorization chain needs arrive:
+ *  `attachment_objects`, `attachment_grants`, `download_tickets`. Only the column is an
+ *  in-place change; the three tables come from `SCHEMA`'s `IF NOT EXISTS` pass, so they
+ *  are not in a migration step — but the version still moves, or a file written by v4
+ *  would return early from `applySchema` and never get them. The `upload_token` column
+ *  needs a `DEFAULT` because SQLite refuses `ADD COLUMN ... NOT NULL` without one. */
+export const SCHEMA_VERSION = 5
 
 export const SCHEMA: readonly string[] = [
   // ---- idempotency -----------------------------------------------------------
@@ -179,12 +187,18 @@ export const SCHEMA: readonly string[] = [
    )`,
 
   // ---- attachments (P7) ------------------------------------------------------
-  // Object bytes and their digest only. `object_key` / `nonce` are not here: they travel
-  // in the inner manifest of P5/P6 and never reach this service.
+  // 控制面对象状态机（§10.1 L808–824）。`state` 只有 pending / uploaded / committed /
+  // aborted 四个值：**没有 `expired`**——过期是用到这一行时对 `expires_at` 的一次判定，
+  // 落成状态就会出现"行与时钟说法不一致"（attachments.md §8）。
+  //
+  // `object_uri` 在创建时就发出去，此刻字节还不存在：它是 locator，不是"东西已经在那了"
+  // 的断言（§7.5 L489）。它的随机段在创建时铸出来（规范 §14.2 的示例也是 `obj-abc` 而不是
+  // 摘要），因为摘要要到 PUT 结束才知道；磁盘上的文件名仍然是摘要。
   `CREATE TABLE IF NOT EXISTS attachment_slots (
      attachment_id              TEXT NOT NULL,
      slot_id                    TEXT NOT NULL,
      owner_did                  TEXT NOT NULL,
+     upload_token               TEXT NOT NULL DEFAULT '',
      object_encryption_mode     TEXT NOT NULL,
      message_security_profile   TEXT NOT NULL,
      commit_token               TEXT NOT NULL,
@@ -193,8 +207,56 @@ export const SCHEMA: readonly string[] = [
      object_uri                 TEXT,
      size                       INTEGER,
      digest                     TEXT,
+     -- 终态那一刻（committed 或 aborted，看 state 是哪个）。一列而不是两列：一行只有一个
+     -- 结局，响应里的 committed_at 与 aborted_at 说的是同一件事。
      committed_at               TEXT,
      PRIMARY KEY (attachment_id, slot_id)
+   )`,  // 下载路由按 `object_uri` 反查槽位，所以它得有索引；也是唯一性约束——两个槽共用一个
+  // object_uri 意味着一个对象有两个签发者。NULL 在 SQLite 的唯一索引里互不相等，所以
+  // v4 迁移过来的空行（object_uri 为 NULL）不会互相撞。
+  `CREATE UNIQUE INDEX IF NOT EXISTS attachment_slots_object_uri ON attachment_slots (object_uri)`,
+  // 同理，但这条得是**部分索引**：v4 迁移给旧行填的 `upload_token` 是空串，若把它也纳进
+  // 唯一性，文件里只要有两行旧数据（或将来某个写错的路径留下两行空串），整个建表就失败；
+  // 而空串的语义本来就是"这行没有令牌"。真实令牌之间才需要唯一。
+  `CREATE UNIQUE INDEX IF NOT EXISTS attachment_slots_upload_token
+     ON attachment_slots (upload_token) WHERE upload_token <> ''`,
+
+  // 已提交的对象。`digest` 是主键，所以"同一份字节上传两次"落成一行一文件——去重是免费的。
+  // 这张表只说"这些字节存在"，字节本身按 `digest` 存在文件系统上（attachments.md §4）。
+  `CREATE TABLE IF NOT EXISTS attachment_objects (
+     digest       TEXT PRIMARY KEY,
+     size         INTEGER NOT NULL,
+     committed_at TEXT NOT NULL
+   )`,
+
+  // 下载授权：§9.2 L656 说它在**承载清单的消息被接受之后**才出现，所以它必须与那条消息
+  // 落进同一个事务。键取 §7.2 L434 要的三元组，不是 `attachment_id` 单列。
+  `CREATE TABLE IF NOT EXISTS attachment_grants (
+     message_id                TEXT NOT NULL,
+     attachment_id             TEXT NOT NULL,
+     object_uri                TEXT NOT NULL,
+     message_security_profile  TEXT NOT NULL,
+     message_target_did        TEXT,
+     group_did                 TEXT,
+     created_at                TEXT NOT NULL,
+     PRIMARY KEY (message_id, attachment_id, object_uri)
+   )`,
+
+  // 下载票据。存**摘要**不存原值：它是一张 bearer 凭据，台账里不该有明文（attachments.md §7）。
+  // `consumed_at` 只有 `one_time` 票据会用上；过期同槽位一样是用的时候判，不落状态。
+  `CREATE TABLE IF NOT EXISTS download_tickets (
+     token_hash                TEXT PRIMARY KEY,
+     attachment_id             TEXT NOT NULL,
+     object_uri                TEXT NOT NULL,
+     requester_did             TEXT NOT NULL,
+     message_id                TEXT NOT NULL,
+     message_security_profile  TEXT NOT NULL,
+     message_target_did        TEXT,
+     group_did                 TEXT,
+     one_time                  INTEGER NOT NULL DEFAULT 0,
+     issued_at                 TEXT NOT NULL,
+     expires_at                TEXT NOT NULL,
+     consumed_at               TEXT
    )`,
 
   // ---- outbox ----------------------------------------------------------------

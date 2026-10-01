@@ -387,6 +387,6 @@ describe('the schema the worker reads', () => {
     // possible. The assertion is pinned to the CURRENT version rather than to `>= 2` so
     // that a bump lands here and gets read: the worker reads `dueOutbox` and writes it
     // back, so any change to the outbox shape has to be checked against this file.
-    expect(SCHEMA_VERSION).toBe(4)
+    expect(SCHEMA_VERSION).toBe(5)
   })
 })

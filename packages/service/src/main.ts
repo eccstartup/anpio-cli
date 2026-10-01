@@ -12,8 +12,10 @@
 
 import { ConnectxError } from '@agentx/core'
 import { loadConfig } from './config'
+import { createDataPlane } from './dataplane'
 import { createDeliveryWorker } from './delivery/worker'
 import { createServer } from './http/server'
+import { openObjectStore } from './objects'
 import { createDispatch } from './rpc/dispatch'
 import { openStorage } from './storage/sqlite'
 import { createSubscriberRegistry } from './stream/registry'
@@ -24,6 +26,9 @@ import type { RpcHandler } from './http/server'
 async function main(): Promise<void> {
   const config = loadConfig()
   const storage = openStorage({ path: config.dbPath })
+  // Opened at startup rather than lazily on the first upload: a directory that cannot be
+  // created should fail here, not after a client has already been handed an `upload_uri`.
+  const objects = openObjectStore({ directory: config.objectDir, maxBytes: config.maxObjectBytes })
 
   // The two halves of one accepted message: the dispatcher writes it and commits, then
   // hands the delivery here, and the registry writes it to whichever connections are
@@ -33,10 +38,14 @@ async function main(): Promise<void> {
   const handleRpc: RpcHandler = createDispatch({
     config,
     storage,
+    objects,
     onDelivered: (record) => {
       registry.publish(record)
     },
   })
+  // The two byte routes of P7 §11. They are the only place in this process that puts a
+  // non-string body on a socket.
+  const dataPlane = createDataPlane({ storage, objects, publicUrl: config.publicUrl })
   const session = createStreamSession({
     serverDid: config.serviceDid,
     storage,
@@ -48,6 +57,8 @@ async function main(): Promise<void> {
     config,
     handleRpc,
     handleStream: (connection, request) => session.handlersFor(connection, request),
+    handleUpload: dataPlane.handleUpload,
+    handleObject: dataPlane.handleObject,
     // A pure function of the configuration and the method table, so it is built once. The
     // DID Service fetches this to embed as the agent's `ANPMessageService` entry
     // (message-service.md §13) — this service never writes a DID document itself.
@@ -70,6 +81,7 @@ async function main(): Promise<void> {
   process.stdout.write(`  service did   ${config.serviceDid}\n`)
   process.stdout.write(`  rpc           ${config.publicUrl}/anp-im/rpc\n`)
   process.stdout.write(`  database      ${config.dbPath}\n`)
+  process.stdout.write(`  objects       ${config.objectDir}\n`)
   // Outbound DID resolution is the one setting whose default is a closed door, so say so
   // at startup rather than let the first 2005 be the operator's introduction to it.
   process.stdout.write(

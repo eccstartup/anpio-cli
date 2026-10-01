@@ -9,7 +9,12 @@
 
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { Duplex } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 import type { Config } from '../config'
+import type { DataPlaneHandler, DataPlaneResponse } from '../dataplane'
+// 这两条路由的路径由**铸 `upload_uri` / `object_uri` 的那个模块**定义：客户端的 URL 与
+// 服务端的路由表必须说的是同一个字符串，各写一份字面量只会有一半跟着改。
+import { OBJECTS_PATH, UPLOAD_PATH } from '../rpc/attachments'
 import { upgrade, type WebSocketConnection, type WebSocketHandlers } from '../stream/ws'
 
 export const RPC_PATH = '/anp-im/rpc'
@@ -58,6 +63,10 @@ export interface ServerOptions {
    *  It is data rather than a callback because the document is a pure function of the
    *  configuration and the method table — `main.ts` builds it once, at startup. */
   wellKnown?: string
+  /** `PUT {upload_uri}` (P7 §11.1, C10). Absent means 501, same rule as above. */
+  handleUpload?: DataPlaneHandler
+  /** `GET {object_uri}` (P7 §11.2). */
+  handleObject?: DataPlaneHandler
 }
 
 export interface RunningServer {
@@ -97,6 +106,45 @@ function send(
  */
 function refuse(res: ServerResponse, status: number, message: string, extra: Record<string, string> = {}): void {
   send(res, status, 'application/json', JSON.stringify({ error: message }), { ...extra, connection: 'close' })
+}
+
+/**
+ * The byte path: unlike {@link send} this one can put a `Readable` on the wire, because an
+ * attachment object is a few MiB and reading it into a string first is the thing the size
+ * cap exists to avoid.
+ *
+ * Every non-2xx ends the connection, for the same reason {@link refuse} does: a refused
+ * upload usually still has its request body in flight, and a pooled connection reused for
+ * the next request would hit those leftover bytes.
+ */
+async function sendDataPlane(res: ServerResponse, answer: DataPlaneResponse): Promise<void> {
+  const headers: Record<string, string | number> = { ...answer.headers }
+  if (answer.contentType !== undefined) headers['content-type'] = answer.contentType
+  if (answer.status >= 400) headers.connection = 'close'
+
+  if (answer.stream !== undefined) {
+    headers['content-length'] = answer.stream.length
+    res.writeHead(answer.status, headers)
+    await pipeline(answer.stream.read, res)
+    return
+  }
+  const body = answer.body ?? ''
+  headers['content-length'] = Buffer.byteLength(body)
+  res.writeHead(answer.status, headers)
+  res.end(body)
+}
+
+/** The resource id out of a route path, or `undefined` when it is not decodable. Node's URL
+ *  parser leaves percent-escapes in `pathname`, so the segment still has to be decoded —
+ *  and a malformed escape is a bad request rather than a crash. */
+function resourceOf(pathname: string, prefix: string): string | undefined {
+  const raw = pathname.slice(prefix.length + 1)
+  if (raw === '' || raw.includes('/')) return undefined
+  try {
+    return decodeURIComponent(raw)
+  } catch {
+    return undefined
+  }
 }
 
 /**
@@ -190,6 +238,32 @@ export function createServer(options: ServerOptions): RunningServer {
         return
       }
       send(res, 200, 'application/json', document)
+      return
+    }
+
+    // ---- P7 data plane (C10) -------------------------------------------------
+    // Exact-prefix rather than exact-path routes: the last segment IS the credential (for
+    // the upload) or the object's locator (for the download). Both routes are byte routes,
+    // so neither goes through the JSON-RPC envelope or the `refuse` body cap.
+    for (const [prefix, method, handler] of [
+      [UPLOAD_PATH, 'PUT', options.handleUpload],
+      [OBJECTS_PATH, 'GET', options.handleObject],
+    ] as const) {
+      if (!url.pathname.startsWith(`${prefix}/`)) continue
+      if (req.method !== method) {
+        refuse(res, 405, 'method not allowed', { allow: method })
+        return
+      }
+      const resource = resourceOf(url.pathname, prefix)
+      if (resource === undefined) {
+        refuse(res, 400, 'malformed resource id')
+        return
+      }
+      if (handler === undefined) {
+        refuse(res, 501, `${prefix} is not implemented yet`)
+        return
+      }
+      await sendDataPlane(res, await handler({ resource, headers: req.headers, body: req }))
       return
     }
 

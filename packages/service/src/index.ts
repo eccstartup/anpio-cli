@@ -86,6 +86,33 @@ export type { GroupContext, GroupHandler } from './rpc/groups'
 export { AnpRefusal, refusal } from './rpc/refusal'
 export { groupMethodNames } from './rpc/methods'
 
+export {
+  ATTACHMENT_ABORT_OBJECT,
+  ATTACHMENT_COMMIT_OBJECT,
+  ATTACHMENT_CREATE_SLOT,
+  ATTACHMENT_GET_DOWNLOAD_TICKET,
+  ATTACHMENT_HANDLERS,
+  ATTACHMENT_MANIFEST_CONTENT_TYPE,
+  ATTACHMENT_PROFILE,
+  ATTACHMENT_SECURITY_PROFILE,
+  OBJECTS_PATH,
+  SLOT_TTL_MS,
+  TICKET_TTL_MS,
+  UPLOAD_PATH,
+  attachmentError,
+  attachmentGrantsFor,
+  insertAttachmentGrants,
+  manifestAttachments,
+  objectUriFor,
+} from './rpc/attachments'
+export type { AttachmentContext, AttachmentHandler, GrantInput } from './rpc/attachments'
+
+export { createDataPlane } from './dataplane'
+export type { DataPlaneDeps, DataPlaneHandler, DataPlaneRequest, DataPlaneResponse } from './dataplane'
+
+export { openObjectStore, isObjectDigest, ObjectTooLargeError } from './objects'
+export type { ObjectStore, OpenObjectStoreOptions, StagedObject } from './objects'
+
 export { createDeliveryWorker } from './delivery/worker'
 export type { DeliveryOptions, DeliveryWorker } from './delivery/worker'
 
@@ -99,6 +126,10 @@ export type {
   InboxRow,
   OutboxEntry,
   Storage,
+  StoredAttachmentGrant,
+  StoredAttachmentObject,
+  StoredAttachmentSlot,
+  StoredDownloadTicket,
   StoredGroup,
   StoredGroupEvent,
   StoredGroupMember,
