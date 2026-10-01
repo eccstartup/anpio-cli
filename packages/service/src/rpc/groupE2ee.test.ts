@@ -686,12 +686,13 @@ describe('the capability list (D2)', () => {
     expect(lookupMethod(GET_KEY_PACKAGE)).toBeDefined()
   })
 
-  it('keeps transport-protected, and does not claim group-e2ee yet', () => {
+  it('keeps transport-protected, and now claims group-e2ee with the four control methods', () => {
     // 安全模式**不**跟着 Profile 一起扣留：`transport-protected` 是 P1 的公共值，少列一个只是
-    // 少说一句真话。而 `group-e2ee`（§4.3 L273）今天只由 P6 的四条控制方法使用——那四条还没
-    // 进方法表，所以它不该出现在这里，这一条正是那个事实的看门人。
+    // 少说一句真话。`group-e2ee`（§4.3 L273）由 §9 那四条控制方法使用，而它们从 C13 起在方法
+    // 表里——所以它**应该**出现。上一条测的是 Profile 名被扣留，这一条测的是安全模式名不受
+    // 那条扣留的牵连；两者一起才说明 `WITHHELD_PROFILES` 只过滤 `profiles`。
     const caps = serviceCapabilities()
     expect(caps.securityProfiles).toContain('transport-protected')
-    expect(caps.securityProfiles).not.toContain('group-e2ee')
+    expect(caps.securityProfiles).toContain('group-e2ee')
   })
 })

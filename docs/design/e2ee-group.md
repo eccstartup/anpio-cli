@@ -142,6 +142,64 @@ available ──get 发放──▶ reserved ──对应 add 被 Host 接受─
    的也不会被复活（§13.2 L1610）。
 7. **`params.auth` 既不要求也不禁止。** P5 §7.1 L472 有"未协商扩展时 MUST 缺省"，**P6 §8
    没有这句话**；自造一条禁令会拒掉规范允许的请求。它也不进 SRO 指纹，留下没有安全后果。
+8. **`publish_key_package` 的认证由绑定 proof 承担。** §8.1.2 L706 说 v2 **不要求**为这条
+   方法额外定义业务层 `origin_proof`，L704 把"调用方 MUST 运行在已认证的本域会话或等价
+   hop / service 认证上下文中"交给部署。同域明文没有那一跳时，剩下的就是
+   `did_wba_binding.proof`：§6.4 L443 第 3 项要求它由该设备清单里那条 `signing_key_id`
+   签出，而那颗私钥只有那台设备有。于是"冒名发布"要拿到别人的设备钥才行——这条方法全部的
+   认证就在这里。与 P5 `direct.send` 是**同一处缺口、同一个答案**
+   （[e2ee-direct.md](e2ee-direct.md) §9 第 3 条：只保证资格、不保证来源）。
+
+### 4.2 四条控制方法接线时定下的几处（2026-10-02）
+
+四条控制方法（`create` / `add` / `remove` / `send`）与 §4.1 那两条 Key 方法合起来才是 P6
+的全部。四条落到方法表上时，下面这几处规范没直说、或直说了但落地要选一个做法：
+
+1. **目标建模的两档，`targetScope` 因此不同。** `create` 是 `service-scoped`（§4.4.1
+   L292–293）：它的 `meta.target.did` 是**服务** DID，而幂等键那个元组需要的是它操作的
+   `group_did`——所以 `targetScope` 取 `body.group_did`。`add` / `remove` / `send` 是
+   `group-addressed`（§4.4.2）：`meta.target.did` **就是** `group_did`，`targetScope` 取它。
+   这一档也不进 `checkMethod` 的 group-wide 分支，与两条 Key 方法同形。
+2. **四条都要 `auth.origin_proof`，锚点是 `meta.sender_did`。** §9.2.3 / §9.3.3 / §9.4.3 /
+   §9.5.3 逐字要求它 **MUST** 在场——这是与两条 Key 方法最大的差别（那两条靠 KeyPackage
+   自己的 Object Proof）。它们**不在** `GROUP_ANCHORED` 里，所以 proof 由
+   `meta.sender_did` 的钥签，而不是 §6.2.2 那三种通知的 `body.group_did` 群锚点。因此
+   `send` 的 §13.3 第 6 项（"证明由该设备当前的 P2 签名钥做出"）要靠签名底里的 `keyid`
+   比出来，core 的 `OriginProofOutcome` 为此多回一个 `keyid`。
+3. **同 DID 的 Remove 分支 v1 不做，回 5003 `controller_required`。** §9.4.2 第二条 caller
+   分支（"同一 DID 的另一台已撤销/已失去资格的设备由本 DID 的当前 leaf 移除"）的前置条件是
+   一个**否定**的资格结论，而本服务的资格门禁（`eligibility.ts`）是**肯定**门禁，没有"要求
+   它不合格"的表达；同一句还要 Host 权威验证"发送设备有当前设备管理授权"，而 P2 的清单里
+   没有这个授权概念（只有 `signingAuthorizedBy` / `e2eeAuthorizedBy` 两个关系）。所以 v1
+   只有 owner 分支。这是**收窄**不是放行：一个合规实现不会把该拒的收下，但那条合法路径
+   暂时不可用。
+4. **owner 分支还要一台当前 owner leaf（§13.4 L1640 第 2 项）。** `add` / `remove` 在
+   `requireOwner` 之后追加 `requireCurrentOwnerLeaf`：`meta.sender_device_id` 必须是一台
+   **合格的当前 owner leaf**。授权那一半（DID 是不是 owner）在事务里判，资格那一半（这台
+   设备在不在当前清单里）由 `dispatch` 的设备门禁在事务外判。缺失回 **5013**
+   `leaf_not_current` 而不是 5003——调用方**确实**是 owner，授权成立，错的是它这台设备在这个
+   群里没有当前 leaf，而 5013 正是 §11.9.1 L1306 列的**发送方侧**终态信号，收到它的应该是
+   那台设备自己。副作用：一个还没有任何 MLS 状态的群，owner 发 `add` / `remove` 也从 5004
+   变成 5013（没有 leaf 的群，owner 这台设备当然不是当前 leaf）；§13.4 没有给这几项规定
+   次序，这条读法站得住。
+5. **一次性 nonce 落在 `perform` 内、事务里（§13.6 L1693）。** 那句话要求 Host 受理四条
+   控制方法时施加"完整新鲜度窗口 **+** 一次性 nonce 检查"。时间窗那一半本来就在
+   `auth.ts` 的 `authenticate()` 里跑；nonce 那一半由 `dispatch.ts` 的 `consumeProofNonce()`
+   在 `perform` 内部兑——位置必须在那里，因为"**被拒的请求不该烧掉 nonce**"要靠
+   `perform` 的事务回滚：一个 5003 的拒绝会把这次请求插入的 nonce 一起滚掉，同一 nonce
+   的重试于是仍能成功。
+6. **`send` 刻意不写 `validateBody`，另三条写。** §13.3 L1627 要求第 4/5/6 项（成员 →
+   设备 → leaf）判在策略（7）与载荷（8）之前，而 `group_cipher_object` 正是第 8 项。给
+   `send` 写 `validateBody` 会把载荷形状**提前**到成员判定之前，正好违反那条 MUST 的次序
+   ——所以它只做 §9.5.3 的 `content_type` 检查（那是**请求**自己的形状，先于身份，
+   与 `checkMethod` 里"Profile 规则先于 target 建模"是同一条次序）。`create` / `add` /
+   `remove` 写了，另有原因：`add` 的 `deviceAddressed` 在处理器之前读 `body.member_did`，
+   缺字段会在那里抛 `ConnectxError`（500）而不是一次干净的拒绝。
+7. **控制动作一个计数器都不推，`send` 只推事件序。** §14.1 L1705 逐字说进排序链的只有
+   `send`；L1707 紧接说 `create` / `add` / `remove` **MUST NOT** 独立产生新的 P4
+   `group_state_version`，§9.2.4 连 `group_event_seq` 也一起排除。所以控制动作两个计数器都
+   不动，`send` 只推 `group_event_seq`（与 P4 `group.send` 同级），`group_state_version`
+   原样回给调用方。
 
 ## 5. Host 的公开投影：`(DID, device_id) → leaf`
 
@@ -160,6 +218,15 @@ available ──get 发放──▶ reserved ──对应 add 被 Host 接受─
 
 投影与 `epoch` / `crypto_group_id` 的外层绑定引用（L1371）是同一行的事，它们一起构成
 "这个群现在到哪了"的 Host 侧答案。**权威值仍在客户端**——Host 记的是**最后一次被接受的**。
+所以"群级绑定"不另建一张表：MLS 的 Commit 本来就推进**所有**成员的 epoch，`add` / `remove`
+的 `epoch` 按 §9.3.3 / §9.4.3 是"after this add/remove"，于是把新值写到每一条 active leaf
+上，群级值就是这些行共同说的那句话。`create` 写下的第一行（owner 自己，§9.2.1）就是初始值。
+这带来一条不变量，也是这块唯一的实现约束：
+
+> 同一群的 active leaf 行上，`crypto_group_id` 与 `epoch` 恒等。
+
+`advanceLeaves()` 是**唯一**维护它的地方，`currentBinding()` 是**唯一**读它的地方。
+§13.5 第 5 项（"该群当前没有已被接受的 MLS 初始状态"）于是就是"这个群的 active 投影是空的"。
 
 §14.5 L1737–1743 的分叉检测是 SHOULD：成员观察到多个不可调和的 `crypto_group_id`、
 不一致的 `epoch_authenticator`、或同上下文下不同有效 Commit 时，**SHOULD** 标记
@@ -253,6 +320,12 @@ outbox 按 DID），所以那是两处"到限即弃"，不是一处。
 所以方法表里 `group.e2ee.send` 的 `authCodes` 必须按这个次序表达，而 not_member 的判定
 **不能**先查 leaf 投影。
 
+**一处已知偏离**：`dispatch` 的资格门禁在事务外、处理器之前跑（判资格要解析 DID 文档，
+事务里不能有网络往返），所以"**既**不是成员**又**设备不合格"的请求拿到的是 core 的设备码
+而不是 3000。这不破坏 §13.3 L1625 要的那件事——它要的是三种状态**互不相同**且**次序固定**，
+而第 3 条（DID 仍 `active`、设备仍合格、只有 leaf 被移除）判得分毫不差，5013 是唯一的拉取式
+终态信号。可达的三种状态里被折叠的是"两错叠加"那一种，它本来就不在 L1625 的三条之内。
+
 ## 8. 暂停与串行化：Host 状态机里唯一真状态
 
 §10.5 给 Host 加了一段真正有状态的义务。成员 DID 更新编排期间：
@@ -284,13 +357,21 @@ CREATE TABLE group_did_updates (
 §13.4 L1646 的"拒绝或延后无关的 Add/Remove"落成事务内的一个检查——
 **拒绝**比延后简单，且 L1647 只要求同一 P4 事件的重试有幂等语义。
 
-**新 `group.e2ee.send` 的入口检查多一条**：该群若有未完成的 `group_did_updates` 行，
-`send` 返回 `group.e2ee.state_not_ready`（5004）——§17 L1933 明确说 DID 更新编排
-"状态尚未就绪"时复用这个码，**不新增专属错误码**。
+**新 `group.e2ee.send` 的入口检查多一条**：该群若在编排中间态，`send` 返回
+`group.e2ee.state_not_ready`（5004）——§17 L1933 明确说 DID 更新编排"状态尚未就绪"时复用
+这个码，**不新增专属错误码**。
 
-被撤销单台设备那个例外**不进入这个状态**：§10.4 L1074 说此时 Host **MUST NOT**
-仅因该 leaf 尚未移除就暂停其它合法 `group.e2ee.send`。所以 `group_did_updates` 只由
-**整个 P4 成员**的 DID 更新建立，设备级撤销不建行。
+**落地（2026-10-02）：判据从投影现算，不走 `group_did_updates`。** 投影里有一条 active
+leaf，它的 `member_did` 已经不是 P4 `active` 成员——那正是"整个 P4 成员变 `removed` /
+`left`，而 MLS 那边还没收尾"这句话的可观测形态（`create` / `add` / `remove` 建立 leaf 时
+那个 DID 是 active 的）。`group_did_updates` 的行语义对，但**它今天没有写入者**：编排由
+P4 的 `member-did-updated` 事件触发，而本服务的 P4（C9）没有接受这种事件。表与访问器留着，
+等那条事件存在时再把编排接到 `send` 前面；今天投影现算判的是同一件事，且不需要一行新状态。
+
+**设备级撤销那个例外不进入这个状态**：§10.4 L1074 说此时 Host **MUST NOT** 仅因该 leaf
+尚未移除就暂停其它合法 `group.e2ee.send`。所以暂停态只由**整个 P4 成员**的 DID 更新建立——
+`group_did_updates` 只由那条事件建行，投影现算也只认"DID 已非 active 成员"这一条，单台设备
+被撤销两者都不触发。
 
 ## 9. `group.incoming` 要无损保存一份 proof
 
@@ -393,6 +474,8 @@ Host 无法区分"第一次进群"与"重新加入"（§10.3 L1066 的触发条�
 - **`Update` 作为协议级动作**（§11.11 L1382）、**External Commit**、
   `group_join_info` / `get_join_info` / `accept_welcome`（§3.8 L226–231）。
 - **多控制者**：只有 owner DID 能 `create` / `add` / 通用 `remove`（§16.5 L1895）。
+- **同 DID 的 Remove 分支**（§9.4.2 第二条 caller）：撤销本 DID 自己另一台设备的 leaf。
+  前置是否定资格结论，与肯定资格门禁不合；见 §4.2 第 3 条。走这条分支的请求回 5003。
 - **admin 作为控制者**：admin 的业务动作只改 P4 状态，最终由 owner 落到 MLS（§16.5 L1899）。
 - **任何 P6 历史拉取 / 已读回执 / 设备同步方法**（§12.6 L1523）。
 - **自动 owner MLS 恢复**：§11.12 L1402 要求 fail closed，Host **MUST NOT** 下发

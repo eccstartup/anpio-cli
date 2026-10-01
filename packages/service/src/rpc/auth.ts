@@ -109,9 +109,18 @@ export interface AuthenticateInput {
  *
  * `reason` **不**进线上错误对象（core 的 `verify.ts` 里写了原因：逐条回答"这个 keyid
  * 被授权了吗"就成了 oracle）。它是给本服务运维看的，调用方应该记日志而不是转发。
+ *
+ * `keyid` 是签名底里那个**声明**（A.2 L1018），验签过了才交出来。它比"某个 DID 发来的"
+ * 更细一档：Profile 可以拿它比另一处声明的钥（P6 §13.3 L1626）。是否是 oracle 的顾虑不
+ * 适用于它——它是调用方自己写进 proof 的字符串，而且只有在证明已经成立之后才交回。
+ *
+ * `nonce` 同样原样交回（它是 A.2 L1018 的可选参数）。一次性检查**不能**在这里做：那要兑
+ * 一个键，而"哪一次调用算重放"只有幂等台账知道——§13.6 L1693 给 P6 四条控制方法要的那次
+ * 单次 nonce 检查因此落在 `dispatch.ts` 的 `perform` 里（理由见 `consumeProofNonce`）。
+ * 这里只把调用方写的那个值交出去；`undefined` 表示证明里没有这个参数。
  */
 export type AuthResult =
-  | { ok: true; key: ResolvedIdentityKey }
+  | { ok: true; key: ResolvedIdentityKey; keyid: string; nonce?: string }
   | { ok: false; error: AnpRejection; reason: OriginProofFailure | 'no_anchor' | 'expired' | 'stale' }
 
 /**
@@ -161,7 +170,12 @@ export async function authenticate(input: AuthenticateInput): Promise<AuthResult
     return { ok: false, reason, error: refuse(codes.invalidProof, denial(reason)) }
   }
 
-  return { ok: true, key: outcome.key }
+  return {
+    ok: true,
+    key: outcome.key,
+    keyid: outcome.keyid,
+    ...(outcome.nonce !== undefined ? { nonce: outcome.nonce } : {}),
+  }
 }
 
 function refuse(pair: ProfileCode, message: string): AnpRejection {

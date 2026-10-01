@@ -48,7 +48,7 @@ describe('what counts as a profile of the service', () => {
       'anp.direct.e2ee.v2',
       'anp.group.base.v2',
     ])
-    expect(built.securityProfiles).toEqual(['direct-e2ee', 'transport-protected'])
+    expect(built.securityProfiles).toEqual(['direct-e2ee', 'group-e2ee', 'transport-protected'])
     // §13 L834–838: a client that reads these is deciding what it may send, and an
     // `x_agentx.*` value there would make a spec-only service look like it spoke them.
     for (const profile of [...built.profiles, ...built.securityProfiles]) {

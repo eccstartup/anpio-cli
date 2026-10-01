@@ -69,8 +69,11 @@ export function serviceCapabilities(): ServiceCapabilities {
       ;(extension ? extensionProfiles : profiles).add(profile)
     }
     // 安全模式**不**做同一件事：`transport-protected` 是 P1 的公共值、P7 与 P5 也在用它，
-    // 少列一个只是少说一句真话。而 withheld 的那条 Profile 今天带来的唯一新值
-    // `group-e2ee` 只由 P6 的四条控制方法使用——那四条还没进方法表，所以这里也不会漏报。
+    // 少列一个只是少说一句真话。而 withheld 的那条 Profile 带来的**新**值 `group-e2ee`
+    // 也一样要列：它只由 P6 的四条控制方法使用（§4.3 L273），那四条在方法表里，所以它跟着
+    // 一起出现。扣留的是 Profile 的**名字**（§6.3.1 L430 的 codepoint 还没稳定），不是这个
+    // 服务与客户端之间关于"安全模式叫什么"的约定——安全模式的取值是 P1 §6.2.3 的词表，不是
+    // 那条 Profile 定义的东西。
     for (const security of spec.securityProfiles) securityProfiles.add(security)
     if (extension) extensionMethods.add(spec.name)
   }

@@ -58,7 +58,22 @@ export type OriginProofFailure =
   | 'signature_invalid'
 
 export type OriginProofOutcome =
-  | { ok: true; key: ResolvedIdentityKey; created?: number; expires?: number; nonce?: string }
+  | {
+      ok: true
+      key: ResolvedIdentityKey
+      /** A.2 L1018：签名底里那个 `keyid`，原样交回。
+       *
+       *  调用方已经把它读到手里才能解析钥，但只交回解析结果的话，这个字符串就丢了——
+       *  而 Profile 有可能要拿它比**另一处**声明的钥（P6 §13.3 L1626 要求 `group.e2ee.send`
+       *  的证明由 `meta.sender_device_id` 那台设备**当前的 `signing_key_id`** 做出）。没有
+       *  这个字段，那条 MUST 只能靠重新解析一遍 `signatureInput` 才能判。
+       *
+       *  它是**声明**而不是结论：`key` 才是解析出来的材料。加了它不改变任何验证结果。 */
+      keyid: string
+      created?: number
+      expires?: number
+      nonce?: string
+    }
   | { ok: false; reason: OriginProofFailure; cause?: unknown }
 
 const FAIL = {
@@ -145,6 +160,7 @@ export async function verifyOriginProofDetailed(
   return {
     ok: true,
     key,
+    keyid: parsed.params.keyid,
     ...(typeof parsed.params.created === 'number' ? { created: parsed.params.created } : {}),
     ...(typeof parsed.params.expires === 'number' ? { expires: parsed.params.expires } : {}),
     ...(typeof parsed.params.nonce === 'string' ? { nonce: parsed.params.nonce } : {}),

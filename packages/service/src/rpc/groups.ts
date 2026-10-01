@@ -58,7 +58,9 @@ const EVENT_POLICY_UPDATED = 'group-policy-updated'
 
 /** §7.9 L497–498 的两种回执。 */
 const RECEIPT_OPERATION = 'group-operation-accepted'
-const RECEIPT_MESSAGE = 'group-message-accepted'
+/** §7.9 L500 的第二个取值。导出给 `groupControl.ts`：`group.e2ee.send` 也是一条**消息**
+ *  （§14.1 L1705 把它和 P4 的 `group.send` 放进同一条排序链），回执类型因此相同。 */
+export const RECEIPT_MESSAGE = 'group-message-accepted'
 
 // ---- 错误码 ------------------------------------------------------------------
 
@@ -193,8 +195,14 @@ function mergePatch(
 }
 
 // ---- 成员与授权 --------------------------------------------------------------
+//
+// 这一节里的 `loadGroup` / `activeMemberDids` / `requireActiveMember` / `requirePermission`
+// 导出给 `groupControl.ts`。理由不是"顺手复用"：P6 §13.4 L1640–1643 与 §13.5 L1656 要求
+// 控制方法判"调用方是不是当前 owner / 是不是 P4 `active` 成员"，而**那两句话的权威解释
+// 就在这里**（3000 与 3003 的分工、`active` 是哪个字段）。控制面另写一份，就成了同一个
+// 问题有两份答案，而规范只写了一句。
 
-interface GroupView {
+export interface GroupView {
   groupDid: string
   hostServiceDid: string
   stateVersion: number
@@ -205,7 +213,7 @@ interface GroupView {
   createdAt: string
 }
 
-function loadGroup(storage: Storage, groupDid: string): GroupView {
+export function loadGroup(storage: Storage, groupDid: string): GroupView {
   const row = storage.group(groupDid)
   // 本服务不托管这个 `group_did`，回给调用方的是"你不是该群成员"（3000）。规范没有为
   // "群不存在"配码，而这两种情形对调用方没有分别；更重要的是，后者不会泄露一个私有群
@@ -223,7 +231,7 @@ function loadGroup(storage: Storage, groupDid: string): GroupView {
   }
 }
 
-function activeMemberDids(storage: Storage, groupDid: string): string[] {
+export function activeMemberDids(storage: Storage, groupDid: string): string[] {
   return storage
     .groupMembers(groupDid)
     .filter((member) => member.membershipStatus === 'active')
@@ -237,7 +245,7 @@ function activeMemberDids(storage: Storage, groupDid: string): string[] {
  * （3003）是两种拒绝，而 §8.2.2 L659 又要求私有群的读取者必须有身份。合成一步会让
  * "我不是成员"与"我不够权限"回同一个码，调用方就无从知道该去申请入群还是去要权限。
  */
-function requireActiveMember(storage: Storage, groupDid: string, actorDid: string) {
+export function requireActiveMember(storage: Storage, groupDid: string, actorDid: string) {
   const member = storage.groupMember(groupDid, actorDid)
   if (member === undefined || member.membershipStatus !== 'active') {
     throw refusal(groupError('notMember', `${actorDid} is not an active member of ${groupDid}`))
@@ -246,7 +254,7 @@ function requireActiveMember(storage: Storage, groupDid: string, actorDid: strin
 }
 
 /** §11.3：权限键全部来自 `group_policy.permissions`，没有服务端的隐含规则。 */
-function requirePermission(policy: Record<string, unknown>, memberRole: string, key: PermissionKey): void {
+export function requirePermission(policy: Record<string, unknown>, memberRole: string, key: PermissionKey): void {
   const permissions = policy.permissions
   const required = isPlainObject(permissions) ? permissions[key] : undefined
   if (typeof required !== 'string' || !roleSatisfies(memberRole, required)) {
@@ -309,7 +317,7 @@ function operationIdOf(meta: AnpMeta): string {
 }
 
 /** §7.9 L500–504 的 `group_receipt`，`proof` 缺席的理由见 [groups.md](../docs/design/groups.md) §7。 */
-function groupReceipt(input: {
+export function groupReceipt(input: {
   receiptType: string
   groupDid: string
   stateVersion: number

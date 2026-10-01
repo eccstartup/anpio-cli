@@ -64,9 +64,19 @@ function pair(code: number, anpCode: string): { code: number; anpCode: string } 
 }
 
 /**
- * §17 L1918–1931 里**这两条方法会发**的三个，加 `key_package_consumed`——末一个由
- * `group.e2ee.add` 那条路发，定义放在这里是因为"这枚已经用过了"这件事属于柜子，不属于
- * 某一处调用点。
+ * §17 L1918–1931 的**一整张表**，5000–5013。
+ *
+ * 一张表而不是按方法分两张：§17 是一张表，而"某个码归哪条方法发"是会变的事——`5012`
+ * 就是例子，它由 `group.e2ee.add` 那条路发，但"这枚已经用过了"这件事属于柜子，不属于
+ * 某一处调用点。分表之后同一段码会有两处定义，而两处一旦对不上，表现只是"某个码回得
+ * 不对"，很难查。
+ *
+ * 今天发的：5000 / 5001 / 5002 / 5012（§8 两条 Key 方法），以及 5003–5009 与 5013
+ * （§9 四条控制方法，`groupControl.ts`）。**5010 `fork_suspected` 与 5011
+ * `notice_type_unsupported` 没有产生路径**：前者是 §14.5 L1737 那条 SHOULD 的成员侧
+ * 判断，本服务不是成员；后者属于 `group.e2ee.notice` 的接收侧，而 v1 还不发通知
+ * （[e2ee-group.md](../../../docs/design/e2ee-group.md) §12）。列在这里是**故意的**——
+ * 它们是 §17 这张表的成员，少一行会让"哪些码已经被实现"变成一个要靠 grep 才知道的问题。
  *
  * 走 `profileRejection` 而不是 `anpRejection`：这一段不在 P1 的公共表里，码值也不在
  * 1000–1021 之间。
@@ -75,7 +85,17 @@ const GROUP_E2EE_ERRORS = {
   keyPackageNotFound: pair(5000, 'anp.group.e2ee.key_package_not_found'),
   invalidKeyPackage: pair(5001, 'anp.group.e2ee.invalid_key_package'),
   didBindingInvalid: pair(5002, 'anp.group.e2ee.did_binding_invalid'),
+  controllerRequired: pair(5003, 'anp.group.e2ee.controller_required'),
+  stateNotReady: pair(5004, 'anp.group.e2ee.state_not_ready'),
+  epochConflict: pair(5005, 'anp.group.e2ee.epoch_conflict'),
+  cryptoGroupMismatch: pair(5006, 'anp.group.e2ee.crypto_group_mismatch'),
+  privateMessageInvalid: pair(5007, 'anp.group.e2ee.private_message_invalid'),
+  commitInvalid: pair(5008, 'anp.group.e2ee.commit_invalid'),
+  welcomeInvalid: pair(5009, 'anp.group.e2ee.welcome_invalid'),
+  forkSuspected: pair(5010, 'anp.group.e2ee.fork_suspected'),
+  noticeTypeUnsupported: pair(5011, 'anp.group.e2ee.notice_type_unsupported'),
   keyPackageConsumed: pair(5012, 'anp.group.e2ee.key_package_consumed'),
+  leafNotCurrent: pair(5013, 'anp.group.e2ee.leaf_not_current'),
 } as const
 
 export type GroupE2eeErrorName = keyof typeof GROUP_E2EE_ERRORS
@@ -96,13 +116,15 @@ function shapeProblem(message: string): AnpRejection {
 
 // ---- 小工具 ------------------------------------------------------------------
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
+/** 导出给 `groupControl.ts`：两个文件同属 P6，`params` 与正文里的对象用的是同一套判断。 */
+export function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 /** §7.3 L550–556 要的都是"存在"，但空串能通过一个 `!== undefined` 的判断，而一个空的
- *  `key_package_id` 说明不了任何事（与 P5 那份同一个理由）。 */
-function nonEmptyString(value: unknown): value is string {
+ *  `key_package_id` 说明不了任何事（与 P5 那份同一个理由）。同 {@link isPlainObject}，
+ *  导出给控制面那一半用。 */
+export function nonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value !== ''
 }
 
@@ -158,34 +180,44 @@ const BINDING_FIELDS = [
  * 不在这里判的：`did_wba_binding` 的 proof 算不算数（要 issuer 文档，见 `bindingProblem`），
  * 以及 `owner_*` 与调用方对不对得上（那是"与另一处的比对"，5002）。`expires_at` 也不判
  * ——§7.3 L555 给的是 SHOULD，缺了它这份 KeyPackage 仍然合法，只是没有有效期可比。
+ *
+ * 导出给 `groupControl.ts`：`group.e2ee.add` 的 `group_key_package`（§9.3.3）与
+ * `group.e2ee.create` 的 `creator_key_package`（§9.2.3）都指向 §7.3 这同一个定义，
+ * 所以形状规则只能有一份。
+ *
+ * `field` 是这个对象在**外层正文里**叫什么：P6 的两条 Key 方法叫 `group_key_package`，
+ * §9.2 的 `create` 叫 `creator_key_package`。名字只进错误消息——判据是同一套。
  */
-function keyPackageShapeProblem(keyPackage: Record<string, unknown>): AnpRejection | undefined {
-  for (const field of KEY_PACKAGE_FIELDS) {
-    if (!nonEmptyString(keyPackage[field])) {
-      return groupE2eeError('invalidKeyPackage', `group_key_package.${field} MUST be a non-empty string`)
+export function keyPackageShapeProblem(
+  keyPackage: Record<string, unknown>,
+  field = 'group_key_package',
+): AnpRejection | undefined {
+  for (const key of KEY_PACKAGE_FIELDS) {
+    if (!nonEmptyString(keyPackage[key])) {
+      return groupE2eeError('invalidKeyPackage', `${field}.${key} MUST be a non-empty string`)
     }
   }
   const binding = keyPackage.did_wba_binding
   if (!isPlainObject(binding)) {
-    return groupE2eeError('invalidKeyPackage', 'group_key_package.did_wba_binding MUST be an object')
+    return groupE2eeError('invalidKeyPackage', `${field}.did_wba_binding MUST be an object`)
   }
-  for (const field of BINDING_FIELDS) {
-    if (!nonEmptyString(binding[field])) {
-      return groupE2eeError('invalidKeyPackage', `group_key_package.did_wba_binding.${field} MUST be a non-empty string`)
+  for (const key of BINDING_FIELDS) {
+    if (!nonEmptyString(binding[key])) {
+      return groupE2eeError('invalidKeyPackage', `${field}.did_wba_binding.${key} MUST be a non-empty string`)
     }
   }
   // §6.4 L445 第 4 项：`proof` **MUST** 存在。它算不算数由 `bindingProblem` 判——那要
   // issuer 文档，是这一层的下一步，而不是形状。
   if (!isPlainObject(binding.proof)) {
-    return groupE2eeError('invalidKeyPackage', 'group_key_package.did_wba_binding.proof MUST be an object')
+    return groupE2eeError('invalidKeyPackage', `${field}.did_wba_binding.proof MUST be an object`)
   }
   // §7.3 L557：`owner_did` / `owner_device_id` **MUST** 等于绑定里的 `agent_did` / `device_id`。
   // 两者不一致是这份材料**自身**的两个说法互相矛盾，与本服务、与调用方都无关，所以是 5001。
   if (keyPackage.owner_did !== binding.agent_did) {
-    return groupE2eeError('invalidKeyPackage', 'group_key_package.owner_did MUST equal did_wba_binding.agent_did')
+    return groupE2eeError('invalidKeyPackage', `${field}.owner_did MUST equal did_wba_binding.agent_did`)
   }
   if (keyPackage.owner_device_id !== binding.device_id) {
-    return groupE2eeError('invalidKeyPackage', 'group_key_package.owner_device_id MUST equal did_wba_binding.device_id')
+    return groupE2eeError('invalidKeyPackage', `${field}.owner_device_id MUST equal did_wba_binding.device_id`)
   }
   return undefined
 }
@@ -200,14 +232,15 @@ function keyPackageShapeProblem(keyPackage: Record<string, unknown>): AnpRejecti
  * 码取 **5002**，与发布侧那几处比对取同一个：两处错的都是"这份材料与那台设备的当前清单
  * 对不上"，不是清单本身有问题（那是资格门禁那四个 Core 码的事）。
  */
-function bindingProblem(
+export function bindingProblem(
   keyPackage: Record<string, unknown>,
   ownerDid: string,
   device: EligibleDevice,
+  field = 'group_key_package',
 ): AnpRejection | undefined {
   const binding = keyPackage.did_wba_binding
   if (!isPlainObject(binding)) {
-    return groupE2eeError('invalidKeyPackage', 'group_key_package.did_wba_binding MUST be an object')
+    return groupE2eeError('invalidKeyPackage', `${field}.did_wba_binding MUST be an object`)
   }
   // §6.4 L445 第 5 项把"proof 的 issuer DID 等于 agent_did"与"proof 验证通过"合成一步。
   // 附录 B 的入口收的 `issuerDid` 就是那个 issuer，所以传 `ownerDid`（= agent_did，由形状
@@ -221,7 +254,7 @@ function bindingProblem(
   if (!proof.ok) {
     return groupE2eeError(
       'didBindingInvalid',
-      `group_key_package.did_wba_binding does not verify against ${ownerDid}#${device.entry.deviceId}'s current signing_key_id ${device.entry.signingKeyId} (${proof.reason})`,
+      `${field}.did_wba_binding does not verify against ${ownerDid}#${device.entry.deviceId}'s current signing_key_id ${device.entry.signingKeyId} (${proof.reason})`,
       { key_package_id: keyPackage.key_package_id },
     )
   }
@@ -302,17 +335,22 @@ export interface GroupE2eeKeyContext {
 
 /** §8.1.2 L696 / §8.2.2 L732：`meta.target.did` **MUST** 等于本服务的 `serviceDid`。
  *  `targetBindingHolds` 只判 `kind`（`methods.ts`），所以这一条由处理器自己判，与
- *  `keys.ts` / `attachments.ts` 同一处理。 */
-function requireServiceTarget(ctx: GroupE2eeKeyContext): void {
+ *  `keys.ts` / `attachments.ts` 同一处理。
+ *
+ *  导出给 `groupControl.ts`：§4.4.1 L292–293 对 `group.e2ee.create` 是同一条要求（那一条
+ *  刻意把 `create` 定成 service-scoped，而不是 group-addressed）。 */
+export function requireServiceTarget(ctx: GroupE2eeKeyContext): void {
   if (ctx.meta.target?.did !== ctx.serviceDid) {
-    throw refusal(anpRejection('anp.invalid_target_binding', `P6 key methods MUST target ${ctx.serviceDid}`))
+    throw refusal(anpRejection('anp.invalid_target_binding', `P6 methods MUST target ${ctx.serviceDid}`))
   }
 }
 
 /** `sender_did` / `sender_device_id` 由方法表的 `requiredMeta` 保证（§4.3 L266 要求每个设备
  *  发起的 P6 请求都带后者），缺一个都进不来。抛而不是兜空串：空串会算出一个谁也不会再命中
- *  的身份。 */
-function senderOf(meta: AnpMeta): string {
+ *  的身份。
+ *
+ *  与下面两个一起导出给 `groupControl.ts`——那四条控制方法同样要"调用方是谁"这一个答法。 */
+export function senderOf(meta: AnpMeta): string {
   const did = meta.sender_did
   if (!nonEmptyString(did)) {
     throw new Error(`${GROUP_E2EE_PROFILE} requires meta.sender_did`)
@@ -320,7 +358,7 @@ function senderOf(meta: AnpMeta): string {
   return did
 }
 
-function senderDeviceOf(meta: AnpMeta): string {
+export function senderDeviceOf(meta: AnpMeta): string {
   const deviceId = meta.sender_device_id
   if (!nonEmptyString(deviceId)) {
     throw new Error(`${GROUP_E2EE_PROFILE} requires meta.sender_device_id`)
@@ -328,7 +366,7 @@ function senderDeviceOf(meta: AnpMeta): string {
   return deviceId
 }
 
-function device(ctx: GroupE2eeKeyContext, index: number, what: string): EligibleDevice {
+export function device(ctx: GroupE2eeKeyContext, index: number, what: string): EligibleDevice {
   const found = ctx.devices[index]
   if (found === undefined) {
     throw new Error(`${GROUP_E2EE_PROFILE}: ${what} device was not resolved before the transaction`)
@@ -347,7 +385,7 @@ function device(ctx: GroupE2eeKeyContext, index: number, what: string): Eligible
  * 上下文中"交给部署。同域明文没有那一跳时，剩下的就是 `did_wba_binding.proof`：§6.4 L443
  * 第 3 项要求它由该设备清单里那条 `signing_key_id` 签出，而那颗私钥只有那台设备有。于是
  * "冒名发布"要拿到别人的设备钥才行——这条方法全部的认证就在这里
- * （[e2ee-group.md](../../../docs/design/e2ee-group.md) §15 与 P5 那条同源）。
+ * （[e2ee-group.md](../../../docs/design/e2ee-group.md) §4.1 第 8 条与 P5 那条同源）。
  *
  * **与 P5 的一处不同**：这里没有"`key_package_id` 不可重定义"那条检查。§8.1.2 没有这句，
  * 而 §13.2 那类重定义检查归**接收方**（最终用这份材料入群的那个 MLS runtime）。本服务的

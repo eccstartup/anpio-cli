@@ -41,6 +41,16 @@ import {
   validateGetKeyPackageBody,
   validatePublishKeyPackageBody,
 } from './groupE2ee'
+import {
+  GROUP_E2EE_ADD,
+  GROUP_E2EE_CREATE,
+  GROUP_E2EE_REMOVE,
+  GROUP_E2EE_SECURITY_PROFILE,
+  GROUP_E2EE_SEND,
+  validateAddE2eeBody,
+  validateCreateE2eeBody,
+  validateRemoveE2eeBody,
+} from './groupControl'
 import type { DeviceAddressed, DevicePair } from './eligibility'
 import {
   ATTACHMENT_ABORT_OBJECT,
@@ -718,6 +728,123 @@ const GET_KEY_PACKAGE_SPEC = groupE2eeKeySpec({
   targetScope: (meta, body) => `${serviceTargetDid(meta, GET_KEY_PACKAGE)}/${bodyString(body, 'target_did')}`,
 })
 
+/**
+ * P6 的四条控制面方法（§9，C13）。
+ *
+ * 与上面那一对是两个不同的位置：Profile 相同（§4.3 L264 要求 P6 请求的 `meta.profile`
+ * **MUST** 是 `anp.group.e2ee.v2`），但安全模式是 `group-e2ee`（§4.3 L273），而且**四条都
+ * 要 `auth.origin_proof`**（§9.2.3 / §9.3.3 / §9.4.3 / §9.5.3 逐字 "MUST exist"）。
+ *
+ * 认证失败回 P1 的公共码 1005：§17 L1930 逐字要求这类失败复用 P1 Core 的错误，P6 自己不
+ * 定义第二套认证码段（5000–5013 里没有一条说"你没通过认证"）。
+ *
+ * 目标建模分两档，不是随手挑的：§4.4.1 L292–293 把 `create` 定成 **service-scoped**（那时
+ * 群还没有密码学状态，`meta.target` 指向服务），§4.4.2 把另外三条定成 **group-addressed**
+ * （`meta.target.did` 就是 `group_did`）。
+ *
+ * `deviceAddressed` 四条都有，但配的对数不同：`create` / `remove` / `send` 只点调用方自己
+ * 一台（`devices[0]`），`add` 点两台——第二台是正文里那个被加入的设备（§13.4 第 5 项要判
+ * 它"该不该是 leaf"，而资格门禁正好是判"这台设备此刻算不算数"的那一处）。
+ *
+ * **没有 `recheckOnReplay`**：§13.4 L1647 逐字要求 Add / Remove 的重试有幂等语义，§9.1 L630
+ * 要求重试拿到同一个结果——而资格是**当下**的事实。重放时重判会让一台后来失去资格的调用方
+ * 设备把一次早已受理的操作变成错误。这与 `get_prekey_bundle` 那一档正好相反（那里交回的是
+ * 密钥材料，§7.2 L578 要求在**返回前**重验）。
+ */
+interface GroupControlSpecInput {
+  name: string
+  targetMode: 'service-scoped' | 'group-addressed'
+  requiredMeta: readonly MetaField[]
+  /** `send` 不给：它唯一那条正文要求属于 §13.3 的第 8 项，必须排在成员判定之后。
+   *  理由写在 `groupControl.ts` 的正文校验一节。 */
+  validateBody?: (body: Record<string, unknown>, meta: AnpMeta) => AnpRejection | undefined
+  deviceAddressed: (meta: AnpMeta, body: Record<string, unknown>) => DeviceAddressed
+  targetScope: (meta: AnpMeta, body: Record<string, unknown>) => string
+}
+
+function groupControlSpec(input: GroupControlSpecInput): MethodSpec {
+  return {
+    name: input.name,
+    targetMode: input.targetMode,
+    profiles: [GROUP_E2EE_PROFILE],
+    securityProfiles: [GROUP_E2EE_SECURITY_PROFILE],
+    requiredMeta: input.requiredMeta,
+    // §4.3 L266 要求每个设备发起的 P6 请求带 `sender_device_id`，规范没有禁止任何 `meta`
+    // 字段——自造一条禁令会拒掉规范允许的请求（与上面两条 Key 方法同一条理由）。
+    forbiddenMeta: [],
+    requiresOriginProof: () => true,
+    authCodes: P1_AUTH_CODES,
+    ...(input.validateBody !== undefined ? { validateBody: input.validateBody } : {}),
+    deviceAddressed: (meta, body) => input.deviceAddressed(meta, body),
+    targetScope: (meta, body) => input.targetScope(meta, body),
+  }
+}
+
+const GROUP_E2EE_CREATE_SPEC = groupControlSpec({
+  name: GROUP_E2EE_CREATE,
+  targetMode: 'service-scoped',
+  requiredMeta: ['sender_did', 'sender_device_id', 'operation_id'],
+  validateBody: (body) => validateCreateE2eeBody(body),
+  // §13.5 第 2 项：点名的设备是**owner 自己那一台**（§9.2.1 让 owner 成为初始成员）。
+  deviceAddressed: (meta) => ({
+    pairs: [senderPair(meta, GROUP_E2EE_CREATE)],
+    requirement: GROUP_E2EE_DEVICE,
+  }),
+  // 幂等作用域取**正文里的** `group_did`，不是 `meta.target.did`（那是本服务的 DID）。
+  // P6 没有给这一族的 `target_scope` 定字面值（§14.1 只说这三条控制动作不自己产生 P4 的
+  // `group_state_version`），所以取"这次操作是关于谁的"：对 `create` 来说那个群在正文里。
+  // 取服务 DID 会让同一个发送方在两个群上的两次创建共用一段作用域——`operation_id` 撞上就
+  // 是一条 1008，而它们本是两件事。另外三条的群在 `meta.target.did`，于是四条合起来是同一
+  // 条不变量:**一次 P6 操作的幂等作用域就是它所针对的那个群**。
+  targetScope: (_meta, body) => bodyString(body, 'group_did'),
+})
+
+const GROUP_E2EE_ADD_SPEC = groupControlSpec({
+  name: GROUP_E2EE_ADD,
+  targetMode: 'group-addressed',
+  requiredMeta: ['sender_did', 'sender_device_id', 'operation_id'],
+  validateBody: validateAddE2eeBody,
+  // 两台：调用方（owner 自己）与被加入的那台。顺序与 `groupControl.ts` 的读法一致
+  // （`device(ctx, 0)` 是 owner，`device(ctx, 1)` 是 `body.member_*`）。
+  deviceAddressed: (meta, body) => ({
+    pairs: [
+      senderPair(meta, GROUP_E2EE_ADD),
+      { identity: bodyString(body, 'member_did'), deviceId: bodyString(body, 'member_device_id') },
+    ],
+    requirement: GROUP_E2EE_DEVICE,
+  }),
+  targetScope: groupScope,
+})
+
+const GROUP_E2EE_REMOVE_SPEC = groupControlSpec({
+  name: GROUP_E2EE_REMOVE,
+  targetMode: 'group-addressed',
+  requiredMeta: ['sender_did', 'sender_device_id', 'operation_id'],
+  validateBody: validateRemoveE2eeBody,
+  // **只有一台**：`remove` 的被移除设备不需要是合格设备（§9.4.3 那条"失去资格或被策略移掉
+  // 的那一台"正是要移除它的理由），把它也点名会让一次合法的移除因为目标设备不合格而被
+  // 1017 拒掉。判它在不在投影里的是处理器（5004 / 5013）。
+  deviceAddressed: (meta) => ({
+    pairs: [senderPair(meta, GROUP_E2EE_REMOVE)],
+    requirement: GROUP_E2EE_DEVICE,
+  }),
+  targetScope: groupScope,
+})
+
+const GROUP_E2EE_SEND_SPEC = groupControlSpec({
+  name: GROUP_E2EE_SEND,
+  targetMode: 'group-addressed',
+  // §9.5.3：`message_id` / `content_type` 与 P4 的 `group.send` 同样必带——前者是 §10.3 的
+  // 消息级识别三元组里那一段，后者**固定**为 `application/anp-group-cipher+json`（那个值判
+  // 在处理器里，因为它是"值对不对"而 `requiredMeta` 只管"在不在"）。
+  requiredMeta: ['sender_did', 'sender_device_id', 'operation_id', 'message_id', 'content_type'],
+  deviceAddressed: (meta) => ({
+    pairs: [senderPair(meta, GROUP_E2EE_SEND)],
+    requirement: GROUP_E2EE_DEVICE,
+  }),
+  targetScope: groupScope,
+})
+
 /** `POST /anp-im/rpc` 认得的方法。两个传输方法**不在其中**——理由写在 `stream.ts`。 */
 const METHODS: readonly MethodSpec[] = [
   GET_CAPABILITIES_SPEC,
@@ -726,6 +853,10 @@ const METHODS: readonly MethodSpec[] = [
   GET_PREKEY_BUNDLE_SPEC,
   PUBLISH_KEY_PACKAGE_SPEC,
   GET_KEY_PACKAGE_SPEC,
+  GROUP_E2EE_CREATE_SPEC,
+  GROUP_E2EE_ADD_SPEC,
+  GROUP_E2EE_REMOVE_SPEC,
+  GROUP_E2EE_SEND_SPEC,
   GROUP_CREATE_SPEC,
   GROUP_GET_INFO_SPEC,
   GROUP_JOIN_SPEC,

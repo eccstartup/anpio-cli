@@ -13,7 +13,7 @@ describe('serviceCapabilities', () => {
       'anp.direct.e2ee.v2',
       'anp.group.base.v2',
     ])
-    expect(capabilities.securityProfiles).toEqual(['direct-e2ee', 'transport-protected'])
+    expect(capabilities.securityProfiles).toEqual(['direct-e2ee', 'group-e2ee', 'transport-protected'])
     expect(capabilities.extensionProfiles).toEqual(['x_agentx.inbox.v1', 'x_agentx.stream.v1'])
     expect(capabilities.extensionMethods).toEqual([
       'inbox.get',
@@ -83,7 +83,7 @@ describe('capabilitiesResult', () => {
         'anp.direct.e2ee.v2',
         'anp.group.base.v2',
       ],
-      supported_security_profiles: ['direct-e2ee', 'transport-protected'],
+      supported_security_profiles: ['direct-e2ee', 'group-e2ee', 'transport-protected'],
       limits: { max_request_bytes: '2048', max_message_bytes: '2048' },
       supported_content_types: [
         'text/plain',

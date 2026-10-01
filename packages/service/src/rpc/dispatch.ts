@@ -17,6 +17,7 @@ import {
   idempotencyKey,
   idempotencyScopeFromMeta,
   JSON_RPC_ERROR,
+  profileRejection,
   rpcRejection,
   signedRequestObject,
   type AnpLoginFailure,
@@ -51,11 +52,22 @@ import {
   type KeyContext,
 } from './keys'
 import { GET_KEY_PACKAGE, PUBLISH_KEY_PACKAGE, getKeyPackage, publishKeyPackage } from './groupE2ee'
+import {
+  GROUP_E2EE_ADD,
+  GROUP_E2EE_CREATE,
+  GROUP_E2EE_REMOVE,
+  GROUP_E2EE_SEND,
+  addE2eeMember,
+  createE2eeGroup,
+  removeE2eeMember,
+  sendE2eeMessage,
+  type GroupControlContext,
+} from './groupControl'
 import { callerKeyOf, createRateLimiter } from './rateLimit'
 import { GROUP_HANDLERS } from './groups'
 import { ATTACHMENT_HANDLERS } from './attachments'
 import type { ObjectStore } from '../objects'
-import { AnpRefusal } from './refusal'
+import { AnpRefusal, refusal } from './refusal'
 import { INBOX_GET, INBOX_MARK_READ, MESSAGE_GET_BATCH, SYNC_DELTA, markRead, readBatch, readDelta, readInbox } from './inbox'
 import { errorResponse, failureId, noResponse, parseRequestText, successResponse } from './envelope'
 
@@ -159,6 +171,21 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
      * 同键时根本不调 `perform`，所以两条 Key 方法的处理器可以当它一定填满。
      */
     devices: readonly EligibleDevice[]
+    /**
+     * proof 里声明的 keyid（A.2 L1018）。只有要求 `origin_proof` 的方法有值。
+     *
+     * 与 `devices` 并列而不是塞进 `meta`：它是**外层认证的产物**，不是请求方写的字段——
+     * 请求方写的那个是一整串 `signatureInput`，解析它归 core 的验签。
+     */
+    proofKeyId?: string
+    /**
+     * proof 里声明的 `nonce`（A.2 L1018）。只有要求 `origin_proof` 的方法有值，且证明里
+     * 没写这个参数时它就是 `undefined`。
+     *
+     * 与 `proofKeyId` 同一个来路，但**用途不同**：它不进任何 handler，只由
+     * `consumeProofNonce()` 兑掉一次。见那个函数与 `auth.ts` 的 `AuthResult`。
+     */
+    proofNonce?: string
   }
 
   /**
@@ -198,6 +225,17 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
         return publishKeyPackage(keyContext(input))
       case GET_KEY_PACKAGE:
         return getKeyPackage(keyContext(input))
+      // P6 §9 的四条控制面方法（C13）。与上面那一对是**两条不同的路**：这几条要
+      // `auth.origin_proof`（§9.2.3 等逐字），所以上下文里多两样东西——proof 的 `keyid`
+      // 与 `nonce`，都是 `authenticate()` 的产物。`devices[0]` 同样是调用方自己。
+      case GROUP_E2EE_CREATE:
+        return createE2eeGroup(controlContext(spec, input))
+      case GROUP_E2EE_ADD:
+        return addE2eeMember(controlContext(spec, input))
+      case GROUP_E2EE_REMOVE:
+        return removeE2eeMember(controlContext(spec, input))
+      case GROUP_E2EE_SEND:
+        return sendE2eeMessage(controlContext(spec, input))
       case INBOX_GET:
         return readInbox(deps.storage, meta, body)
       case MESSAGE_GET_BATCH:
@@ -265,6 +303,64 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
   }
 
   /**
+   * 一次 P6 控制调用要的上下文（§9 的四条）。
+   *
+   * 与 {@link keyContext} 分开写而不是合一个：两条 Key 方法**不要** `origin_proof`
+   * （§8.1.2 L706），它们没有 proof 的 `keyid` / `nonce` 可给，而这一族要。两处合的代价是
+   * 每个字段都要配一句"哪几条方法有它"，那正是最容易在下一次改动里漂掉的东西。
+   */
+  function controlContext(spec: MethodSpec, input: PerformInput): GroupControlContext {
+    consumeProofNonce(spec, input)
+    return {
+      storage: deps.storage,
+      serviceDid: deps.config.serviceDid,
+      meta: input.params.meta,
+      body: input.params.body,
+      acceptedAt: input.acceptedAt,
+      requestDigest: input.requestDigest,
+      devices: input.devices,
+      ...(input.proofKeyId !== undefined ? { proofKeyId: input.proofKeyId } : {}),
+    }
+  }
+
+  /**
+   * §13.6 L1693 逐字：Host **MUST** 在受理 `group.e2ee.create` / `add` / `remove` / `send`
+   * 时施加"完整新鲜度窗口 **+** 一次性 nonce 检查"。
+   *
+   * 时间窗那一半已经由 `authenticate()` 判过（`created` / `expires`，core 的
+   * `originProofFreshness`）；这里补 nonce 那一半——`http_nonces` 表按 `(keyid, nonce)`
+   * 建键，两小时出清（`federation/nonces.ts` 上写了为什么是这一对而不是裸 nonce）。
+   *
+   * ## 位置：`perform` 里，不是 `authenticate()` 之后
+   *
+   * 三件事要同时成立，只有这一个位置能让它们都成立：
+   *
+   *   - §9.1 L630 要求重试拿到**同一个结果**。重试命中幂等记录时 `acceptOperation()` 根本
+   *     不调 `perform`，也就碰不到这个 nonce——放在外面的话，一次合法的重试会被自己那份
+   *     证明里的 nonce 拒掉，而那正好是"重放得到同一结果"要保住的东西。
+   *   - 被拒的调用**不烧掉** nonce。兑 nonce 那句 INSERT 与处理器的写、幂等记录在同一个
+   *     事务里，处理器抛错即整体回滚——调用方改掉正文重签一份就能再来。
+   *   - 并发的两份同一 nonce 由 `BEGIN IMMEDIATE` 串行化，第二份撞主键、`changes` 为 0。
+   *
+   * 证明里没有 `nonce` 时什么也不判：§13.6 那句说的是对新鲜度参数"such as `created`,
+   * `expires`, and `nonce`"施加检查，而 A.2 L1018 让 nonce 是可选参数。没有可兑的值，就
+   * 不自造一条拒绝理由——`created` / `expires` 那一半照旧生效。
+   *
+   * 码取方法表给这一族的那一对 `invalidProof`（P1 的 1005）：§17 那一段（5000–5013）没有
+   * 一条说"这个证明不能再用了"，而 §17 L1930 逐字要求这类失败复用 P1 Core 的码。
+   */
+  function consumeProofNonce(spec: MethodSpec, input: PerformInput): void {
+    const nonce = input.proofNonce
+    const keyid = input.proofKeyId
+    if (nonce === undefined || keyid === undefined) return
+    if (nonceStore.consume(keyid, nonce)) return
+    const codes = spec.authCodes.invalidProof
+    throw refusal(
+      profileRejection(codes.code, codes.anpCode, 'this origin proof nonce has already been used'),
+    )
+  }
+
+  /**
    * 走完整条受理路径。
    *
    * 每一层的失败都就地回一份响应，不是叠一个异常再在最外面翻译——响应要带上它自己那层
@@ -316,6 +412,14 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
       if (outer.kind === 'verified') authenticatedCaller = outer.serviceDid
     }
 
+    // A.2 L1018 那个 keyid，验签过了才有值。P6 §13.3 L1626 要拿它比
+    // `meta.sender_device_id` 那台设备当前的 `signing_key_id`——比"某个 DID 发的"细一档，
+    // 所以只有那一条路用它（`groupControl.ts`）。见 `AuthResult.keyid`。
+    let proofKeyId: string | undefined
+    // A.2 L1018 那个 nonce，同样只有验签过了才有值。P6 §13.6 L1693 要的一次性检查在
+    // `consumeProofNonce()` 里兑，**位置在 `perform` 之内**（那个函数上写了理由）。
+    let proofNonce: string | undefined
+
     // 通知不答（§5.3 L162、§5.6 L201）。用 `'id' in` 而不是 core 的 `isNotification`：
     // 理由写在 `envelope.ts` 里（联合会被守卫收成 `never`）。
     if (!('id' in envelope)) return noResponse()
@@ -359,6 +463,8 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
         log(`anp: ${spec.name} not authenticated (${outcome.reason})`)
         return errorResponse(envelope.id, outcome.error)
       }
+      proofKeyId = outcome.keyid
+      proofNonce = outcome.nonce
     }
 
     try {
@@ -393,7 +499,15 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
       if (spec.targetScope === undefined) {
         return successResponse(
           envelope.id,
-          perform(spec, { params: envelope.params, acceptedAt, pending, requestDigest, devices }),
+          perform(spec, {
+            params: envelope.params,
+            acceptedAt,
+            pending,
+            requestDigest,
+            devices,
+            ...(proofKeyId !== undefined ? { proofKeyId } : {}),
+            ...(proofNonce !== undefined ? { proofNonce } : {}),
+          }),
         )
       }
 
@@ -445,6 +559,8 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
             requestDigest,
             ...(forwarded !== undefined ? { relayed: forwarded } : {}),
             devices,
+            ...(proofKeyId !== undefined ? { proofKeyId } : {}),
+            ...(proofNonce !== undefined ? { proofNonce } : {}),
           }),
       })
 

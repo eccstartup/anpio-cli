@@ -1102,7 +1102,7 @@ describe('capability discovery (P1 §8.2)', () => {
         'anp.direct.e2ee.v2',
         'anp.group.base.v2',
       ],
-      supported_security_profiles: ['direct-e2ee', 'transport-protected'],
+      supported_security_profiles: ['direct-e2ee', 'group-e2ee', 'transport-protected'],
     })
   })
 
