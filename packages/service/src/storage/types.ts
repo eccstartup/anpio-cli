@@ -21,7 +21,7 @@
  * scope has exactly ONE definition, in core, shared with the sender that retries.
  *
  * `fingerprint` is what tells a replay from a conflict: same key, different fingerprint is
- * `anp.idempotency_conflict` (§9.1 L631–634).
+ * `anp.idempotency_conflict` (§9.1 L630–631).
  */
 export interface IdempotencyRow {
   key: string
