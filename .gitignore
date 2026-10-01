@@ -1,0 +1,11 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+# AgentXAgent 运行时产物
+*.db
+*.db-wal
+*.db-shm
+objects/
+
+.DS_Store
