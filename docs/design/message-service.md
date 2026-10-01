@@ -207,6 +207,9 @@ Postgres 的事等真需要多实例时再说，现在不做抽象层之上的�
 `group-profile-updated` / `group-policy-updated`）。
 `group.member_did_update` **不是** JSON-RPC 方法，被调用时返 `-32601`。
 
+背后的 Group Host 语义（两个单调量各由什么推进、`group_did` 的形状、成员状态机、权限判定、
+群消息如何落进收件箱、回执为什么在 v1 里没有签名）单开一份 [groups.md](groups.md)。
+
 ### P5 私聊 E2EE — `anp.direct.e2ee.v2`
 
 | 方法 | 说明 |
@@ -404,16 +407,18 @@ CREATE TABLE delivery_cursor (
   PRIMARY KEY (owner_did, device_id)
 );
 
--- 群：Host 维护线性顺序，两个单调量都在这
+-- 群：Host 维护线性顺序，两个单调量都在这（谁推进谁见 groups.md §1）
 CREATE TABLE groups (
   group_did TEXT PRIMARY KEY, host_service_did TEXT NOT NULL,
   group_state_version INTEGER NOT NULL, group_event_seq INTEGER NOT NULL,
   group_profile_json TEXT NOT NULL, group_policy_json TEXT NOT NULL,
   created_at TEXT NOT NULL, creator_did TEXT NOT NULL
 );
+-- joined_at / added_by 是 P4 §7.2 L379–380 的 `group_member` 字段，v3 随 C9 补上
 CREATE TABLE group_members (
-  group_did TEXT NOT NULL, member_did TEXT NOT NULL, role TEXT,
+  group_did TEXT NOT NULL, member_did TEXT NOT NULL, role TEXT NOT NULL,
   membership_status TEXT NOT NULL, state_version INTEGER NOT NULL,
+  joined_at TEXT, added_by TEXT,
   PRIMARY KEY (group_did, member_did)
 );
 CREATE TABLE group_events (          -- group.state_changed 的可重放来源
@@ -458,7 +463,9 @@ CREATE TABLE outbox (
 ```
 
 **版本**：版本号记在 SQLite 自己的 `user_version` 上（`SCHEMA_VERSION`），**比本构建新
-的文件直接拒开**——本构建会读到它认识的表、静默忽略新版本依赖的列。上表是 v2；从 v1
+的文件直接拒开**——本构建会读到它认识的表、静默忽略新版本依赖的列。上表是 v3；v2→v3
+只是给 `group_members` 加两个可空列（`ALTER TABLE ADD COLUMN` 才是 SQLite 原位能做的
+那一种），没有数据搬运。从 v1
 （`messages` 单列主键 + `outbox.endpoint_uri`）升级的两步都是 SQLite 无法原位改的，
 所以走一次迁移：主键变宽是**严格超集**，行照抄不会撞；`outbox` 只有重试状态，直接丢弃
 重建。两个 `IF NOT EXISTS` 之外的语句与 `user_version` 落在同一个事务里，成功之后才盖章。
@@ -902,6 +909,7 @@ AGENTX_DID_DEV_HOSTS      联调放宽：这些域可以解析私有地址、可
 **v2**
 
 7. P4 群组 + Group Host 语义（线性顺序、`group_state_version` / `group_event_seq`）
+   —— 语义见 [groups.md](groups.md)
 8. P7 附件数据面
 9. P8 跨域（`serviceDid` 外层认证 + caller anchor）
 

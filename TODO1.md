@@ -185,6 +185,11 @@
   真机冒烟：well-known 200 且三个字段齐、`get_capabilities` 匿名 200、错 Profile 1001。
   service 262）
 - C9 P4 群组 + Group Host（线性顺序 / `group_state_version` / `group_event_seq`）
+  - ~~设计~~（2026-10-01：[groups.md](docs/design/groups.md)。定下的是几个规范没说话的地方——
+    `group_did` 形状、群消息不写投递行、3002 没有产生路径、私有群缺省、merge patch 校的是
+    合并后的对象、receipt 的 `proof` v1 不签。§7 的 `group_members` 随之补两列，schema 到 v3）
+  - 还剩：九条方法进方法表 + 成员状态机与权限判定 + 群消息 fan-out +
+    `group.state_changed`（含被移除者的"最后一封"）
 - C10 P7 附件数据面（Slot → PUT → commit → ticket → GET）
 - C11 P8 跨域：`serviceDid` 外层认证 + **caller anchor 单点判断** + 并发投递
 - C12 P5 E2EE：prekey bundle + Mailbox
