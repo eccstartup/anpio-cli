@@ -94,10 +94,28 @@ export function notificationFrame(record: DeliveryRecord): string {
   return JSON.stringify({ jsonrpc: '2.0', method: record.method, params: JSON.parse(record.paramsJson) })
 }
 
+/**
+ * Does this delivery reach this connection?
+ *
+ * A delivery with no device is a P3 message: it is addressed to the account, and every
+ * connection watching it gets the frame — the behaviour C7 shipped with. One with a
+ * device is a P5 ciphertext, which §10.7.1 L1407 says **MUST** go to
+ * `meta.recipient_device_id` and nowhere else; a sibling device cannot decrypt it, so
+ * pushing it there would be a fan-out the spec forbids.
+ *
+ * A connection that declared no device therefore receives only the account-addressed
+ * traffic. That is the honest reading: it has not said it stands for a device, so it is
+ * not the mailbox of one.
+ */
+function reaches(entry: Entry, record: DeliveryRecord): boolean {
+  return record.recipientDeviceId === undefined || entry.deviceId === record.recipientDeviceId
+}
+
 export function createSubscriberRegistry(): SubscriberRegistry {
-  /** Keyed by owner DID, not by `(owner, device)`: a delivery sequence belongs to the
-   *  ACCOUNT (§5.1), so every device watching that account receives it. The device id is
-   *  carried along because the connection needs it, not because it routes anything. */
+  /** Keyed by owner DID: a delivery sequence belongs to the ACCOUNT (§5.1), so the map
+   *  that finds candidates is the account. Which of them a frame reaches is decided by
+   *  {@link reaches}, not by the key — P5 §10.7.1 L1407 forbids handing one device's
+   *  ciphertext to a sibling. */
   const watching = new Map<string, Set<Entry>>()
 
   function forget(ownerDid: string, entry: Entry): void {
@@ -173,7 +191,10 @@ export function createSubscriberRegistry(): SubscriberRegistry {
       if (set === undefined) return
       const frame = notificationFrame(record)
       // A copy: `deliver` may drop an entry, which mutates the set being iterated.
-      for (const entry of [...set]) deliver(record.ownerDid, entry, frame, record.seq)
+      for (const entry of [...set]) {
+        if (!reaches(entry, record)) continue
+        deliver(record.ownerDid, entry, frame, record.seq)
+      }
     },
 
     size() {

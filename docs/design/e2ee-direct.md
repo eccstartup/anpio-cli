@@ -126,8 +126,16 @@ OPK **不**进 Bundle（§6.2 L302、§6.3 L395–397），也 **MUST NOT** 被�
   `(owner_did, recipient_device_id)`；P3 的消息（没有设备）照旧按 owner 广播。
 
 序号仍**只**按账号递增（§5.1 L106：同一封消息在账号里只有一个号）——变的不是"谁排的号"，
-是"这一号推给谁"。这条改动同时影响 C6（取件面）与 C7（订阅路），所以它**不能**等 C12
-才动；写在这里是为了让那两块**留出那一列**，别把 `ownerDid` 焊死成唯一路由键。
+是"这一号推给谁"。
+
+**（2026-10-01 落地）**这两条已经做了：`deliveries.recipient_device_id` 是 schema v7，
+`Registry.publish` 按它筛连接（`stream/registry.ts` 的 `reaches`）——**候选**仍从账号那张
+`Map` 里取，所以序号不变；**筛选**才看设备。一条没声明设备的连接因此只收账号级消息。
+
+**取件面（C6）还没跟上**：`x_agentx.inbox.v1` 是自寻址的，没有设备维度，所以一旦 P5 消息
+真的进来，`sync.delta` / `inbox.get` 会把某台设备的密文回给整个账号——那正是 §10.7.1 L1407
+禁止的 fan-out。这条留到方法表接上 `anp.direct.e2ee.v2` 的那一步一起做（那时才知道请求里
+该从哪儿读设备）。
 
 成功响应的形状服务端要照抄（§10.7 L1394）：`accepted` / `message_id` / `operation_id` /
 `target_did` / `recipient_device_id` / `accepted_at`，且回显 **MUST** 等于请求。**逐设备的

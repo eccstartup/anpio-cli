@@ -232,10 +232,9 @@
     （外层归服务端、init replay 归客户端，因为键含 `session_id`）。不建 init replay 表）
   - 还剩：两条 Key 方法进方法表（`targetScope` 两档不同）+ OPK 池与分配 + `bundle_id`
     不可重定义检查（§6.2.2 L371）+ Mailbox 的设备维度 + 限流（§7.3 L598 是 MUST 的落点）
-  - **动手前先留列**：`deliveries` / `DeliveryRecord` 没有设备列，而 C7 的订阅路由键是
-    `owner_did`（[realtime.md](docs/design/realtime.md) §5.1 L111 把 `device_id` 定成"搭车"）。
-    P5 要求只投给 `meta.recipient_device_id`（§10.7.1 L1407）→ **C6 / C7 先别把 `ownerDid`
-    焊死成唯一路由键**，加一列比事后拆键便宜
+  - ~~**动手前先留列**~~（2026-10-01 做了：`deliveries.recipient_device_id` 是 schema v7，
+    订阅推送按它筛连接——见 [e2ee-direct.md](docs/design/e2ee-direct.md) §4。取件面还没跟上，
+    等 `anp.direct.e2ee.v2` 进方法表时一起做）
   - **挡住 v1 的**：无。两条 Key 方法同域即可跑，跨域部分随 C11
 - C13 P6 群组 E2EE：KeyPackage 状态机 + Device Delivery Queue
   - ~~设计~~（2026-10-01：[e2ee-group.md](docs/design/e2ee-group.md)。定下的是几个规范没

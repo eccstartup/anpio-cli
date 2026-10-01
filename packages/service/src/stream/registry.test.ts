@@ -127,6 +127,7 @@ describe('routing', () => {
   })
 
   it('gives every device watching an account the same sequence (§5.1)', () => {
+    // 一份没有设备的消息（P3）是**发给账号**的：账号下的每条连接都拿到它，序号也只有一个。
     const registry = createSubscriberRegistry()
     const phone = recorder()
     const laptop = recorder()
@@ -137,6 +138,34 @@ describe('routing', () => {
     expect(phone.sent).toHaveLength(1)
     expect(laptop.sent).toHaveLength(1)
     expect(registry.size()).toBe(2)
+  })
+
+  it('sends a device-addressed delivery to that device alone (§10.7.1 L1407)', () => {
+    // P5 的密文只属于一台设备，同账号的兄弟设备解不开它——推过去就是规范禁止的 fan-out。
+    // 序号仍按账号递增（下面那两条都拿到了 7），变的只是这一帧推给谁。
+    const registry = createSubscriberRegistry()
+    const phone = recorder()
+    const laptop = recorder()
+    registry.subscribe(phone, record().ownerDid, 'phone', 0).goLive(0)
+    registry.subscribe(laptop, record().ownerDid, 'laptop', 0).goLive(0)
+
+    registry.publish(record({ seq: 7, recipientDeviceId: 'phone' }))
+    expect(phone.sent).toHaveLength(1)
+    expect(laptop.sent).toEqual([])
+  })
+
+  it('does not hand a device-addressed delivery to a connection that named no device', () => {
+    // 一条没说"我代表哪台设备"的连接不是任何设备的信箱：它只收账号级的消息。这比让它
+    // 跟着收更诚实——P5 的选择器不是广播名单的一半。
+    const registry = createSubscriberRegistry()
+    const anonymous = recorder()
+    registry.subscribe(anonymous, record().ownerDid, '', 0).goLive(0)
+
+    registry.publish(record({ seq: 7, recipientDeviceId: 'phone' }))
+    expect(anonymous.sent).toEqual([])
+
+    registry.publish(record({ seq: 8 }))
+    expect(anonymous.sent).toHaveLength(1)
   })
 
   it('forgets a detached subscription, and detaching twice is harmless', () => {

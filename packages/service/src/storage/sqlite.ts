@@ -153,6 +153,10 @@ function applySchema(db: DatabaseSync): void {
     // `ADD COLUMN … NOT NULL`; the partial unique index in `SCHEMA` excludes the empty
     // string precisely so the rows this backfills cannot collide with each other.
     addColumnIfMissing(db, 'attachment_slots', 'upload_token', "TEXT NOT NULL DEFAULT ''")
+    // v7. P5 §10.7 L1391 + §10.7.1 L1407: a ciphertext is queued for one device and MUST
+    // NOT be fanned out to a sibling. `toDelivery` reads it back as absent when it is
+    // NULL, which is exactly what a P3 message means (every device of the account).
+    addColumnIfMissing(db, 'deliveries', 'recipient_device_id', 'TEXT')
     for (const statement of SCHEMA) db.exec(statement)
     // `user_version` takes a literal, so the constant is interpolated rather than bound.
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
@@ -188,7 +192,7 @@ function toMessage(row: Row): StoredMessage {
 }
 
 function toDelivery(row: Row): DeliveryRecord {
-  return {
+  const record: DeliveryRecord = {
     ownerDid: text(row.owner_did),
     seq: int(row.seq),
     messageId: text(row.message_id),
@@ -196,6 +200,9 @@ function toDelivery(row: Row): DeliveryRecord {
     paramsJson: text(row.params_json),
     acceptedAt: text(row.accepted_at),
   }
+  const recipientDeviceId = maybeText(row.recipient_device_id)
+  if (recipientDeviceId !== undefined) record.recipientDeviceId = recipientDeviceId
+  return record
 }
 
 /** `group_member` (P4 §7.2). The two optional columns are omitted rather than set to
@@ -456,9 +463,17 @@ class SqliteStorage implements Storage {
       ).get(delivery.ownerDid) as Row
       const seq = int(row.seq)
       this.stmt(
-        `INSERT INTO deliveries (owner_did, seq, message_id, method, params_json, accepted_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-      ).run(delivery.ownerDid, seq, delivery.messageId, delivery.method, delivery.paramsJson, delivery.acceptedAt)
+        `INSERT INTO deliveries (owner_did, seq, message_id, method, params_json, accepted_at, recipient_device_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        delivery.ownerDid,
+        seq,
+        delivery.messageId,
+        delivery.method,
+        delivery.paramsJson,
+        delivery.acceptedAt,
+        delivery.recipientDeviceId ?? null,
+      )
       return { ...delivery, seq }
     })
   }

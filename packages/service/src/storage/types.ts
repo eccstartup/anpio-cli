@@ -72,6 +72,15 @@ export interface DeliveryRecord {
   method: string
   paramsJson: string
   acceptedAt: string
+  /**
+   * The one device this delivery goes to, for a P5 message (P5 §10.7 L1391). Absent for a
+   * P3 message, which is addressed to the account and therefore goes to every device
+   * watching it.
+   *
+   * It is not part of the sequence's identity: the number belongs to the account
+   * (realtime.md §5.1 L106), and this picks who the frame is pushed to.
+   */
+  recipientDeviceId?: string
 }
 
 /**

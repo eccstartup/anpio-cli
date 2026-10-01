@@ -36,8 +36,14 @@
  *  v6: `http_nonces` is new — the ANP-02 replay cache the cross-domain outer signature
  *  needs (federation.md §6). Like v3 and the three P7 tables it arrives through the
  *  `IF NOT EXISTS` pass and needs no migration step of its own; the version still moves
- *  for the same reason. */
-export const SCHEMA_VERSION = 6
+ *  for the same reason.
+ *
+ *  v7: `deliveries` gains `recipient_device_id` — P5 §10.7 L1391 puts a ciphertext in the
+ *  Mailbox of exactly one `(recipient_did, recipient_device_id)`, and §10.7.1 L1407 forbids
+ *  fanning it out to a sibling device. The column is what makes the push pick one
+ *  connection instead of broadcasting to the account (e2ee-direct.md §4). Nullable, so
+ *  `ALTER TABLE ADD COLUMN` suffices and every P3 row keeps its "no device" meaning. */
+export const SCHEMA_VERSION = 7
 
 export const SCHEMA: readonly string[] = [
   // ---- idempotency -----------------------------------------------------------
@@ -98,6 +104,11 @@ export const SCHEMA: readonly string[] = [
   // is one `message_id` delivered to N members, so the sequence cannot live on the
   // message row — one row per recipient delivery is the only shape that can carry it.
   // This is also what `sync.delta` replays (realtime.md §6) and what `inbox.get` pages.
+  //
+  // `recipient_device_id` is P5's mailbox half (e2ee-direct.md §4): NULL for a P3 message,
+  // which every device of the account receives; set for a P5 one, which is pushed to that
+  // device alone. It is NOT part of the primary key — the sequence belongs to the account
+  // (§5.1 L106), so the column picks who a frame goes to, not who numbered it.
   `CREATE TABLE IF NOT EXISTS deliveries (
      owner_did    TEXT NOT NULL,
      seq          INTEGER NOT NULL,
@@ -105,6 +116,7 @@ export const SCHEMA: readonly string[] = [
      method       TEXT NOT NULL,
      params_json  TEXT NOT NULL,
      accepted_at  TEXT NOT NULL,
+     recipient_device_id TEXT,
      PRIMARY KEY (owner_did, seq)
    )`,
   `CREATE INDEX IF NOT EXISTS deliveries_message ON deliveries (message_id)`,

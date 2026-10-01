@@ -213,6 +213,32 @@ describe('deliveries', () => {
     expect(store.headSeq('did:web:nobody')).toBe(0)
   })
 
+  it('keeps the recipient device on the row, and absence means the whole account', () => {
+    // P5 §10.7 L1391: a ciphertext is queued for one device, and §10.7.1 L1407 forbids
+    // handing it to a sibling. A P3 message has no device at all, which is a different
+    // fact from "device" being an empty string — `toDelivery` has to keep them apart.
+    const store = open()
+    store.appendDelivery({
+      ownerDid: 'did:web:a',
+      messageId: 'm1',
+      method: 'direct.incoming',
+      paramsJson: '{}',
+      acceptedAt: '2026-10-01T00:00:00Z',
+      recipientDeviceId: 'dev-1',
+    })
+    store.appendDelivery({
+      ownerDid: 'did:web:a',
+      messageId: 'm2',
+      method: 'direct.incoming',
+      paramsJson: '{}',
+      acceptedAt: '2026-10-01T00:00:01Z',
+    })
+
+    const page = store.deliveriesSince('did:web:a', 0, 10)
+    expect(page[0]?.recipientDeviceId).toBe('dev-1')
+    expect(page[1]?.recipientDeviceId).toBeUndefined()
+  })
+
   it('pages after a sequence, in order', () => {
     const store = open()
     for (let i = 0; i < 5; i++) {
@@ -230,7 +256,6 @@ describe('deliveries', () => {
     expect(page.map((record) => record.messageId)).toEqual(['m2', 'm3'])
     expect(store.deliveriesSince('did:web:a', 5, 10)).toEqual([])
   })
-
   it('advances a cursor per device and never backwards', () => {
     const store = open()
     expect(store.cursor('did:web:a', 'dev-1')).toBe(0)
@@ -481,5 +506,48 @@ describe('the v4 → v5 migration', () => {
     expect(store.attachmentObject('never')).toBeUndefined()
     expect(store.attachmentGrant('msg', 'att', 'uri')).toBeUndefined()
     expect(store.downloadTicket('hash')).toBeUndefined()
+  })
+})
+
+describe('the v6 → v7 migration', () => {
+  /** A file as v6 wrote it: `deliveries` has no device column. */
+  function writeV6(path: string): void {
+    const db = new DatabaseSync(path)
+    db.exec(`CREATE TABLE deliveries (
+       owner_did    TEXT NOT NULL,
+       seq          INTEGER NOT NULL,
+       message_id   TEXT NOT NULL,
+       method       TEXT NOT NULL,
+       params_json  TEXT NOT NULL,
+       accepted_at  TEXT NOT NULL,
+       PRIMARY KEY (owner_did, seq)
+     )`)
+    db.exec(`INSERT INTO deliveries (owner_did, seq, message_id, method, params_json, accepted_at)
+       VALUES ('did:web:a', 1, 'm1', 'direct.incoming', '{}', '2026-10-01T00:00:00Z')`)
+    db.exec('PRAGMA user_version = 6')
+    db.close()
+  }
+
+  it('adds the device column, leaving the rows that predate it account-addressed', () => {
+    const path = join(dir, 'v6.db')
+    writeV6(path)
+
+    const store = open(path)
+    // The row written before the column existed is a P3 delivery, so it must read back
+    // with no device rather than with an empty one — that difference is what decides who
+    // the frame is pushed to (registry.ts `reaches`).
+    const [record] = store.deliveriesSince('did:web:a', 0, 10)
+    expect(record?.messageId).toBe('m1')
+    expect(record?.recipientDeviceId).toBeUndefined()
+
+    const a2 = store.appendDelivery({
+      ownerDid: 'did:web:a',
+      messageId: 'm2',
+      method: 'direct.incoming',
+      paramsJson: '{}',
+      acceptedAt: '2026-10-01T00:00:01Z',
+      recipientDeviceId: 'dev-1',
+    })
+    expect(a2.recipientDeviceId).toBe('dev-1')
   })
 })

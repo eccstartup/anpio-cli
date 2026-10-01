@@ -45,12 +45,18 @@ export interface IncomingParamsInput {
  * `auth` 原样带走（L420）：中间服务**不得**重签，重签会把业务原发者的证明换成
  * 这个服务的，跨域链条上"谁发的"就变了。
  *
- * 这个函数只写 §7.2.3 L411–418 点名的七个字段——`sender_device_id` /
- * `recipient_device_id` 不在其中，L421 还专门要求它们 MUST NOT 出现（设备 selector
- * 只属于 P5 的 Overlay，而 Base 的 `direct.send` 连收都不收它们）。
+ * 这个函数只写 §7.2.3 L411–418 点名的七个字段。设备 selector 不在其中：L421 要求 Base
+ * 的通知 **MUST NOT** 出现它们，而 Base 的 `direct.send` 连收都不收（`forbiddenMeta`）。
+ * 但 P5 的 `direct.incoming` 恰好相反——§10.7.1 L1401 要求它**原样保留**两个 selector。
+ * 所以这两项按**在场**写：请求里没有（Base 不可能有）就不出现，有就照抄。两族各要一个
+ * 正好相反的东西，靠同一个"来自 meta 的字段"表达，不需要在这里判断 profile。
  */
 export function incomingParams(input: IncomingParamsInput): AnpParams {
   const { meta } = input
+  const deviceSelectors = {
+    ...(meta.sender_device_id !== undefined ? { sender_device_id: meta.sender_device_id } : {}),
+    ...(meta.recipient_device_id !== undefined ? { recipient_device_id: meta.recipient_device_id } : {}),
+  }
   return {
     meta: {
       profile: meta.profile,
@@ -60,6 +66,7 @@ export function incomingParams(input: IncomingParamsInput): AnpParams {
       operation_id: meta.operation_id,
       message_id: meta.message_id,
       content_type: meta.content_type,
+      ...deviceSelectors,
     },
     // 没有 `auth` 就不放这个键：一个 `undefined` 进去，JSON 序列化后整键消失、但内存里
     // 形状不同，取件面读出来的东西会随序列化时机变。
@@ -192,6 +199,12 @@ export function storeDirectMessage(storage: Storage, input: StoreDirectInput): R
     method: DIRECT_INCOMING,
     paramsJson: JSON.stringify(params),
     acceptedAt,
+    // P5 §10.7 L1391：这条密文只属于那**一台**接收设备。P3 消息没有这一项，于是它
+    // 落成 NULL、推给账号下每一个连接——那正是 §7.2.3 L421 要求设备 selector 缺席的意思。
+    // 值取自 `meta`：它与 `params` 里那个 `target` 是同一份请求的两个字段，而推给谁
+    // 是**投递行**的属性，不是通知载荷的（§10.7.1 L1407 说 `direct.incoming` 只投给
+    // `recipient_device_id`，而它怎么找到那个连接由这张表说）。
+    ...(meta.recipient_device_id !== undefined ? { recipientDeviceId: meta.recipient_device_id } : {}),
   })
   input.onDelivery?.(delivered)
 
