@@ -12,6 +12,7 @@
 import type { AnpMeta, AnpRejection } from '@agentx/core'
 import { anpRejection } from '@agentx/core'
 import type { InboxRow, Storage } from '../storage/types'
+import { isCount, isNonEmptyString, isPage, unknownField } from './body'
 
 /** §9.1：这条扩展面自己的 Profile。`x_` 前缀是 P1 §12 给扩展留的命名空间，取值不是
  *  任何一个规范 Profile——那才是对客户端撒谎（P1 §6.2.2 L277 说 `profile` 是"唯一解释"）。 */
@@ -37,32 +38,6 @@ const GET_BATCH_FIELDS = ['message_ids'] as const
 const DELTA_FIELDS = ['since', 'limit'] as const
 
 // ---- body 校验 ---------------------------------------------------------------
-
-/** 不认识就拒。
- *
- *  这是本实现的选择，理由是这一族方法的参数**全部**由我们自己的客户端给：一个拼错的
- *  `include-read` 被静默忽略，结果就是"少看到一些消息"而没有任何地方说得出为什么。
- *  P1 对 `meta` 用的是同一条规矩（§6.2.1 的未知字段 MUST NOT 出现），这里只是把它
- *  照搬到取件面自己的 `body` 上。 */
-function unknownField(body: Record<string, unknown>, allowed: readonly string[]): AnpRejection | undefined {
-  const extra = Object.keys(body).filter((key) => !allowed.includes(key))
-  if (extra.length === 0) return undefined
-  return anpRejection('anp.invalid_params_shape', `unknown body field(s): ${extra.join(', ')}`)
-}
-
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === 'string' && value !== ''
-}
-
-/** 非负整数。`skip` / `since` 用这个：0 是合法值，所以不能拿"假值"当缺失。 */
-function isCount(value: unknown): value is number {
-  return typeof value === 'number' && Number.isInteger(value) && value >= 0
-}
-
-/** 正整数，且不超过 `max`。 */
-function isPage(value: unknown, max: number): value is number {
-  return typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= max
-}
 
 function idsOf(value: unknown, field: string, max?: number): { ids: string[] } | { error: AnpRejection } {
   if (!Array.isArray(value) || value.length === 0) {

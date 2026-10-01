@@ -8,7 +8,9 @@
 // Routes and the status codes that are NOT 200 are message-service.md §2.1.
 
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import type { Duplex } from 'node:stream'
 import type { Config } from '../config'
+import { upgrade, type WebSocketConnection, type WebSocketHandlers } from '../stream/ws'
 
 export const RPC_PATH = '/anp-im/rpc'
 export const STREAM_PATH = '/anp-im/stream'
@@ -35,9 +37,22 @@ export interface RpcResponse {
  *  keeps a handler free of `ServerResponse`. */
 export type RpcHandler = (request: RpcRequest) => Promise<RpcResponse> | RpcResponse
 
+/**
+ * What the stream route does with a connection (C7).
+ *
+ * It hands back the handlers, which are built around the connection, and the HTTP layer
+ * never learns what a frame means — the same division as {@link RpcHandler}. The reason
+ * the connection is the argument is in `ws.ts`'s `upgrade`: a client may pipeline its
+ * first frame with the upgrade, and those bytes are parsed before this returns.
+ */
+export type StreamHandler = (connection: WebSocketConnection, request: IncomingMessage) => WebSocketHandlers
+
 export interface ServerOptions {
   config: Config
   handleRpc: RpcHandler
+  /** Absent means the stream route keeps answering 501, which is what a service with no
+   *  subscriber registry wired up should say. */
+  handleStream?: StreamHandler
 }
 
 export interface RunningServer {
@@ -145,20 +160,46 @@ export function createServer(options: ServerOptions): RunningServer {
       return
     }
 
-    if (url.pathname === STREAM_PATH || url.pathname === WELL_KNOWN_PATH) {
+    if (url.pathname === STREAM_PATH) {
       if (req.method !== 'GET') {
         refuse(res, 405, 'method not allowed', { allow: 'GET' })
         return
       }
-      // Both routes have a defined shape in §2.1 and neither is built yet: the stream is
-      // C7, the well-known document is C8. Answering 501 keeps an unbuilt surface
-      // distinguishable from a missing one (404).
-      refuse(res, 501, `${url.pathname} is not implemented yet`)
+      // An ordinary GET reaches here only when the upgrade listener declined it, and the
+      // one thing such a request is missing is the upgrade itself. `426` says that; `405`
+      // would blame the method, which is the one part that is right.
+      refuse(res, 426, `${STREAM_PATH} only answers a WebSocket upgrade`, { upgrade: 'websocket' })
+      return
+    }
+
+    if (url.pathname === WELL_KNOWN_PATH) {
+      if (req.method !== 'GET') {
+        refuse(res, 405, 'method not allowed', { allow: 'GET' })
+        return
+      }
+      // C8. Answering 501 keeps an unbuilt surface distinguishable from a missing one.
+      refuse(res, 501, `${WELL_KNOWN_PATH} is not implemented yet`)
       return
     }
 
     refuse(res, 404, 'not found')
   }
+
+  // The upgrade is a separate event, not a route: Node hands the socket over before any
+  // response exists. Only this path is accepted; anything else is destroyed rather than
+  // left hanging, since an un-upgraded socket would otherwise sit there until it timed out.
+  server.on('upgrade', (req, socket, head) => {
+    const url = new URL(req.url ?? '/', 'http://localhost')
+    const handleStream = options.handleStream
+    if (url.pathname !== STREAM_PATH || handleStream === undefined) {
+      socket.destroy()
+      return
+    }
+    const connection = upgrade(req, socket as Duplex, head, (conn) => handleStream(conn, req))
+    // `upgrade` returns undefined when the request was not a valid upgrade (a missing
+    // `Sec-WebSocket-Version`, say), in which case nothing was written.
+    if (connection === undefined) socket.destroy()
+  })
 
   return {
     get address() {

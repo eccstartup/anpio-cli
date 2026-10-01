@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
+import { connect } from 'node:net'
 import { loadConfig } from '../config'
 import { createServer, RPC_PATH, STREAM_PATH, WELL_KNOWN_PATH, type RpcHandler, type RunningServer } from './server'
 
@@ -129,10 +130,14 @@ describe('POST /anp-im/rpc', () => {
 })
 
 describe('the routes that are not built yet', () => {
-  it('answers 501 on the stream route, not 404', async () => {
+  it('answers 426 on the stream route, because a plain GET is missing the upgrade', async () => {
+    // C7 wired the stream up, so this is no longer "not built" — but a plain GET still
+    // cannot be served by it, and `405` would blame the method, which is the one part that
+    // is right (§2.1).
     const base = await start(echo)
     const res = await fetch(`${base}${STREAM_PATH}`)
-    expect(res.status).toBe(501)
+    expect(res.status).toBe(426)
+    expect(res.headers.get('upgrade')).toBe('websocket')
   })
 
   it('answers 501 on the well-known document', async () => {
@@ -148,6 +153,34 @@ describe('the routes that are not built yet', () => {
       expect(res.status).toBe(405)
       expect(res.headers.get('allow')).toBe('GET')
     }
+  })
+
+  it('destroys an upgrade to a path that is not the stream', async () => {
+    // The upgrade event is separate from the router, so a path it does not want has to be
+    // ended here: an un-upgraded socket would otherwise sit until it timed out.
+    await start(echo)
+    const refused = await new Promise<boolean>((resolve) => {
+      const socket = connect(running?.address.port ?? 0, '127.0.0.1')
+      socket.on('error', () => {
+        resolve(true)
+      })
+      socket.on('close', () => {
+        resolve(true)
+      })
+      socket.write(
+        [
+          'GET /anp-im/elsewhere HTTP/1.1',
+          'Host: localhost',
+          'Upgrade: websocket',
+          'Connection: Upgrade',
+          'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==',
+          'Sec-WebSocket-Version: 13',
+          '',
+          '',
+        ].join('\r\n'),
+      )
+    })
+    expect(refused).toBe(true)
   })
 })
 

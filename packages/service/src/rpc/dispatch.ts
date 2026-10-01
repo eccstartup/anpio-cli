@@ -24,7 +24,7 @@ import {
 } from '@agentx/core'
 import type { Config } from '../config'
 import type { RpcHandler, RpcResponse } from '../http/server'
-import type { Storage } from '../storage/types'
+import type { DeliveryRecord, Storage } from '../storage/types'
 import { acceptOperation } from './accept'
 import { authenticate, callerAnchor } from './auth'
 import { DIRECT_SEND, lookupMethod, checkMethod, type MethodSpec } from './methods'
@@ -51,6 +51,16 @@ export interface DispatchDeps {
    *  seconds for the proof's time window (that is the unit `expires` / `created` are
    *  written in, P1 附录 A). Injected in tests so a stored `accepted_at` is a literal. */
   now?: () => Date
+  /**
+   * A delivery to hand to the subscription path (realtime.md §8.1). Called **after** the
+   * transaction that wrote it has committed, and only for the request that created it — a
+   * replay appends nothing new and therefore publishes nothing.
+   *
+   * `main.ts` points this at the subscriber registry. It arrives as a plain callback
+   * rather than as the registry itself so the accept path keeps no reference to the
+   * transport, which is what lets `dispatch.test.ts` run without a socket.
+   */
+  onDelivered?: (record: DeliveryRecord) => void
 }
 
 export function createDispatch(deps: DispatchDeps): RpcHandler {
@@ -65,7 +75,12 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
    * 只在幂等未命中时被调用（C4），所以这里不能有无谓的失败面：一次网络往返会让并发写在
    * 事务里等，而写之前任何一步抛错都会把整个操作回滚掉。
    */
-  function perform(spec: MethodSpec, params: AnpParams, acceptedAt: string): Record<string, unknown> {
+  function perform(
+    spec: MethodSpec,
+    params: AnpParams,
+    acceptedAt: string,
+    pending: DeliveryRecord[],
+  ): Record<string, unknown> {
     const { meta, body, auth } = params
     switch (spec.name) {
       case DIRECT_SEND:
@@ -74,6 +89,10 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
           body,
           ...(auth !== undefined ? { auth } : {}),
           acceptedAt,
+          // Collected, not published: this runs inside the transaction, and a delivery
+          // pushed from here would have been seen by a live client before a rollback could
+          // undo it. The caller publishes once `acceptOperation` has returned.
+          onDelivery: (record) => pending.push(record),
         })
       case INBOX_GET:
         return readInbox(deps.storage, meta, body)
@@ -143,7 +162,10 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
       if (bodyRefusal !== undefined) return errorResponse(envelope.id, bodyRefusal)
 
       const acceptedAt = at.toISOString()
-      const run = (): Record<string, unknown> => perform(spec, envelope.params, acceptedAt)
+      // §8.1: what this request delivered. Filled by `perform`, and empty on every path
+      // that did not create one (a replay, and every method but `direct.send`).
+      const pending: DeliveryRecord[] = []
+      const run = (): Record<string, unknown> => perform(spec, envelope.params, acceptedAt, pending)
 
       // 这个方法不改状态：没有幂等作用域，也就没有要记的操作，直接跑（P1 §9.1 L628 的
       // 四段键里 operation_id 的语义是"重试同一次操作"，无状态调用没有这个东西）。
@@ -163,6 +185,8 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
 
       // §10.3 L709：同键不同语义。
       if (outcome.kind === 'conflict') return errorResponse(envelope.id, outcome.error)
+      // 事务已经提交，投递行是真的了，这时候才推。
+      publish(pending)
       return successResponse(envelope.id, outcome.response)
     } catch (err) {
       // 到这里还没有回应的，只剩"代码错了"这一种：每个已知的拒绝理由都在上面就地回了。
@@ -170,6 +194,27 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
       // 对端；栈进日志。
       log(`anp: ${spec.name} failed internally: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`)
       return errorResponse(envelope.id, rpcRejection(JSON_RPC_ERROR.INTERNAL_ERROR, 'Internal error'))
+    }
+  }
+
+  /**
+   * 把这次请求产生的投递交给订阅路。
+   *
+   * 每一条各自兜住异常，且**吞掉**它：走到这里消息已经落库、响应即将发出，`direct.send`
+   * 的成功语义与推送无关（realtime.md §1：推送是尽力而为，存储才是事实）。让一个推送
+   * 失败把一次已经受理的发送变成错误响应，等于告诉发送方"没收到"，而它其实收到了。
+   */
+  function publish(records: readonly DeliveryRecord[]): void {
+    const sink = deps.onDelivered
+    if (sink === undefined) return
+    for (const record of records) {
+      try {
+        sink(record)
+      } catch (err) {
+        log(
+          `anp: publishing delivery ${record.ownerDid}#${String(record.seq)} failed: ${err instanceof Error ? err.message : String(err)}`,
+        )
+      }
     }
   }
 

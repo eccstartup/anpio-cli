@@ -8,7 +8,7 @@
 // 也不得在写之前做任何可能失败的 I/O（一次网络往返会让并发写在锁里等）。
 
 import { anpRejection, buildMessageNotification, type AnpAuth, type AnpMeta, type AnpParams, type AnpRejection } from '@agentx/core'
-import type { Storage } from '../storage/types'
+import type { DeliveryRecord, Storage } from '../storage/types'
 
 /** P3 §6.3 L281–285 里的三个负载字段。 */
 const PAYLOAD_FIELDS = ['text', 'payload', 'payload_b64u'] as const
@@ -123,6 +123,18 @@ export interface StoreDirectInput {
   auth?: AnpAuth
   /** RFC 3339。由调用方给，测试才好钉住这个值。 */
   acceptedAt: string
+  /**
+   * The delivery this call appended, once there is one.
+   *
+   * A callback rather than a return value because the caller is inside a transaction and
+   * must not use it yet: the subscription push (realtime.md §8.1) happens **after** the
+   * commit, and this is how the record gets out there. Nothing may be published from here —
+   * a message the transaction then rolls back would have been pushed to a live client.
+   *
+   * Not called on the duplicate path: §8.2 L444–450's second send of one message appends no
+   * delivery, so there is no new sequence and nothing to push.
+   */
+  onDelivery?: (record: DeliveryRecord) => void
 }
 
 /**
@@ -183,13 +195,14 @@ export function storeDirectMessage(storage: Storage, input: StoreDirectInput): R
     ...(input.auth !== undefined ? { auth: input.auth } : {}),
   })
 
-  storage.appendDelivery({
+  const delivered = storage.appendDelivery({
     ownerDid: targetDid,
     messageId,
     method: DIRECT_INCOMING,
     paramsJson: JSON.stringify(params),
     acceptedAt,
   })
+  input.onDelivery?.(delivered)
 
   // 出站推送排进 outbox。载荷存**整个通知信封**：worker 到那时手上只有这一行，任何
   // "到时候再拼"都要它知道方法名与 §7.2.3 的字段搬运规则，而那正是上面刚刚做过的事。

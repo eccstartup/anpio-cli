@@ -9,7 +9,21 @@ export { loadConfig, didWebFor } from './config'
 export type { Config, DidResolution, ListenAddress } from './config'
 
 export { createServer, RPC_PATH, STREAM_PATH, WELL_KNOWN_PATH } from './http/server'
-export type { RpcHandler, RpcRequest, RpcResponse, RunningServer, ServerOptions } from './http/server'
+export type {
+  RpcHandler,
+  RpcRequest,
+  RpcResponse,
+  RunningServer,
+  ServerOptions,
+  StreamHandler,
+} from './http/server'
+
+export { createSubscriberRegistry, notificationFrame } from './stream/registry'
+export type { SubscriberRegistry, SubscriberTarget, Subscription } from './stream/registry'
+export { CLOSE_GOING_AWAY, CLOSE_TRY_AGAIN_LATER, acceptKey, isWebSocketUpgrade, upgrade } from './stream/ws'
+export type { WebSocketConnection, WebSocketHandlers } from './stream/ws'
+export { createStreamSession, STREAM_PROFILES } from './stream/session'
+export type { StreamSession, StreamSessionDeps } from './stream/session'
 
 export { parseRequestText, failureId, errorResponse, successResponse, noResponse } from './rpc/envelope'
 export type { ParseResult, ParsedRequest } from './rpc/envelope'

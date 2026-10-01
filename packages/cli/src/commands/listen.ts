@@ -14,7 +14,7 @@ import { randomUUID } from 'node:crypto'
 import { buildMessageRequest, buildOriginProofAuth, anpCodeOf, ConnectxError } from '@agentx/core'
 import type { AnpErrorResponse, AnpMeta, AnpResponse } from '@agentx/core'
 import { cliError, type Values } from './auth'
-import { openChannel, type Channel } from './channel'
+import { EXTENSION_PROFILE, openChannel, type Channel } from './channel'
 import { viewFor, type ListenMessage, type ListenView } from './listen-view'
 
 /** The stream's own Profile (realtime.md §9): the transport handshake is not a normative
@@ -22,8 +22,10 @@ import { viewFor, type ListenMessage, type ListenView } from './listen-view'
 export const STREAM_PROFILE = 'x_agentx.stream.v1'
 
 const STREAM_AUTH = 'stream.auth'
+const STREAM_ACK = 'stream.ack'
 const STREAM_HELLO = 'stream.hello'
 const SYNC_DELTA = 'sync.delta'
+const INBOX_MARK_READ = 'inbox.mark_read'
 
 /** realtime.md §3: the notifications that carry a delivered message. The other two
  *  (`group.state_changed` / `group.e2ee.notice`) are pushed over the same socket but are
@@ -513,11 +515,20 @@ async function live(connection: StreamConnection, arrivals: Arrivals, context: S
     if (message === undefined) continue
     render(context, message)
     if (context.options.ack) {
-      // realtime.md §6: `--ack` advances the read state, which is what lets the service
-      // move this device's cursor. It is opt-in because the failure it prevents (a replay)
-      // is survivable and the one it causes (a message nobody saw, gone) is not.
-      const acked = await request(connection, arrivals, context, 'inbox.mark_read', { message_ids: [message.message_id] })
-      if (acked.kind !== 'frame') return acked
+      // realtime.md §6: two different questions, two calls. `inbox.mark_read` is the read
+      // state that `msg inbox --include-read` reads back; `stream.ack` is what moves this
+      // device's delivery cursor, and therefore what keeps a reconnect from replaying.
+      // Neither is a read receipt for the sender — the spec defines none (§6's ⚠).
+      //
+      // The backfill is deliberately not acked: the cursor only ever moves forwards, so the
+      // first live ack carries it past everything the backfill showed, and `--once` has to
+      // stay the read-only one-shot §7.2 calls it.
+      const read = await request(connection, arrivals, context, INBOX_MARK_READ, {
+        message_ids: [message.message_id],
+      })
+      if (read.kind !== 'frame') return read
+      const confirmed = await request(connection, arrivals, context, STREAM_ACK, { seq: cursor })
+      if (confirmed.kind !== 'frame') return confirmed
     }
   }
 }
@@ -567,6 +578,17 @@ async function readResponse(arrivals: Arrivals, id: string): Promise<Reply> {
   }
 }
 
+/** Which Profile each method belongs to (realtime.md §9).
+ *
+ *  This has to be per method, not one constant for the connection: `meta.profile` is
+ *  "本次请求的唯一解释" (P1 §6.2.2 L277), and a method's own Profile is what says which
+ *  interpretation this request is — the transport's handshake and delivery confirmation
+ *  are one, the read surface's backfill and read state another. Sending the wrong one is a
+ *  1001 `anp.unsupported_profile`, which only a real service answers. */
+function profileFor(method: string): string {
+  return method === STREAM_AUTH || method === STREAM_ACK ? STREAM_PROFILE : EXTENSION_PROFILE
+}
+
 /** One extension call over the stream. The refusal rules are the read surface's
  *  (message-service.md §9): a peer that does not have this method has ANSWERED, and the
  *  caller gets to say so rather than reporting a generic failure. */
@@ -578,7 +600,7 @@ async function request(
   body: Row,
 ): Promise<Step> {
   const meta: AnpMeta = {
-    profile: STREAM_PROFILE,
+    profile: profileFor(method),
     security_profile: 'transport-protected',
     sender_did: context.channel.sender.did,
     // P1 附录 A.4 L1068: a method carrying an `origin_proof` MUST have `meta.target`, and
@@ -606,7 +628,7 @@ async function request(
       kind: 'fatal',
       error: new ConnectxError(
         'unsupported_extension',
-        `${context.channel.sender.did} does not implement ${method} (${named}): the stream is an implementation ` +
+        `${context.url} does not implement ${method} (${named}): the stream is an implementation ` +
           'extension, not defined by the ANP message specification',
         { ...(anpCode !== undefined ? { serverCode: anpCode } : {}), cause: reply.frame.error },
       ),

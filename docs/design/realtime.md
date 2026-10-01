@@ -73,31 +73,43 @@ dispatcher，只是传输不同（见 §3）。
 client                                server
   │  ── WS upgrade ──────────────────►  │
   │  ◄─ stream.hello {server_did,        │   服务端自报身份，客户端可据此校验
-  │       head_seq, profiles[]}          │
-  │  ── auth {did, device_id, cursor} ─► │   origin_proof 覆盖这次握手
-  │  ◄─ stream.ready {device_id,         │   注册完成，head_seq 是订阅起点
+  │       head_seq, profiles[]}          │   head_seq 此刻只能是 0：信箱还没被认领
+  │  ── stream.auth {device_id, cursor}► │   origin_proof 覆盖这次握手
+  │  ◄─ stream.ready {device_id,         │   注册完成，head_seq 是订阅起点（权威值）
   │       cursor_accepted, head_seq}     │
   │  ── sync.delta {since: cursor} ────► │
   │  ◄─ Response {messages: [...]}       │   补齐
-  │  ◄─ direct.incoming × N              │   补齐完成后才开始刷实时通知
-  │  ◄─ direct.incoming × …              │   持续
+  │  ◄─ direct.incoming × N              │   补齐响应发出后才开始刷实时通知
+  │  ── stream.ack {seq} ──────────────► │   推进交付游标（§6）
+  │  ◄─ Response {cursor}                │
 ```
 
-三条要点：
+四条要点：
 
-1. **握手要认证。** `auth` 帧里的凭据覆盖 `{method, meta, body}` 的 JCS 规范化对象，
+1. **握手要认证。** `stream.auth` 帧里的凭据覆盖 `{method, meta, body}` 的 JCS 规范化对象，
    与 HTTP 控制面同一套 `anp-rfc9421-origin-proof-v1`。握手失败即关连接，
    错误码沿用控制面那套。
 2. **`stream.hello` 让客户端先看到服务端是谁。** 客户端应校验 `server_did` 与自己
    从 DID 文档解析出的 `serviceDid` 一致——连接是明文升级的，这一步是防中间人的第一道。
+   它带不了别的：head 是按信箱算的，而信箱要到 `stream.auth` 才认领，所以**权威的
+   `head_seq` 随 `stream.ready` 给**，`hello` 里那个是占位。
 3. **服务端在补齐完成前不刷实时通知。** 见 §5，这是无空洞无重复的关键。
+4. **两个 Profile 分属两件事。** `stream.auth` / `stream.ack` 是传输自己的
+   `x_agentx.stream.v1`，`sync.delta` 与 `inbox.mark_read` 是取件面的
+   `x_agentx.inbox.v1`（§9）。`meta.profile` 是"本次请求的唯一解释"，所以它是**按方法**
+   给的，一条连接上两种都有；给错了就是 1001 `anp.unsupported_profile`。
 
 ## 5. 游标：无空洞、无重复
 
 ### 5.1 序号从哪来
 
-服务端为每个 `(owner_did, device_id)` 维护一条单调递增的交付序号。消息落库时分配，
-**在同一事务里**（与 [message-service.md](message-service.md) §7 的 `delivery_cursor` 一致）。
+交付序号是**收件箱级**的：服务端为每个 `owner_did` 维护一条单调递增的计数，消息落库时
+分配，**在同一事务里**（[message-service.md](message-service.md) §7 的 `deliveries.seq`）。
+
+游标才是按设备分的：`delivery_cursor` 的主键是 `(owner_did, device_id)`。两者不是一回事
+——序号属于**账号**（同一封消息在账号里只有一个号，账号下哪台设备看到都一样），游标属于
+**设备**（每台自己读到哪了）。订阅路因此按 `owner_did` 路由，`device_id` 只是搭车过来，
+好让连接知道自己推的是谁。
 
 ### 5.2 经典 bug 与它的解法
 
@@ -111,13 +123,19 @@ client                                server
 
 **解法是把订阅与补齐做成服务端的同一个操作、同一条连接上的先后两步：**
 
-- 服务端收到 `auth` 时就**已经注册**了订阅者，记下 `head_seq = H`；
-- 但**先不推**任何 seq ≤ H 的东西——它们在补齐里；
-- 客户端的 `sync.delta` 返回 `(C, H]`；
-- 补齐响应发出后，服务端才开始刷 seq > H 的实时通知。
+- 服务端收到 `stream.auth` 时就**已经注册**了订阅者，记下 `head_seq = H`；
+- 但**先不推**，注册之后到达的每一帧都扣在缓冲区里；
+- 客户端的 `sync.delta` 返回补齐；
+- 补齐响应发出后，服务端才把缓冲里那些**比补齐真正的终点更新**的帧刷出去。
 
 因为 `H` 是在注册那一刻取的，且服务端单点控制顺序，**区间无缝**。
 客户端**仍应按 seq 去重**——这是 belt-and-braces，也是重连路径上真正兜底的那层。
+
+上面第三条写的是"比补齐真正的终点更新"而不是"seq > H"，因为 `sync.delta` 只被
+`since` 与 `limit` 约束，**不认 `H`**：注册与补齐之间落库的消息会同时出现在补齐结果和
+缓冲区里。所以刷出去之前要按补齐实际结束的序号（`next_since`）过一遍，低于等于它的
+已经在补齐里给过了。分页的、以及被拒的补齐都算没结束，订阅继续扣着——那是安全的一侧，
+§5.3 的上限会终结一个卡在半路的客户端。
 
 ### 5.3 服务端缓冲有上限
 
@@ -150,9 +168,10 @@ client                                server
 [message-service.md](message-service.md) §9.3），所以补齐这段的序号是服务端给的、
 实时那段是客户端数的，两边接在 `H` 上。
 
-这个"数出来"的序号只用于 §5.2 的去重：重连后再补齐一遍时，服务端给回的 `seq`
-会和客户端已渲染过的高水位撞上，撞上的就丢掉。**服务端缓冲溢出时必须断连**
-（§5.3），正是为了不让客户端数出来的序号与真实序号悄悄错位。
+这个"数出来"的序号有两个用处：§5.2 的去重（重连后再补齐一遍时，服务端给回的 `seq`
+会和客户端已渲染过的高水位撞上，撞上的就丢掉），以及 `--ack` 时 `stream.ack` 带的
+那个 `seq`。**服务端缓冲溢出时必须断连**（§5.3），正是为了不让客户端数出来的序号与
+真实序号悄悄错位——错位的后果不止重复，还有把一个好端端的游标推错。
 
 `direct.incoming` 这类通知是 Message Service 自己的用法；`group.*` 同理。
 §7.1 的 NDJSON 里那条 `seq` 是客户端重建后的值，不是从帧上读的。
@@ -165,9 +184,16 @@ client                                server
 |---|---|---|
 | 落库 | 服务端接受了 | 服务端（`direct.send` 的成功语义到此为止） |
 | 送达客户端 | 帧已经发出去 / 客户端已收到 | 服务端 + 连接 |
-| **已读** | 有人或某个 agent 处理过了 | **调用方**，靠 `ack` 推进游标 |
+| **已读** | 有人或某个 agent 处理过了 | **调用方**，靠 `stream.ack` 推进游标 |
 
-**`msg listen` 默认不自动 ack。** `--ack` 才开。
+推进游标的帧是 `stream.ack {seq}`，走 §4 那条连接（`x_agentx.stream.v1`）。它是
+`delivery_cursor` 表**唯一**的写入者：`sync.delta` 不写（补齐归补齐），握手不写。
+服务的实现把 `seq` 钳到当前 head 再写——`advanceCursor` 只进不退，一个凭空来的大数
+会把游标顶到真实消息前面，下一次重连就静默跳过了。
+
+**`msg listen` 默认不自动 ack。** `--ack` 才开。开的时候每个实时帧发两个调用：
+`inbox.mark_read` 写**已读状态**（`msg inbox --include-read` 读的那份），
+`stream.ack` 推**交付游标**。两个问题，两张表。
 
 理由是不对称的代价：
 - 忘了 ack → 下次重连重放一遍。烦，但**消息还在**。
@@ -237,12 +263,21 @@ client                                server
 ### 8.1 订阅者注册表
 
 ```
-subscribers: Map<`${owner_did}\u0000${device_id}`, { socket, headSeq, buffer }>
+subscribers: Map<owner_did, Set<{ socket, deviceId, headSeq, pending[] }>>
 ```
 
+- 键是 `owner_did` 而不是 `(owner_did, device_id)`：序号是账号级的（§5.1），
+  所以账号下每一条在看这个信箱的连接都收到同一条通知。
 - 一个 `(owner_did, device_id)` 可以有多条连接（同一设备重连、或多开）。
   **允许多条，都推**——客户端去重，服务端不做单连接约束。
+- **补齐期的、以及实时期的每一条通知都在这里过。** 补齐期扣进 `pending`，
+  `sync.delta` 一答就按它实际的终点刷出去（§5.2）；实时期直接写 socket。
+  两处都有上限，超了就断这条连接（§5.3）——**宁可断，不可悄悄丢**。
+  上限对实时的连接也不是摆设：那条路用的是 socket 自己的写队列深度，
+  客户端不读与客户端不补齐是同一个问题。
 - 消息落库并分配 seq 后，查注册表，把通知写到所有匹配的连接。
+- 推送发生在**事务提交之后**：事务里推的话，一次回滚就会让在线客户端看到一封
+  从未落库的消息。所以受理路径把这次调用产生的投递收集起来，提交后才交给注册表。
 
 ### 8.2 连接即状态
 
@@ -267,7 +302,7 @@ subscribers: Map<`${owner_did}\u0000${device_id}`, { socket, headSeq, buffer }>
   传输握手另用一个 `x_agentx.stream.v1`——两者都是 `x_` 命名空间下的扩展标识，
   与 §13 那条"扩展不进 `profiles[]`"并不冲突：那里说的是**规范符合性**那张清单。
   流端点自己的能力由 `stream.hello` 自报，客户端连上即知。
-- **两个扩展 Profile 走同一套目标建模**：`stream.auth` / `sync.delta` 与业务扩展方法
+- **两个扩展 Profile 走同一套目标建模**：`stream.auth` / `stream.ack` 与业务扩展方法
   一样要 `auth.origin_proof`，所以一样 **MUST** 带 `meta.target`
   （P1 附录 A.4 L1068），取值也一样是 `{kind: "agent", did: <本端身份>}`
   （P1 A.4 L1070 把 endpoint-local 方法的建模规则交给 Profile 定）。

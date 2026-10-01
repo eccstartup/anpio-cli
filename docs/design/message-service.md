@@ -109,10 +109,15 @@ HTTP 层用 `node:http` 自己写路由：整个服务只有**两个**端点
 |---|---|
 | `POST /anp-im/rpc` | `200`，体是 JSON-RPC 响应（**成功与失败都是 200**） |
 | `GET /anp-im/stream` | `101` 升级为 WebSocket |
+| `GET /anp-im/stream`，**不是**升级请求 | `426` + `Upgrade: websocket` |
 | `GET /.well-known/anp-message-service.json` | `200`，体是 §13 那个条目 |
 | `PUT <upload_uri>` | 数据面，附件对象字节（P7） |
 | 其余路径 | `404` |
 | 已知路径、方法不对 | `405` + `Allow` |
+
+`426` 那一行是给"方法对了、但没带升级头"的请求的：`405` 会去怪方法，而方法正是它唯一
+做对的地方（`http/server.ts` 的 `route()` 里写着同一句）。它由升级监听器拒绝后落到普通
+路由上回答，响应里 `Upgrade: websocket` 是 426 要求的头。
 
 **协议错误不换 HTTP 状态码**：`anp.*` 与 JSON-RPC 标准错误一律走 `200`，客户端按
 `error.data.anp_code` 分支。**规范没有规定 HTTP 状态码**（P1 全文未提，已 grep 核实），
@@ -122,7 +127,10 @@ HTTP 层用 `node:http` 自己写路由：整个服务只有**两个**端点
 而它正是 P1 §10.2 L695 用来分支的唯一依据。
 
 只有"连 JSON-RPC 对象都还不是"的传输层失败才用非 2xx：
-`413`（体超过 `AGENTX_MAX_BODY`）、`415`（`Content-Type` 不是 JSON）以及上表的 `404` / `405`。
+`413`（体超过 `AGENTX_MAX_BODY`）、`415`（`Content-Type` 不是 JSON）、
+`426`（流路径上的非升级 GET）以及上表的 `404` / `405`。**流一旦升级，状态码这套就不
+适用了**：连接上的每一次失败都是 `200` 里的一份 JSON-RPC 响应，只有握手认证失败才关连接
+（[realtime.md](realtime.md) §4.1）。
 
 **存储接口化**：`Storage` 是一个 interface，`sqlite` 是 v1 唯一实现。
 Postgres 的事等真需要多实例时再说，现在不做抽象层之上的抽象。
@@ -698,6 +706,12 @@ Profile"的答案，混进一个 `x_` 值就把它变成另一个问题了。扩
 | `message.get_batch` | `{message_ids: [...]}`，≤ 100 且不重复 | `{items: [{message_id, message}], unavailable: [...]}` |
 | `direct.get_history` | `{peer_did, since_seq?, limit?}` | `{messages: [...], has_more}` |
 | `sync.delta` | `{since, limit?}` | `{messages: [{seq, method, params}], next_since, has_more}` |
+
+表里是 `POST /anp-im/rpc` 上**可达**的那几个。流自己的两个方法
+（`stream.auth` / `stream.ack`，各自的 Profile 是 `x_agentx.stream.v1`）不在其中，因为
+它们离开了连接就没有意义——`stream.auth` 在 HTTP 上没有订阅可注册，`stream.ack` 在 HTTP
+上不知道是哪台设备（游标按 `(owner_did, device_id)` 分片）。形状见
+[realtime.md](realtime.md) §4 与 §6。它们与上表走**同一条**校验与认证路径，不是另一套。
 
 **`direct.get_history` v1 不实现。** 它不是"没人要"，而是它的 `since_seq` 没有定义：
 出站消息**不带序号**——`direct.send` 的 `body` 里没有这个字段，服务也从不给它分配，

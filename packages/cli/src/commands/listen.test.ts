@@ -128,12 +128,39 @@ function incoming(message_id: string, overrides: Record<string, unknown> = {}): 
   }
 }
 
+/** The Profile each method must be sent under (realtime.md §9). The real service checks
+ *  `meta.profile` against the method's own list and answers 1001 when it is wrong
+ *  (`rpc/methods.ts`'s `checkMethod`), so this fake does too. A double that accepted any
+ *  profile is exactly what let one profile for the whole connection pass this suite while a
+ *  real service would have refused every backfill. */
+const PROFILE_OF: Record<string, string> = {
+  'stream.auth': 'x_agentx.stream.v1',
+  'stream.ack': 'x_agentx.stream.v1',
+  'sync.delta': 'x_agentx.inbox.v1',
+  'inbox.mark_read': 'x_agentx.inbox.v1',
+}
+
 /** Answer whatever request was just sent, by replying to its `id`. This is the server half
  *  the command is written against, kept in the test so the two cannot drift. */
 function serve(socket: FakeSocket, results: Record<string, unknown>): void {
   const last = socket.sent[socket.sent.length - 1]
   if (last === undefined) throw new Error('nothing was sent')
-  const result = results[String(last.method)]
+  const method = String(last.method)
+  const profile = (last.params as { meta?: { profile?: unknown } } | undefined)?.meta?.profile
+  const expected = PROFILE_OF[method]
+  if (expected !== undefined && profile !== expected) {
+    socket.deliver({
+      jsonrpc: '2.0',
+      id: last.id,
+      error: {
+        code: 1001,
+        message: `${method} does not implement profile ${String(profile)}`,
+        data: { anp_code: 'anp.unsupported_profile' },
+      },
+    })
+    return
+  }
+  const result = results[method]
   socket.deliver(response(last.id, result))
 }
 
@@ -344,7 +371,7 @@ describe('runListen', () => {
     await run
   })
 
-  it('marks each message read only when --ack was asked for', async () => {
+  it('marks each message read, and moves the cursor, only when --ack was asked for', async () => {
     const h = harness()
     const run = runListen({ ack: true }, h.deps)
     await flush()
@@ -357,8 +384,46 @@ describe('runListen', () => {
     await flush()
     socket.deliver(incoming('msg-1'))
     await flush()
-    const ack = socket.request('inbox.mark_read')
-    expect(ack.params).toMatchObject({ body: { message_ids: ['msg-1'] } })
+    const read = socket.request('inbox.mark_read')
+    expect(read.params).toMatchObject({ body: { message_ids: ['msg-1'] } })
+    serve(socket, { 'inbox.mark_read': { updated_count: 1, message_ids: ['msg-1'] } })
+    await flush()
+    // realtime.md §6: the read state (`msg inbox --include-read` reads it back) and the
+    // delivery cursor (what stops a reconnect from replaying) are two questions, so two
+    // calls. The seq is the one the client counted for the frame it just rendered (§5.5).
+    const confirmed = socket.request('stream.ack')
+    expect(confirmed.params).toMatchObject({ body: { seq: 1 } })
+    serve(socket, { 'stream.ack': { cursor: 1 } })
+    await flush()
+    h.stop()
+    await run
+  })
+
+  it('names each call the Profile its own method belongs to', async () => {
+    // The fake server above refuses a mismatched profile, so this is the direct statement
+    // of what those refusals would have been about: two profiles on one connection.
+    const h = harness()
+    const run = runListen({ ack: true }, h.deps)
+    await flush()
+    const socket = h.connections[0]
+    socket.deliver(HELLO)
+    await flush()
+    serve(socket, { 'stream.auth': { device_id: 'd', cursor_accepted: 0, head_seq: 0 } })
+    await flush()
+    serve(socket, { 'sync.delta': { messages: [], has_more: false } })
+    await flush()
+    socket.deliver(incoming('msg-1'))
+    await flush()
+    serve(socket, { 'inbox.mark_read': {} })
+    await flush()
+    serve(socket, { 'stream.ack': { cursor: 1 } })
+    await flush()
+    const profileOfSent = (method: string): unknown =>
+      (socket.request(method).params as { meta?: { profile?: unknown } }).meta?.profile
+    expect(profileOfSent('stream.auth')).toBe('x_agentx.stream.v1')
+    expect(profileOfSent('sync.delta')).toBe('x_agentx.inbox.v1')
+    expect(profileOfSent('inbox.mark_read')).toBe('x_agentx.inbox.v1')
+    expect(profileOfSent('stream.ack')).toBe('x_agentx.stream.v1')
     h.stop()
     await run
   })

@@ -16,14 +16,38 @@ import { createDeliveryWorker } from './delivery/worker'
 import { createServer } from './http/server'
 import { createDispatch } from './rpc/dispatch'
 import { openStorage } from './storage/sqlite'
+import { createSubscriberRegistry } from './stream/registry'
+import { createStreamSession } from './stream/session'
 import type { RpcHandler } from './http/server'
 
 async function main(): Promise<void> {
   const config = loadConfig()
   const storage = openStorage({ path: config.dbPath })
 
-  const handleRpc: RpcHandler = createDispatch({ config, storage })
-  const server = createServer({ config, handleRpc })
+  // The two halves of one accepted message: the dispatcher writes it and commits, then
+  // hands the delivery here, and the registry writes it to whichever connections are
+  // watching that mailbox (realtime.md §8.1). Nothing is published from inside the
+  // transaction — see `dispatch.ts`'s `publish`.
+  const registry = createSubscriberRegistry()
+  const handleRpc: RpcHandler = createDispatch({
+    config,
+    storage,
+    onDelivered: (record) => {
+      registry.publish(record)
+    },
+  })
+  const session = createStreamSession({
+    serverDid: config.serviceDid,
+    storage,
+    registry,
+    handleRpc,
+    resolverOptions: config.didResolution,
+  })
+  const server = createServer({
+    config,
+    handleRpc,
+    handleStream: (connection, request) => session.handlersFor(connection, request),
+  })
   // Outbound `direct.incoming` pushes. Started only after the socket is up: a startup
   // that fails should exit without a background timer having already spent attempts.
   const delivery = createDeliveryWorker({ config, storage })
@@ -55,6 +79,9 @@ async function main(): Promise<void> {
     closing = true
     process.stdout.write(`\n${signal}: shutting down\n`)
     delivery.stop()
+    // Before `server.close()`: an upgraded socket is detached from the HTTP server, so its
+    // `close()` waits for connections it cannot reach. Nowhere else can end these.
+    session.closeAll('server shutting down')
     void server.close().then(() => {
       storage.close()
       process.exit(0)

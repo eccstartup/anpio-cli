@@ -29,6 +29,7 @@ import {
   validateInboxGetBody,
   validateMarkReadBody,
 } from './inbox'
+import { STREAM_ACK, STREAM_AUTH, STREAM_PROFILE, validateStreamAckBody, validateStreamAuthBody } from './stream'
 
 /**
  * P1 §6.2.5.1 L361–378 的四种模式，加上本服务给取件面自定的第五种。
@@ -157,6 +158,43 @@ const INBOX_MARK_READ_SPEC = extensionSpec(INBOX_MARK_READ, validateMarkReadBody
 const MESSAGE_GET_BATCH_SPEC = extensionSpec(MESSAGE_GET_BATCH, validateGetBatchBody)
 const SYNC_DELTA_SPEC = extensionSpec(SYNC_DELTA, validateDeltaBody)
 
+/**
+ * 流上的两个传输方法（realtime.md §4、§6）。
+ *
+ * 形状与取件面完全同构——自己那个 Profile、只认 `transport-protected`、要 proof、目标必须是
+ * 自己——因为它们服务的是**同一个**信箱，只是换了一条传输。`x_agentx.stream.v1` 而不复用
+ * `x_agentx.inbox.v1`，是 §9 定的：`meta.profile` 是"本次请求的唯一解释"（P1 §6.2.2 L277），
+ * 而"我要订阅"与"我要读一页"不是同一种解释。
+ *
+ * 都没有 `targetScope`：两者都不进幂等台账。`stream.auth` 的重放只是又注册一次订阅（连接
+ * 本来就是一次性的），`stream.ack` 的重放是 `advanceCursor` 的原地不动——那个访问器按
+ * **取大值**推进，重复投递同一个 `seq` 不改任何东西。
+ */
+const STREAM_AUTH_SPEC: MethodSpec = {
+  name: STREAM_AUTH,
+  targetMode: 'self-addressed',
+  profiles: [STREAM_PROFILE],
+  securityProfiles: ['transport-protected'],
+  requiredMeta: ['sender_did', 'operation_id'],
+  forbiddenMeta: [],
+  requiresOriginProof: () => true,
+  authCodes: P1_AUTH_CODES,
+  validateBody: (body) => validateStreamAuthBody(body),
+}
+
+const STREAM_ACK_SPEC: MethodSpec = {
+  name: STREAM_ACK,
+  targetMode: 'self-addressed',
+  profiles: [STREAM_PROFILE],
+  securityProfiles: ['transport-protected'],
+  requiredMeta: ['sender_did', 'operation_id'],
+  forbiddenMeta: [],
+  requiresOriginProof: () => true,
+  authCodes: P1_AUTH_CODES,
+  validateBody: (body) => validateStreamAckBody(body),
+}
+
+/** `POST /anp-im/rpc` 认得的方法。两个传输方法**不在其中**——理由写在 `stream.ts`。 */
 const METHODS: readonly MethodSpec[] = [
   DIRECT_SEND_SPEC,
   INBOX_GET_SPEC,
@@ -167,6 +205,12 @@ const METHODS: readonly MethodSpec[] = [
 
 export function lookupMethod(name: string): MethodSpec | undefined {
   return METHODS.find((spec) => spec.name === name)
+}
+
+/** 流上那两个方法的表。与 `METHODS` 分开查，是因为它们出自两条不同的传输，而"这个方法在
+ *  这条传输上认不认"必须只有一处答案——合起来的话，`stream.auth` 会在 HTTP 上也可达。 */
+export function lookupStreamMethod(name: string): MethodSpec | undefined {
+  return name === STREAM_AUTH ? STREAM_AUTH_SPEC : name === STREAM_ACK ? STREAM_ACK_SPEC : undefined
 }
 
 /** `meta.target` 是否满足这个方法声明的建模模式（P1 §6.2.5.1 L363–378）。

@@ -153,8 +153,25 @@
   `delivery_cursor` 表在 C5a 就建好了，推进它的是 C7 的 `ack` 而不是 `sync.delta`。
   **`direct.get_history` v1 不发**，`since_seq` 没有覆盖出站一半的定义，理由写进 §9.3。
   存储 9 + 派发 13 + CLI 渲染 8 个测试；service 186 / core 666 / cli 206）
-- C7 **订阅路**：`GET /anp-im/stream` + 订阅者注册表 + 补齐期间缓冲与背压
-  （时序见 [realtime.md](docs/design/realtime.md) §5.2/§5.3）
+- ~~C7 订阅路：`GET /anp-im/stream` + 订阅者注册表 + 补齐期间缓冲与背压~~（2026-10-01。
+  两处与 §5.2 字面不同，都是实现逼出来的，理由写在 `stream/registry.ts` 头部：
+  **①** 放行按补齐**实际结束**的 `next_since` 过滤，不按注册时的 `H`——`sync.delta` 只认
+  `since`+`limit`，注册与补齐之间落库的消息会同时在补齐结果与缓冲区里，按 `H` 刷就是
+  重复投递；**②** 序号是**收件箱级**的（`deliveries.seq` 按 owner 递增），游标才按设备，
+  所以注册表按 `owner_did` 路由（原 §5.1/§8.1 写成按 `(owner, device)`，已改）。
+  两处上限：补齐期按帧数与字节数（§5.3），实时期按 socket 写队列深度——不读与不补齐是
+  同一个问题。断连码 1013（"你再来"）对 1001（"我走了"）。
+  `stream.ack` 是 `delivery_cursor` **唯一**的写入者，且写前把 `seq` 钳到当前 head：
+  `advanceCursor` 只进不退，凭空来的大数会让下一次重连静默跳过真实消息。
+  推送在**事务提交之后**（`dispatch.ts` 收集，提交后才交给注册表），事务里推的话一次
+  回滚就会让在线客户端看到一封从未落库的消息。
+  CLI 侧一个真 bug：`meta.profile` 原来一条连接只给 `x_agentx.stream.v1`，而
+  `sync.delta` / `inbox.mark_read` 属 `x_agentx.inbox.v1`，真服务会对整个补齐回 1001；
+  测试里的假服务不校验 profile 所以没红——它现在校验了。`--ack` 除 `inbox.mark_read`
+  外再发 `stream.ack`；补齐段不 ack（游标只进不退，第一条实时 ack 自然带过，
+  且 `--once` 要保持 §7.2 的只读语义）。文档改 realtime.md §4/§5.1/§5.2/§5.5/§6/§8.1/§9
+  与 message-service.md §2.1（426）、§9.3。真机冒烟：426、`stream.hello` 首帧、
+  带活连接 SIGTERM → 客户端收 1001 且进程 exit 0。service 240 / core 666 / cli 207）
 - C8 `/.well-known/anp-message-service.json` + `x_agentx` 扩展块
 - C9 P4 群组 + Group Host（线性顺序 / `group_state_version` / `group_event_seq`）
 - C10 P7 附件数据面（Slot → PUT → commit → ticket → GET）
