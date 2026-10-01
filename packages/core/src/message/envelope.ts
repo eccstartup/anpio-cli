@@ -208,12 +208,23 @@ export const ANP_ERRORS = {
 export type AnpErrorCode = keyof typeof ANP_ERRORS
 
 /**
+ * 一个 `anp_code` 的名字。
+ *
+ * P1 §10.3 L697–722 固定的是**公共**那一段（1000–1021）。各业务 Profile 在那之外
+ * 追加自己的段（P3 2000–2007、P4 3000–3010、P5 4000–4012…，见
+ * `message-service.md` §4.1），所以这个位置**不是**封闭联合——写成 `AnpErrorCode`
+ * 会让服务端拿不到自己 Profile 的码。`(string & {})` 是 TS 的惯用写法：任意字符串
+ * 都收，同时保留公共码的字面量补全。
+ */
+export type AnpErrorName = AnpErrorCode | (string & {})
+
+/**
  * 一次拒绝。`anpCode` 只在 `code` 落在 ANP 自定义段（1000+）时才有值——
  * §10.2 L695 只对那段强制 `error.data.anp_code`。标准码（-32xxx）靠 `message` 区分。
  */
 export interface AnpRejection {
   code: number
-  anpCode?: AnpErrorCode
+  anpCode?: AnpErrorName
   retryable: boolean
   message: string
   details?: Record<string, unknown>
@@ -261,6 +272,28 @@ export function rpcRejection(
     retryable: false,
     message,
     ...(details ? { details } : {}),
+  }
+}
+
+/**
+ * 用**业务 Profile 自己的**错误码构造一次拒绝。
+ *
+ * `code` 与 `anpCode` 必须来自同一份 Profile 码表，所以由调用方同时给出——规范里
+ * 那张表就是这两列，分开硬编码等于给了写错其中一列的机会。
+ * （P1 公共段的便捷入口是 {@link anpRejection}。）
+ */
+export function profileRejection(
+  code: number,
+  anpCode: string,
+  message: string,
+  opts: { retryable?: boolean; details?: Record<string, unknown> } = {},
+): AnpRejection {
+  return {
+    code,
+    anpCode,
+    retryable: opts.retryable ?? false,
+    message,
+    ...(opts.details ? { details: opts.details } : {}),
   }
 }
 

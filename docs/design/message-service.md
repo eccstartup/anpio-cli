@@ -222,6 +222,11 @@ KeyPackage 的 reserved / consumed 状态由本服务管。
 ⚠ **P5 §1532 的正文写"5000-5012 码段"，与同文件错误表里的 4000–4012 矛盾。
 按表实现（4000–4012），并在代码里引这一句说明为什么。**
 
+码在代码里有两条路：P1 那一段（1000–1021）走 core 的 `anpRejection`，它按表把 `code`
+填好；Profile 自己的段走 `profileRejection(code, anpCode, …)`，因为 P1 那张表里**没有**
+这些码——`ANP_ERRORS` 只覆盖公共段，`AnpRejection.anpCode` 因此是开放的字符串
+（`AnpErrorName`），不是封闭联合。默认的 1005 / 2005 见 §5.1。
+
 ## 5. 认证
 
 ### 5.1 `origin_proof`（P1 附录 A）
@@ -235,8 +240,30 @@ KeyPackage 的 reserved / consumed 状态由本服务管。
 
 验签之后**还要**校验归属：
 
-- `keyid` 所属 DID **必须**等于 `meta.sender_did`
-- 该 `keyid` **必须**被 DID 文档的 `authentication` 授权
+- `keyid` 所属 DID **必须**等于这次调用的**锚点**（P3 §9.2 L515 的 `meta.sender_did` 是
+  普通请求那一栏；群通知那一栏见下）
+- 该 `keyid` **必须**被 DID 文档的 `authentication` 授权（P2 §5.2 L208；
+  `resolveDid.ts:1120` 查的就是这一条）
+
+**锚点由同一个函数按方法算出**（`rpc/auth.ts` 的 `callerAnchor`）：普通方法取
+`meta.sender_did`，群通知取 `body.group_did`。取 `body` 那一栏的理由是**不一致时**仍然
+拿群身份去校验——`meta.sender_did == body.group_did` 是 P4 §8.11 L922 要求处理器另查的
+一条 MUST，不是认证层可以假定的前提。缺了群身份就该报"没有锚点"，**绝不能回落到**
+`meta.sender_did`：攻击者在自己的域里建个 DID 就能冒充任何群。
+
+**失败报哪个码由方法表给出**，不由认证层写死。同一件事在各 Profile 里的码不一样：
+P1 §10.3 L706 只有 `anp.unauthorized`（1005），P3 §11 L599–600 把它拆成
+`direct.invalid_origin_proof`（2005）与 `direct.origin_did_mismatch`（2006）。
+所以 `authenticate()` 收一对码（`AuthErrorCodes`），默认是 P1 那对。
+
+**时间窗在认证这一步一起判**，但只认 proof 自己带来的 `expires`、以及明显跑在前面的
+`created`（默认 60 秒时钟偏斜）。**不加**年龄上限：P1 附录 A 只规定摘要与签名怎么算，
+§13.2 L816 更是明确"`created_at` 不得作为唯一防重放机制，防重放由后续 Profile 在会话态、
+消息态或群态中定义"——那在本服务里就是 C4 的幂等记录。年龄上限是替 Profile 立规矩。
+
+**失败分类不进线上错误对象。** `digest_mismatch` / `key_unresolved` / `signature_invalid`
+逐条答出去，就成了"这个 keyid 被授权了吗"的 oracle（core 的 `verify.ts` 写了这条）。
+分类回给服务自己记日志，对端只看到一句"证明没通过"。
 
 **同域也要验 `origin_proof`。** 规范里"本地 bearer token"只是**非规范性优化**，
 且**MUST NOT** 替代 `origin_proof`（P3 §9.5）。本服务可以选择**也**支持一条 bearer 快捷路径，
@@ -255,6 +282,9 @@ KeyPackage 的 reserved / consumed 状态由本服务管。
 
 第 3 条这两行必须挨着写在**同一个函数**里。分成两处判断，就是这类实现最经典的漏洞
 （用 `sender_did` 去校验一条群通知，攻击者只要在自己域里建个 DID 就能冒充）。
+
+这个函数就是 §5.1 的 `callerAnchor`——同一份判断服务两处检查：业务层的 proof 归属
+（§5.1）与这里跨域外层服务的 `serviceDid` 归属。两处各写一遍，就回来了。
 
 ### 5.3 CAIP-10 调用者
 

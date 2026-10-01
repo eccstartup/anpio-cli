@@ -26,7 +26,12 @@ export interface VerifyOriginProofInput {
   method: string
   meta: AnpMeta
   body: Record<string, unknown>
-  auth: AnpAuth
+  /**
+   * 可选——P1 §6.1 L226 说 `auth` 只在 Profile 明确要求时才出现，而"这个方法是要求
+   * proof 的方法"是方法表的判断，不是这个函数的判断。缺了它就是 `scheme_unsupported`
+   * （P3 §7.1 L390 把"缺失"与"无效"列在同一个码下），而不是调用方的类型错误。
+   */
+  auth?: AnpAuth
   /**
    * 这次调用**应当**由谁发起。普通请求传 `meta.sender_did`；群通知传
    * `body.group_did`。服务端必须在同一个函数里按方法算出它——分两处判断就是

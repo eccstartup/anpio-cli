@@ -1,6 +1,13 @@
 import { describe, it, expect } from 'vitest'
 import { ConnectxError } from '../errors'
-import { buildMessageRequest, parseEnvelope, isNotification, type AnpMeta } from './envelope'
+import {
+  buildMessageRequest,
+  isNotification,
+  parseEnvelope,
+  profileRejection,
+  toErrorObject,
+  type AnpMeta,
+} from './envelope'
 
 function meta(overrides: Partial<AnpMeta> = {}): AnpMeta {
   return {
@@ -85,5 +92,23 @@ describe('buildMessageRequest', () => {
 
     const extension = { ...meta(), x_agentx_retry: 1 } as unknown as AnpMeta
     expect(() => buildMessageRequest({ id: 'r', method: 'direct.send', meta: extension })).not.toThrow()
+  })
+})
+
+describe('profileRejection', () => {
+  // P1 §10.3 L697 固定的只是公共段 1000–1021；业务 Profile 的码在它之外（P3 2000–2007）。
+  // 这条护栏守的是：那种码能进 `anp_code`，且 `code` 不被误算成公共表里的值。
+  it('carries a code from a Profile segment, not the P1 table', () => {
+    const rejection = profileRejection(2005, 'direct.invalid_origin_proof', 'origin_proof did not verify')
+    expect(rejection.code).toBe(2005)
+    expect(toErrorObject(rejection).data).toMatchObject({
+      anp_code: 'direct.invalid_origin_proof',
+      retryable: false,
+    })
+  })
+
+  it('marks a retryable Profile error as such', () => {
+    const rejection = profileRejection(2000, 'direct.recipient_unreachable', 'try again', { retryable: true })
+    expect(rejection.retryable).toBe(true)
   })
 })

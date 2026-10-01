@@ -90,10 +90,30 @@
   `never`，判别一律用 `'id' in value`（`envelope.ts` 里写了原因，`main.ts` 与测试都照做）。
   §3 表里有两行**不在这里**，它们要方法自己的声明而不是信封：target 建模模式（§6.2.5.1 L382）
   与 §7.3 L491–499 的十进制字符串计数器，随 C5 的方法表一起来）
-- C3 Auth：`origin_proof` 验签 + `keyid` 归属 + `authentication` 授权
+- ~~C3 Auth：`origin_proof` 验签 + `keyid` 归属 + `authentication` 授权~~（2026-10-01。
+  验签主体是 core 的 `verifyOriginProofDetailed`（`resolveDid.ts:1120` 查 `authentication`），
+  `rpc/auth.ts` 补服务端才需要的三件：算锚点、把失败翻成规范错误码、把时间窗一起判掉。
+  锚点＝**一个** `callerAnchor()`：普通方法取 `meta.sender_did`，群通知取 `body.group_did`，
+  群身份缺失时**不回落**到 `sender_did`（回落就等于谁都能冒充群）。错误码**由方法表给**
+  ——P1 只有 1005，P3 §11 L599–600 拆成 2005/2006，所以 `authenticate()` 收一对码。
+  时间窗只认 proof 自带的 `expires` 与跑在前面的 `created`，**不加**年龄上限（P1 §13.2 L816
+  把防重放交给 Profile，本服务里就是 C4 的幂等记录）。失败分类**不上线**，只回给服务记日志
+  （逐条答出去就是 keyid 授权状态的 oracle）。20 个测试，用 `DidKeyResolver` + 内联文档跑
+  真签名——`DidKeyResolver` 原先一个调用点都没有，这是它的第一个。
+  顺带修了 core 两处：`AnpRejection.anpCode` 原先是 `AnpErrorCode` 封闭联合，而 P1 §10.3
+  只固定公共段，Profile 自己的码（2005）根本写不进去，改成开放的 `AnpErrorName` 并加
+  `profileRejection`；`VerifyOriginProofInput.auth` 改成可选——函数体本来就写着
+  `input.auth?.scheme`，缺 `auth` 是 `scheme_unsupported`（P3 L390 与"无效"同码），
+  不是调用方的类型错误）
 - C4 幂等（事务内写消息 + 幂等记录），含 DID 取代时的精确重放
 - C5 `direct.send` 全流程 + `direct.incoming` 异步推送 + `outbox` 退避重试
-  （含 C2 挪过来的两行：target 建模模式 §6.2.5.1 L382、§7.3 L491–499 计数器）
+  （含 C2 挪过来的两行：target 建模模式 §6.2.5.1 L382、§7.3 L491–499 计数器；
+  含 C3 挪过来的**方法表 + 解析器接线**：哪些方法要求 `origin_proof`（P3 §4.3 L161 还有
+  一条覆盖——`meta.profile = anp.direct.e2ee.v2` 时 P3 的 proof 强制要求由 P5 覆盖），
+  以及给方法配哪一对码。生产用的 `DidKeyResolver` 选项要跟着进 `config.ts`：
+  core 的 `allowedHosts` 是**必填**的 SSRF 允许清单，所以需要一个
+  `AGENTX_ALLOWED_DID_HOSTS`（缺省＝不做远程解析，fail closed），联调再用一个显式的
+  私有/明文主机开关，而不是把校验关掉）
 - C6 取件扩展面 + 游标（`delivery_cursor`）
 - C7 **订阅路**：`GET /anp-im/stream` + 订阅者注册表 + 补齐期间缓冲与背压
   （时序见 [realtime.md](docs/design/realtime.md) §5.2/§5.3）

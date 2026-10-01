@@ -110,6 +110,7 @@ const MAIN = [
   'toErrorObject',
   'anpRejection',
   'rpcRejection',
+  'profileRejection',
   'firstUnknownMetaField',
   'parseEnvelope',
   'isNotification',
