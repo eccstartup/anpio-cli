@@ -44,18 +44,67 @@ export interface DeviceRequirement {
 }
 
 /**
+ * 这次调用**点名**的一台设备：谁的，以及哪一台。
+ *
+ * 两段要在同一个返回值里，因为资格判定的两项输入就是它们——`identity` 决定解析谁的文档，
+ * `deviceId` 决定在清单里选哪一条。拆成两个平行数组（DID 一串、设备一串）会让"第几台对第
+ * 几个 DID"变成调用方每次都得对齐的事，而错位的表现是拿 A 的清单去查 B 的设备。
+ */
+export interface DevicePair {
+  /** 拥有这台设备的 Agent DID。 */
+  identity: string
+  /** 设备 selector（P5 的 `sender_device_id` / `recipient_device_id`，或正文里的目标设备）。 */
+  deviceId: string
+}
+
+/**
+ * 一对设备在幂等键里的那一段（P1 §9.1 L639 的 `deviceSelectors`）。
+ *
+ * **两侧都要写进去，不能只写设备 id。** `idempotencyKey()` 会把这一段排序后逗号连接
+ * （P1 §9.1 L639 只说"设备维度"，没说顺序有意义），而 `P2 §5.5 L263` 明写 `device_id`
+ * 是一个**不透明字符串**——两端的 DID 各自取的名字撞上同一个 `dev-a` 是完全可能的。那时
+ * "S 的 dev-a → R 的 dev-b" 与 "S 的 dev-b → R 的 dev-a" 会算出同一个键，第二次**合法**
+ * 的操作被回成 `anp.idempotency_conflict`（1008）。带上 owner DID 之后这两个键就分开了。
+ *
+ * 分隔符用 `#`：DID Core 的 `idchar` 只允许 `ALPHA / DIGIT / . / - / _ / pct-encoded`，
+ * 所以第一个 `#` 必定是这一对的分隔符，即使设备 id 自己含 `#` 也切得回来。这与 core 的
+ * `idempotencyKey()` 用长度前缀是同一个目的，只是这里两侧的边界还能靠字符集认出来。
+ */
+export function deviceSelector(pair: DevicePair): string {
+  return `${pair.identity}#${pair.deviceId}`
+}
+
+/**
  * 这次调用是**设备定址**的，以及这意味着什么。
  *
  * 两件事放在一个返回值里而不是方法表上两个字段，是因为它们**只有一个前提**："这次调用
- * 点名了两台设备"。断成两处就会有两处各自判这个前提，而漏掉一处不会编译失败——表现是
+ * 点名了合格的设备对"。断成两处就会有两处各自判这个前提，而漏掉一处不会编译失败——表现是
  * 幂等键少了设备段（同一个操作从两台设备发出被当成两件事），或者资格根本没查。
  */
 export interface DeviceAddressed {
-  /** `[sender_device_id, recipient_device_id]`，按 §11.5 L1458 写的顺序。它们进幂等键
-   *  （§9.1 L639），所以顺序由 Profile 说了算；`idempotencyKey()` 会再排序。 */
-  readonly selectors: readonly [string, string]
-  /** 这两台设备各自要满足的资格（§4.1.1）。 */
+  /**
+   * 这次调用点名的设备，**每台一次**。
+   *
+   * 是数组而不是固定两段：`direct.send` 点名两台（发送方与收件设备），而
+   * `direct.e2ee.publish_prekey_bundle` 只点名一台（发布方自己，§7.1 L476），
+   * `get_prekey_bundle` 又点两台但其中一台在 **正文**里（§7.2 L563 的 `target_device_id`）
+   * 而不是在 `meta.target.did` 上——那里放的是**服务**的 DID。固定两段装不下这三种。
+   *
+   * 顺序**不重要**：进幂等键时 `idempotencyKey()` 会排序（P1 §9.1 L639）。
+   */
+  readonly pairs: readonly DevicePair[]
+  /** 这些设备各自要满足的资格（§4.1.1）。 */
   readonly requirement: DeviceRequirement
+  /**
+   * **重放时要不要重判资格。** 缺省不重判。
+   *
+   * §9.1 L630 要求重放拿到同一个结果，所以 `direct.send` 跳过（`eligibilityFor` 上写了
+   * 完整理由）。但 §7.2 L572 对 `get_prekey_bundle` 说的是另一半：**"在返回材料前"**服务
+   * MUST 按 §4.1.1 验证精确的目标设备，§12.4 L1515 又要求设备一旦失去资格就 MUST 停止返回
+   * 它的 PreKey 材料。两者的分界是**返回的是现成的结果还是密钥材料**——前者是历史，后者是
+   * 一次新的发放。所以这一档由方法自己定，不在这里替它选。
+   */
+  readonly recheckOnReplay?: boolean
 }
 
 export interface DeviceEligibilityInput {
@@ -66,6 +115,19 @@ export interface DeviceEligibilityInput {
   /** P5 的 `meta.sender_device_id` / `meta.recipient_device_id`。 */
   deviceId: string
   opts?: LocateOptions
+}
+
+/**
+ * 一次资格判定的**全部**产出：选中的那条**与**交出它的那份文档。
+ *
+ * 文档是给 Bundle 的 Object Proof 用的（P5 §6.2.3 L395）：那份证明的公钥只能从 issuer 的
+ * DID 文档里取，而这次解析已经把它拿在手里。只交条目会让同一次发布把它解析两遍。
+ */
+export interface EligibleDevice {
+  /** §4.1.1 第 1 项：`d` 在清单里**恰好**选中这一条。 */
+  entry: DeviceEntry
+  /** 交出这条清单的文档，也就是 issuer 文档。 */
+  document: Record<string, unknown>
 }
 
 /** 设备的显示名，只进日志与错误消息——它是对端写的字符串，不得进任何判定。 */
@@ -80,9 +142,12 @@ function name(identity: string, deviceId: string): string {
  * Profile"，最后"密钥引用落在要求的关系里"。把顺序反过来会让一条恶意的清单选择把错误码
  * 引到别的分支上。
  */
-export async function checkDevice(input: DeviceEligibilityInput): Promise<DeviceEntry | AnpRejection> {
+export async function checkDevice(
+  input: DeviceEligibilityInput,
+): Promise<EligibleDevice | AnpRejection> {
   const { resolver, requirement, identity, deviceId } = input
-  const entries = await resolver.resolveDevice(identity, deviceId, input.opts ?? {})
+  const resolved = await resolver.resolveDevice(identity, deviceId, input.opts ?? {})
+  const { entries, document } = resolved
 
   // §4.1.1 第 1 项：`d` **恰好**选中当前清单里的一条。零条与多条是两回事——零条是"这台
   // 设备不存在了"，多条是"这份文档违反 P2 §5.5 规则 3（`device_id` MUST 唯一）"。前者的
@@ -127,12 +192,12 @@ export async function checkDevice(input: DeviceEligibilityInput): Promise<Device
       { details: { device_id: deviceId, e2ee_key_id: entry.e2eeKeyId } },
     )
   }
-  return entry
+  return { entry, document }
 }
 
-/** 交回的是条目还是拒绝——调用点写 `if (isRejection(outcome)) return …`，
- *  否定分支就被收窄成条目。`code` 是 `AnpRejection` 独有的数字字段，所以这个判别不会
- *  因为将来给条目加一个字段而失效。 */
-export function isRejection(outcome: DeviceEntry | AnpRejection): outcome is AnpRejection {
+/** 交回的是设备还是拒绝——调用点写 `if (isRejection(outcome)) return …`，
+ *  否定分支就被收窄成 {@link EligibleDevice}。`code` 是 `AnpRejection` 独有的数字字段，
+ *  所以这个判别不会因为将来给条目加一个字段而失效。 */
+export function isRejection(outcome: EligibleDevice | AnpRejection): outcome is AnpRejection {
   return 'code' in outcome
 }

@@ -42,8 +42,13 @@
  *  Mailbox of exactly one `(recipient_did, recipient_device_id)`, and §10.7.1 L1407 forbids
  *  fanning it out to a sibling device. The column is what makes the push pick one
  *  connection instead of broadcasting to the account (e2ee-direct.md §4). Nullable, so
- *  `ALTER TABLE ADD COLUMN` suffices and every P3 row keeps its "no device" meaning. */
-export const SCHEMA_VERSION = 7
+ *  `ALTER TABLE ADD COLUMN` suffices and every P3 row keeps its "no device" meaning.
+ *
+ *  v8: `one_time_prekeys` is new — the per-device OPK pool P5 §6.6 hands out from. Like
+ *  v3 and v6 it arrives through the `IF NOT EXISTS` pass and needs no migration step of
+ *  its own; the version still moves, or a file written by v7 would return early from
+ *  `applySchema` and never get the table. */
+export const SCHEMA_VERSION = 8
 
 export const SCHEMA: readonly string[] = [
   // ---- idempotency -----------------------------------------------------------
@@ -193,6 +198,35 @@ export const SCHEMA: readonly string[] = [
      published_at     TEXT NOT NULL,
      PRIMARY KEY (owner_did, owner_device_id)
    )`,
+  // 一次性预共享钥池（P5 §6.6）。**每人每设备一张池子**，取用是**耗尽型**的：一个 OPK
+  // 一旦发出去就不再回来（§6.6 L849 建链成功后标已消费，而本服务看不到建链，见
+  // [e2ee-direct.md](../../../docs/design/e2ee-direct.md) §2），所以 `state` 只有
+  // `available` 与 `assigned` 两个值，没有 `consumed`——一个没人会写的状态就是死代码。
+  //
+  // 没有 `assignment_key` 列：它要回答的是"同一个幂等键重试拿回同一个 OPK"，而这件事已经
+  // 由 `idempotency` 那张表回答了（§7.2 L572 的重试**不重新执行**处理器，见 dispatch.ts 的
+  // `acceptOperation`）。再存一份就是同一个事实的第二个说法，两者一旦不同步没有谁能判谁对。
+  //
+  // `assigned_to` / `assigned_at` 仍然留着：它们不是给幂等用的，是"这枚 OPK 被发给谁了"的
+  // 唯一记录——§6.6 要求它 **MUST NOT** 被并发发给两个发送方，出问题时这是仅有的取证材料。
+  //
+  // 主键含 `opk_id`（发布方自己起的名，§6.4 L401），所以同一个 `key_id` 重传是**忽略**
+  // 而不是覆盖：先写者赢，否则后一次上传能把一枚已经发出去的公钥换掉。
+  `CREATE TABLE IF NOT EXISTS one_time_prekeys (
+     owner_did        TEXT NOT NULL,
+     owner_device_id  TEXT NOT NULL,
+     opk_id           TEXT NOT NULL,
+     public_key_b64u  TEXT NOT NULL,
+     state            TEXT NOT NULL,
+     assigned_to      TEXT,
+     assigned_at      TEXT,
+     uploaded_at      TEXT NOT NULL,
+     PRIMARY KEY (owner_did, owner_device_id, opk_id)
+   )`,
+  // 取用走的就是这一条（最早上传的先用），`state` 放在最后一段是因为 ORDER BY 要用
+  // `uploaded_at` 而过滤条件已经由主键前缀定死。
+  `CREATE INDEX IF NOT EXISTS one_time_prekeys_pool
+     ON one_time_prekeys (owner_did, owner_device_id, state, uploaded_at)`,
   `CREATE TABLE IF NOT EXISTS group_key_packages (
      owner_did        TEXT NOT NULL,
      owner_device_id  TEXT NOT NULL,

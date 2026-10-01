@@ -131,6 +131,50 @@ export interface StoredGroupEvent {
 }
 
 /**
+ * One published PreKey Bundle (P5 §7.1 L467), one row per `(owner_did, owner_device_id)`.
+ *
+ * `bundleJson` is the `body.prekey_bundle` object **verbatim**, `proof` included: §7.2 hands
+ * the same object back out and the sender re-verifies it (§6.5), so anything this service
+ * normalized away would change what the sender is checking. The service never reads inside
+ * it.
+ *
+ * One row per device rather than a history: §7.3 L592 returns "the latest" bundle, and
+ * §6.2.2 L371's uniqueness rule is checked against the row already here (see
+ * `upsertPrekeyBundle`).
+ */
+export interface StoredPrekeyBundle {
+  ownerDid: string
+  ownerDeviceId: string
+  bundleId: string
+  bundleJson: string
+  publishedAt: string
+}
+
+/**
+ * One one-time prekey in a device's pool (P5 §6.6).
+ *
+ * `state` is `available` | `assigned`, and `assigned` is TERMINAL. §6.6 L849 asks for a
+ * second transition on session setup (`consumed`), but that happens between the two callers
+ * and this service is not on that path — so it would be a state nothing ever writes, which
+ * is why there is not one (e2ee-direct.md §2).
+ *
+ * `assignedTo` is not bookkeeping for idempotency — that is the `idempotency` table's job.
+ * It is the only record of which sender received this key, which §6.6 needs to be able to
+ * say when a key shows up in two sessions.
+ */
+export interface StoredOneTimePrekey {
+  ownerDid: string
+  ownerDeviceId: string
+  keyId: string
+  publicKeyB64u: string
+  state: string
+  /** The DID the key was handed to, on the `get_prekey_bundle` that took it. */
+  assignedTo?: string
+  assignedAt?: string
+  uploadedAt: string
+}
+
+/**
  * One upload slot, halfway through its §10.1 lifecycle (attachments.md §2).
  *
  * `state` is `pending` | `uploaded` | `committed` | `aborted`. `expired` is deliberately
@@ -381,6 +425,54 @@ export interface Storage {
    *  table an ordered replay source even though its sequence numbers are not contiguous
    *  (group messages take numbers without leaving an event row). */
   appendGroupEvent(event: StoredGroupEvent): void
+
+  // ---- E2EE key material (P5, C12) -------------------------------------------
+  //
+  // Two of the three surfaces P5 §7 defines. The third — `direct.send` carrying ciphertext
+  // — is not here at all: the service stores opaque bytes in `messages`/`deliveries` and
+  // never touches key material for it.
+
+  /** The device's current bundle, or `undefined` if it never published one. */
+  prekeyBundle(ownerDid: string, ownerDeviceId: string): StoredPrekeyBundle | undefined
+  /** Write the device's bundle, replacing the row it had.
+   *
+   *  Replacing is right because §7.3 L592 returns the latest one, and because §6.2.2 L371's
+   *  rule is about the ACCEPTING WINDOW, not about history: an old bundle carrying a
+   *  redefined `bundle_id` stops mattering the moment the device publishes a new row —
+   *  which is exactly what §6.5's re-verification by the sender would do too.
+   *
+   *  The uniqueness check itself (`bundle_id` → the six fields, §6.2.2 L371) is the caller's,
+   *  against {@link Storage.prekeyBundle}: it needs to compare six fields of the stored JSON
+   *  and then produce a 4001, neither of which belongs in a row accessor. */
+  upsertPrekeyBundle(bundle: StoredPrekeyBundle): void
+
+  /** Add prekeys to a device's pool, and return how many were actually NEW.
+   *
+   *  `key_id` is chosen by the publisher (§6.4 L401), so a re-upload of the same id is
+   *  expected: it is ignored rather than overwritten — first writer wins, or a later upload
+   *  could replace a public key that has already been handed to a sender. The count is what
+   *  `published_opk_count` reports (§7.1 L497), so it must be the rows that landed, not the
+   *  length of the argument. */
+  insertOneTimePrekeys(keys: readonly StoredOneTimePrekey[]): number
+
+  /** Take the oldest `available` prekey from the device's pool and mark it assigned in the
+   *  same call, returning it. `undefined` when the pool is dry.
+   *
+   *  One accessor rather than a read plus a write, because §6.6 L847 forbids handing one
+   *  prekey to two senders: the claim is the conditional UPDATE, and only the caller that
+   *  moved the row out of `available` gets to return it. Inside an operation's transaction
+   *  (`BEGIN IMMEDIATE`) the two statements cannot be split; called on its own by two
+   *  processes, at most one of them sees `changes > 0`. */
+  claimOneTimePrekey(
+    ownerDid: string,
+    ownerDeviceId: string,
+    assignedTo: string,
+    assignedAt: string,
+  ): StoredOneTimePrekey | undefined
+
+  /** How many prekeys are still `available`. `require_opk` (§7.2 L479) is answered from
+   *  this, not from a claim that has already taken one. */
+  availableOneTimePrekeys(ownerDid: string, ownerDeviceId: string): number
 
   // ---- attachments (P7, C10) -------------------------------------------------
   //

@@ -14,6 +14,7 @@
 
 import {
   anpRejection,
+  ConnectxError,
   type AnpMeta,
   type AnpParams,
   type AnpRejection,
@@ -142,18 +143,31 @@ export function directSendParams(params: AnpParams): AnpRejection | undefined {
  * §9.1 L639 / §11.5 L1458：只有设备定址的 E2EE Overlay 才把设备 selector 放进幂等键、
  * 才要验两台设备的资格（§10.7 L1388）。
  *
- * 两段按 §11.5 写的顺序给（sender 在前）：`idempotencyKey()` 会排序，所以顺序在这里只是
- * "我们交给它的就是规范写的那两段"，键本身的等价类不受影响。P5 里排序不会把两个不同的
- * 操作并成一个：§3.7 L136 要求每个收件设备的密文各自带**唯一**的 id 对，所以角色互换的
- * 那次请求不会带同一个 `operation_id`。
+ * 这一档**不重判重放**：§9.1 L630 要求同一个幂等键重试拿到同一个结果，而资格是**当下**的
+ * 事实（§4.1.1 L171）。`eligibilityFor` 上写了完整理由。
  *
- * 这个函数**假定** `directSendParams` 已经放行——两个 selector 都在。调用点确实是这样：
- * 方法表在 `checkMethod` 的最后一项才问它，而 1015 就在前面一步。
+ * 这个函数**假定** `checkMethod` 已经放行——`directSendParams` 保证两个 selector 都在
+ * （§9.3 L823–824 的 1015 就在前面一步），静态的 `requiredMeta` 与 `targetMode` 保证
+ * `sender_did` 与 `target` 也在。到不了的情形当场抛而不是交回 `undefined`：交回
+ * `undefined` 的意思是"这次调用不是设备定址的"，而它**是**——那会让幂等键少两段、资格
+ * 一次都不查，且没有任何东西会红（与下面 `targetScope` 抛掉空串是同一个理由）。
  */
 export function directSendDeviceAddressed(meta: AnpMeta): DeviceAddressed | undefined {
   if (meta.profile !== DIRECT_E2EE_PROFILE) return undefined
   const sender = meta.sender_device_id
   const recipient = meta.recipient_device_id
-  if (sender === undefined || recipient === undefined) return undefined
-  return { selectors: [sender, recipient], requirement: DIRECT_E2EE_DEVICE }
+  const senderDid = meta.sender_did
+  const target = meta.target
+  if (sender === undefined || recipient === undefined || senderDid === undefined || target === undefined) {
+    throw new ConnectxError('message_invalid', `${DIRECT_E2EE_PROFILE} requires both device selectors and meta.target`)
+  }
+  // 两台各自带自己的 identity：发送设备挂在**发送方**的清单下，收件设备挂在**收件 DID** 的
+  // 清单下。少了这一层，`checkDevice` 就只能拿一个 DID 去查两台设备的条目。
+  return {
+    pairs: [
+      { identity: senderDid, deviceId: sender },
+      { identity: target.did, deviceId: recipient },
+    ],
+    requirement: DIRECT_E2EE_DEVICE,
+  }
 }

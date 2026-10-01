@@ -191,8 +191,11 @@ describe('direct.send under the e2ee overlay', () => {
   })
 
   it('hands both device selectors to the idempotency key, sender first (§11.5 L1458)', () => {
-    expect(spec().deviceAddressed?.(e2ee().meta)).toEqual({
-      selectors: ['dev-s', 'dev-r'],
+    expect(spec().deviceAddressed?.(e2ee().meta, {})).toEqual({
+      pairs: [
+        { identity: 'did:web:sender.example', deviceId: 'dev-s' },
+        { identity: 'did:web:receiver.example', deviceId: 'dev-r' },
+      ],
       requirement: {
         profiles: expect.arrayContaining(['anp.direct.e2ee.v2']),
         signingRelationship: 'assertionMethod',
@@ -204,7 +207,7 @@ describe('direct.send under the e2ee overlay', () => {
   it('has no device addressing on a Base operation', () => {
     // §9.1 L639: for a DID-addressed Base operation the device identifiers are not part of
     // the idempotency scope — and there are none to check either.
-    expect(spec().deviceAddressed?.(meta())).toBeUndefined()
+    expect(spec().deviceAddressed?.(meta(), {})).toBeUndefined()
   })
 })
 

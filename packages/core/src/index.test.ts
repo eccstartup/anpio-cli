@@ -143,6 +143,13 @@ const MAIN = [
   // 要读的正是这一条，把类型名留在包里会让调用方各写一遍字面量
   'DEVICE_MANIFEST_TYPE',
   'DidDeviceResolver',
+  // P1 附录 B 的共享 Object Proof Profile：给任意对象盖的章。与 DID 文档自己的
+  // `verifyDidDocumentProof`（在 advanced）分开，因为 issuer 的公钥不在被证明对象里
+  'verifyObjectProof',
+  'verifyObjectProofDetailed',
+  // keyid 的比较规则（P5 §6.5 要服务端比的两处都是 keyid）：留在包里，调用方就不必
+  // 把"相对形式与完整形式是同一颗钥"这条再实现一遍
+  'canonicalDidUrl',
   // P2 发现：静态 hint 与运行时能力分开持有，§8.3 的"以运行时为准"有名字
   'ANP_MESSAGE_SERVICE_TYPE',
   'discoverMessageService',

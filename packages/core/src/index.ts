@@ -245,7 +245,17 @@ export type {
 export { idempotencyKey, idempotencyVerdict, idempotencyScopeFromMeta } from './message/idempotency'
 export type { IdempotencyScope, IdempotencyRecord, IdempotencyVerdict } from './message/idempotency'
 export { DEVICE_MANIFEST_TYPE, DidDeviceResolver } from './message/devices'
-export type { DeviceEntry, DeviceRelationship, DeviceResolver } from './message/devices'
+export type { DeviceEntry, DeviceRelationship, DeviceResolver, ResolvedDeviceManifest } from './message/devices'
+// P1 附录 B 的共享 Object Proof Profile：**给任意对象**盖的章（P5 的 `prekey_bundle.proof`
+// 是它的第一个用例）。与 `verifyDidDocumentProof` 分开，因为公钥不在这份被证明的对象里，
+// 而在 **issuer 的** DID 文档里——"这份 proof 该由谁签"只有调用方答得了。
+export { verifyObjectProof, verifyObjectProofDetailed } from './message/objectProof'
+export type { VerifyObjectProofInput, ObjectProofOutcome, ObjectProofFailure } from './message/objectProof'
+// DID URL 之间的**唯一**正确比较方式：`#dev-a-e2ee` 与 `did:web:…:alice#dev-a-e2ee` 是同一颗
+// 钥的两种写法，字符串相等判不出这件事。P5 §6.5 第 2/4 项要服务端比较的都是 keyid
+// （proof 的 `verificationMethod` vs 清单的 `signing_key_id`、`static_key_agreement_id` vs
+// `e2ee_key_id`），所以在 service 里再写一遍这条规则等于把同一个语义抄成两份。
+export { canonicalDidUrl } from './crypto/dataIntegrity'
 // P1 附录 A.3 的 Signed Request Object 与它的摘要。服务端的幂等指纹就用它——
 // 它已经覆盖 method / meta / body 的全部内容，另算一份摘要等于有两种"等价"。
 export { signedRequestObject, canonicalizeSignedRequestObject, contentDigestOf } from './message/sro'

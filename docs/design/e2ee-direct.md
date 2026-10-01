@@ -68,9 +68,45 @@ MUST 缺省**（§7.1 L470、§7.2 L525、§3.8 L140）。
 `signed_prekey.key_id` / `signed_prekey.public_key_b64u` 六项里有任何一项不同 → 拒。
 
 **表是每设备一行**（`prekey_bundles` 的 PK 就是 `(owner_did, owner_device_id)`，schema.ts
-L147–154）。§6.2.2 L371 允许服务端在 grace period 内同时接受多个 `bundle_id`，那是
+L193–200）。§6.2.2 L371 允许服务端在 grace period 内同时接受多个 `bundle_id`，那是
 **MAY**；而 L362/L373 那个"接受窗口"是**接收设备**的窗口——它要留住旧 SPK 私钥，
 那是客户端的事，不是服务端要存两份 Bundle。**新发布覆盖旧行**，就够对端拿到当前材料。
+
+### 2.1 服务端要验的那份 proof
+
+Bundle 的 proof 是这份材料唯一的自证（§6.2.3 L379、§6.5 第 2 项）。判据要问**两次**，
+顺序不能反：
+
+1. 只问附录 B——不合规就是 **4001** `bundle_invalid`，§6.2.3 L379 逐字这么指定；
+2. 再问"签的是不是清单里那条 `signing_key_id`"——只可能以
+   `unexpected_verification_method` 失败，那是 **4012** `invalid_security_binding`。
+
+**合成一次调用会让码变得含混**：core 的 `verifyObjectProofDetailed` 把期望值比较排在验签
+**之前**，于是"签名完全对不上、`verificationMethod` 又恰好不是这一条"会被报成 4012，而
+§13 给 "proof verification failed" 的码是 4001。
+
+同一层还有两处"与另一处的比对"，都回 4012（§13 L1547 把 "P5 Bundle owner" 与密钥引用
+归在那一码名下）：`owner_did` / `owner_device_id` 必须等于 `meta.sender_*`；
+`static_key_agreement_id` 必须等于清单里的 `e2ee_key_id`。最后一条两边都先过
+`canonicalDidUrl` 再比——`#ka-1` 与整条 DID URL 指的是同一把钥。
+
+**4012 只管"调用方送来的东西绑错了"。** 领取侧还有一条"存着的那份已经过时"：设备换掉
+`signing_key_id` / `e2ee_key_id` 之后、重新发布之前，库里那份已经没有合规发送方会用
+（§6.5 会各自拒掉它）。这条回 **1018** `anp.device_state_changed`，不是 4012——L1547 把
+"current Manifest changes" 明确划给 Core 那张表，而调用方在那件事上什么都没做错。这也
+正是 §4.1.1 L178 第 4 项那个 "**returning**" 要在领取侧再跑一遍的原因。
+
+**两个码在本服务里没有产生路径**：
+
+- **4002 `bundle_expired`**：`expires_at` 不在 §6.3 L383–391 的 `MUST contain` 清单里
+  （§6.5 第 6 项把它写成**发送方**的 MUST），本服务既不要求也不判它。每设备又只留一行
+  "最新"（§7.3 L592），所以"过期了但池里还有旧的"这种情形构造不出来。
+- **4004 `missing_key_agreement`**：本服务不解析 Bundle 里的钥，`keyAgreement` 有没有对应
+  条目由 §4.1.1 第 3 项那次资格判定回答（`eligibility.ts`）。
+
+`preferred_suite` 只做**形状**校验，不参与任何判断：它的用途是"服务端同时维护多份材料时，
+调用方想先拿哪一份"，而本服务每设备只有一份。把它当筛选条件，会让"服务端只有一份"这个
+事实变成一个 4000。
 
 ## 3. OPK 池：一个必然被消耗的池子
 
@@ -98,6 +134,26 @@ OPK **不**进 Bundle（§6.2 L302、§6.3 L395–397），也 **MUST NOT** 被�
 `operation_id` 调用的对手可以不建链就把某个设备的 OPK 抽空。§7.3 L598 已经预见到这件事：
 "caller identity、限流与防滥用策略 **MUST** 基于 hop / service 级认证实施"。所以限流
 **必须**在这一层做，而且它是本条 MUST 的落点，不是可选项。
+
+**（2026-10-01 落地）**规范只写了那一句 MUST，没给数字、算法、码，也没说罩哪几条方法。
+三项都由本实现补（`rpc/rateLimit.ts`）：
+
+- **范围**：只覆盖这两条 Key 方法。§7.3 那一节讲的就是"发放 PreKey 材料"这件事本身；
+  把整个服务都罩进来，拒掉的会是规范没让拒的请求。
+- **键**：`callerKeyOf`——跨域用外层签名验出来的 `serviceDid`，同域退回 `meta.sender_did`。
+- **码**：**1011** `anp.rate_limited`（P1 §10.3）。P5 自己的 4000 段里没有对应项，那一段
+  全是关于材料的。拒绝时带 `retry_after`（`error.data.details.retry_after`）与
+  `retryable: true`——一个不说什么时候能再来的 `retryable` 只能让调用方盲重试。
+
+算法用**令牌桶**：这两条方法的正常节奏是"一阵一阵的"（发布一批 OPK 是一次突发，建链时
+连着来几次），固定窗口会在边界上放过两倍流量。容量与补充速率走配置
+（`AGENTX_PREKEY_BURST` / `AGENTX_PREKEY_PER_MINUTE`）。
+
+**已知弱点写在明处**：同域那半边按自报的 `sender_did` 计数，挡得住"一个身份发得太快"，
+挡不住"换一串 DID 的洪泛"；跨域那半边好一些——键取的是签名验出来的身份，伪造要拿到那颗
+私钥。真正的兜底在传输层（连接数、请求体量闸门），不在这一层。计数器也在进程内存里，
+横向扩成多进程时"每调用方一个桶"会变成"每进程各算一份"，也就是额度乘以进程数。这条缺口
+与它的出路记在 §9 第 3 条。
 
 池空时的行为：`require_opk = true` → 4003；否则正常返回 Bundle、不带 OPK
 （§6.6 L451 允许这样继续建链，代价是前向安全更多依赖 SPK 生命周期）。
@@ -168,6 +224,11 @@ OPK **不**进 Bundle（§6.2 L302、§6.3 L395–397），也 **MUST NOT** 被�
 **`operation_id` = `message_id`** 是 P5 独有的约束（§3.7 L134），所以外层幂等键与消息标识
 在这里是同一个值——C4 的键不用改，只多两个设备段。
 
+**设备段带 owner，不是裸 `device_id`**（`eligibility.ts` 的 `deviceSelector` =
+`<identity>#<deviceId>`）。`device_id` 是发布方自己起的不透明字符串（P2 §5.5 L263），
+两个 DID 各自取 `dev-a` 完全可能；只写设备 id 就会让 "S 的 a → R 的 b" 与 "S 的 b → R 的 a"
+算出同一个键，而它们是两件不同的事。
+
 ## 6. 跨域
 
 - `direct.e2ee.get_prekey_bundle` 是 P8 §5.3.1 L255–259 点名的跨域 getter：解析
@@ -182,7 +243,8 @@ OPK **不**进 Bundle（§6.2 L302、§6.3 L395–397），也 **MUST NOT** 被�
 
 ## 7. 存储增量
 
-`prekey_bundles` 已经在 v3 里（schema.ts L147），`group_key_packages` 也在。要加的只有：
+`prekey_bundles`（schema.ts L193）与 `group_key_packages` 已经在 v3 里。要加的只有 OPK 池
+与 Mailbox 的设备列（v7 加后者，v8 加前者）：
 
 ```sql
 -- 逐设备 OPK 池。state 只有两个：available 被分配即变 assigned，且不回头（见 §3）
@@ -190,7 +252,7 @@ CREATE TABLE one_time_prekeys (
   owner_did TEXT NOT NULL, owner_device_id TEXT NOT NULL,
   opk_id TEXT NOT NULL, public_key_b64u TEXT NOT NULL,
   state TEXT NOT NULL,                 -- available | assigned
-  assigned_to TEXT, assignment_key TEXT, assigned_at TEXT,
+  assigned_to TEXT, assigned_at TEXT,
   uploaded_at TEXT NOT NULL,
   PRIMARY KEY (owner_did, owner_device_id, opk_id)
 );
@@ -199,8 +261,16 @@ CREATE TABLE one_time_prekeys (
 ALTER TABLE deliveries ADD COLUMN recipient_device_id TEXT;
 ```
 
-`assignment_key` 存的就是 §7.2 L580 那个幂等键，于是"同一幂等键重试拿回同一个 OPK"
-是一次主键之外的普通查表。
+**没有 `assignment_key`。** 这一列在设计里出现过，落地时去掉了：它要回答的是 §7.2 L580
+的"同一幂等键重试拿回同一个 OPK"，而这件事 `idempotency` 那张表已经回答了——命中同键时
+`acceptOperation` **不调用** `perform`，直接回放上次那份响应，里面就是同一枚 OPK。再存一份
+就是同一个事实的第二个说法，两者一旦不同步没有谁能判谁对。
+
+`assigned_to` / `assigned_at` 留着：它们不是给幂等用的，是"这枚 OPK 发给了谁"的唯一取证
+材料——§6.6 L448 要求它 **MUST NOT** 被并发发给两个发送方，出问题时这是仅有的凭据。
+
+`opk_id`（发布方自己起的名，§6.4 L401）在主键里，所以同一个 `key_id` 重传是**忽略**而不是
+覆盖：先写者赢，否则后一次上传能把一枚已经发出去的 OPK 换掉。
 
 **不建 init replay 表**：它在客户端（§5）。
 
@@ -237,6 +307,7 @@ ALTER TABLE deliveries ADD COLUMN recipient_device_id TEXT;
 2. ~~**限流的形状**~~（2026-10-01 定：本服务给默认值。§7.3 L598 只要求"按 hop / service 级
    认证限流"，没给数值，属部署策略。默认＝按**调用方 DID**计数的令牌桶，数值走配置，
    给一个保守默认；跨域时外层 hop 认证已提供调用方身份，同域时用 `meta.sender_did`）。
+   **2026-10-01 落地**：范围、键、码与它的已知弱点见 §3 末尾。
 3. **发往 `direct.send` 的 v2 请求由谁认证 —— 现在没有答案，这是一处已知缺口。**
 
    规范把这件事写成了两个 MUST（§7.1 L476–477）：调用方 **MUST** 跑在"已认证的本地会话
@@ -258,10 +329,11 @@ ALTER TABLE deliveries ADD COLUMN recipient_device_id TEXT;
 
    因此 v2 的 `sender_did` / `sender_device_id` 是**自报**的，唯一把关的是 §4.1.1 的设备
    资格：自报的那对设备必须真的在自报的那个 DID 的当前清单里、且两个密钥引用都对得上。
-   这挡得住"拿一台不存在的设备冒充"，**挡不住"拿一台真实设备滥发"**——后者要靠前面第 2 条
-   那套限流，而限流**至今没有实现**（§7.3 L598 是 MUST，见 §3 末尾）。
+   这挡得住"拿一台不存在的设备冒充"，**挡不住"拿一台真实设备滥发"**——后者靠第 2 条那套
+   限流，而限流按**身份**计数：它挡得住"一个身份发得太快"，挡不住"换一串 DID 的洪泛"
+   （§3 末尾）。它把问题缩小了，没有解决它。
 
    **待办**：`publish_prekey_bundle` / `get_prekey_bundle` 与 `direct.send` 三处共用同一套
    调用方身份判定，所以这件事应当一次做完——要么引入一个**设备级会话**（连接上先证明设备
-   私钥，后续请求据此认人），要么把限流做扎实并把"自报身份"写进部署假设。在那之前，
-   本服务对 P5 的受理**只保证资格判定，不保证来源**。
+   私钥，后续请求据此认人），要么把"自报身份"写进部署假设。在那之前，本服务对 P5 的受理
+   **只保证资格判定，不保证来源**。

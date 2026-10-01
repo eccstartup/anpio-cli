@@ -9,6 +9,7 @@
 // 每一种结局都变成一份带正确 `id` 的 JSON-RPC 响应。所以本模块里不该出现 `req` / `res`。
 
 import {
+  anpRejection,
   contentDigestOf,
   DidDeviceResolver,
   DidKeyResolver,
@@ -40,8 +41,16 @@ import { acceptOperation } from './accept'
 import { authenticate, callerAnchor } from './auth'
 import { DIRECT_SEND, GET_CAPABILITIES, lookupMethod, checkMethod, type MethodSpec } from './methods'
 import { storeDirectMessage } from './direct'
-import type { DeviceAddressed } from './eligibility'
-import { checkDevice, isRejection } from './eligibility'
+import type { DeviceAddressed, EligibleDevice } from './eligibility'
+import { checkDevice, deviceSelector, isRejection } from './eligibility'
+import {
+  GET_PREKEY_BUNDLE,
+  PUBLISH_PREKEY_BUNDLE,
+  getPrekeyBundle,
+  publishPrekeyBundle,
+  type KeyContext,
+} from './keys'
+import { callerKeyOf, createRateLimiter } from './rateLimit'
 import { GROUP_HANDLERS } from './groups'
 import { ATTACHMENT_HANDLERS } from './attachments'
 import type { ObjectStore } from '../objects'
@@ -125,6 +134,31 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
   // 外层签名覆盖的是 `@target-uri`，而那是一个绝对 URI——scheme 只能来自部署声明：本服务
   // 自己是明文监听，落在 TLS 终止后面时客户端签的是 `https`，从 socket 上看不出来。
   const publicUrl = new URL(deps.config.publicUrl)
+  // P5 §7.3 L598 的落点。记分板只有一块，两条 Key 方法共用——§7.3 那一节讲的是"发放
+  // PreKey 材料"这一件事，把两条分开计数会让"发布完立刻领取"吃两份额度，而对服务端来说
+  // 那是同一个调用方在干同一件事。见 `rateLimit.ts` 的文件头。
+  const prekeyLimiter = createRateLimiter(deps.config.prekeyRate)
+
+  /**
+   * 一次 `perform` 需要的、在事务**外**就已经拿到的东西。
+   *
+   * 收成一个对象而不是六个位置参数：`devices` 是这一块新加的，而位置参数每加一个都要改
+   * 所有调用点，且两个 `string` 挨在一起时传反了编译器不会说话。
+   */
+  interface PerformInput {
+    params: AnpParams
+    acceptedAt: string
+    pending: DeliveryRecord[]
+    requestDigest: string
+    relayed?: Record<string, unknown>
+    /**
+     * 这次调用点名的设备，顺序同 `DeviceAddressed.pairs`，且都已判过 §4.1.1 资格。
+     *
+     * 不是设备定址的调用（以及跨域）这里是空的。重放也到不了这里——`acceptOperation` 命中
+     * 同键时根本不调 `perform`，所以两条 Key 方法的处理器可以当它一定填满。
+     */
+    devices: readonly EligibleDevice[]
+  }
 
   /**
    * 这个方法收下这次调用的**状态改变**，返回 §7.1.3 的 `result`。
@@ -132,15 +166,8 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
    * 只在幂等未命中时被调用（C4），所以这里不能有无谓的失败面：一次网络往返会让并发写在
    * 事务里等，而写之前任何一步抛错都会把整个操作回滚掉。
    */
-  function perform(
-    spec: MethodSpec,
-    params: AnpParams,
-    acceptedAt: string,
-    pending: DeliveryRecord[],
-    requestDigest: string,
-    relayed: Record<string, unknown> | undefined,
-  ): Record<string, unknown> {
-    const { meta, body, auth } = params
+  function perform(spec: MethodSpec, input: PerformInput): Record<string, unknown> {
+    const { meta, body, auth } = input.params
     switch (spec.name) {
       case GET_CAPABILITIES:
         // 只读、且是匿名可达的：答复里没有一处与调用方身份相关，所以这就是全部。
@@ -150,13 +177,19 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
           meta,
           body,
           ...(auth !== undefined ? { auth } : {}),
-          acceptedAt,
-          ...(relayed !== undefined ? { relayed } : {}),
+          acceptedAt: input.acceptedAt,
+          ...(input.relayed !== undefined ? { relayed: input.relayed } : {}),
           // Collected, not published: this runs inside the transaction, and a delivery
           // pushed from here would have been seen by a live client before a rollback could
           // undo it. The caller publishes once `acceptOperation` has returned.
-          onDelivery: (record) => pending.push(record),
+          onDelivery: (record) => input.pending.push(record),
         })
+      // P5 §7 那两条。它们与上面几个不同：要的是**事务外**解析出来的设备（文档 + 条目），
+      // 因为 Bundle 的 Object Proof 只能拿 issuer 文档验，而那个解析不能在事务里做。
+      case PUBLISH_PREKEY_BUNDLE:
+        return publishPrekeyBundle(keyContext(input))
+      case GET_PREKEY_BUNDLE:
+        return getPrekeyBundle(keyContext(input))
       case INBOX_GET:
         return readInbox(deps.storage, meta, body)
       case MESSAGE_GET_BATCH:
@@ -164,7 +197,7 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
       case SYNC_DELTA:
         return readDelta(deps.storage, meta, body)
       case INBOX_MARK_READ:
-        return markRead(deps.storage, meta, body, acceptedAt)
+        return markRead(deps.storage, meta, body, input.acceptedAt)
       default: {
         // `group.*` 与 `attachment.*` 两族都不在这里逐个枚举：它们的处理器按方法名查
         // （`groups.ts` / `attachments.ts`），因为同族的方法在这一层完全同形，逐个写一个
@@ -178,12 +211,12 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
             meta,
             body,
             ...(auth !== undefined ? { auth } : {}),
-            acceptedAt,
+            acceptedAt: input.acceptedAt,
             // 与幂等指纹是**同一个**摘要：`group_receipt.payload_digest` 要证明的就是
             // "这次被受理的请求是这一份"，而 §9.1 的指纹要判的也是同一件事。各算一次除了
             // 多一趟哈希，还留下两处会各自漂移的定义。
-            requestDigest,
-            onDelivery: (record) => pending.push(record),
+            requestDigest: input.requestDigest,
+            onDelivery: (record) => input.pending.push(record),
           })
         }
         const attachment = ATTACHMENT_HANDLERS[spec.name]
@@ -195,12 +228,31 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
             objects: deps.objects,
             meta,
             body,
-            acceptedAt,
+            acceptedAt: input.acceptedAt,
           })
         }
         // 方法表里有它、这里两处都没有分支：两张表不一致，是代码错，不是请求错。
         throw new Error(`no handler for ${spec.name}`)
       }
+    }
+  }
+
+  /**
+   * 一次 Key 调用要的上下文。`devices` 是事务外解析出来的，**不重解析**：同一次请求里解析
+   * 两遍会得到两份可能不同的文档，而 Bundle 的 proof 只能对着**其中一份**验。
+   *
+   * 空数组是到不了的：`checkMethod` 保证 `sender_did` / `sender_device_id` / `target` 在场，
+   * 于是 `addressed` 一定不是 `undefined`，资格那一步也就一定跑过。真空了是代码错——让
+   * `keys.ts` 的 `device()` 抛出来，比在这里静默降级成"没有设备"好。
+   */
+  function keyContext(input: PerformInput): KeyContext {
+    return {
+      storage: deps.storage,
+      serviceDid: deps.config.serviceDid,
+      meta: input.params.meta,
+      body: input.params.body,
+      acceptedAt: input.acceptedAt,
+      devices: input.devices,
     }
   }
 
@@ -216,11 +268,18 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
     if (!parsed.ok) return errorResponse(failureId(text, parsed.error), parsed.error)
 
     const envelope = parsed.value
+    // 一次请求一个时刻。取在最前面而不是临用临取：限流、证明的时间窗、`accepted_at` 三处
+    // 都读它，各读一次会得到三个时刻，而"这一次调用是什么时候"必须只有一个答案。
+    const at = now()
 
     // P8 §6.2.2 的八步跑在 JSON-RPC **之前**（federation.md §2.4），所以它排在方法表、
     // 排在这个通知短路之前：一份跨域通知被拒时，对端要拿到的是 401，而不是"没有响应"。
     // 没带外层身份的请求在这里原样放过——那是本地调用，业务动作仍由 `origin_proof` 授权
     // （§2.3，代价写在 federation.md 里）。
+    //
+    // 顺手接出**认证过的**调用方身份（见下面限流那一段）。只有 `verified` 那一档算数：
+    // `absent` 是"同域明文，没有任何外层身份"，`refused` 已经在这里回掉了。
+    let authenticatedCaller: string | undefined
     if (request.method !== undefined) {
       const outer = await verifyOuterIdentity({
         method: envelope.method,
@@ -246,6 +305,7 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
         log(`anp: ${envelope.method} refused at the outer layer (${outer.error}: ${outer.reason})`)
         return outerRefusal(publicUrl.hostname, outer.error)
       }
+      if (outer.kind === 'verified') authenticatedCaller = outer.serviceDid
     }
 
     // 通知不答（§5.3 L162、§5.6 L201）。用 `'id' in` 而不是 core 的 `isNotification`：
@@ -264,11 +324,15 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
     const refused = checkMethod(spec, envelope.params)
     if (refused !== undefined) return errorResponse(envelope.id, refused)
 
-    // §9.3 L823–824 / §9.1 L639：这次调用按不按设备定址，是这个方法自己的判断。问一次、
-    // 两处用——幂等键的两段设备，以及下面那次资格检查。
-    const addressed = spec.deviceAddressed?.(meta)
-
-    const at = now()
+    // P5 §7.3 L598：密钥控制面的限流。位置在方法表之后、正文校验之前——`meta.sender_did`
+    // 到这里才被 `requiredMeta` 保证在场（`rateLimit.ts` 的 `callerKeyOf` 要用它），而
+    // 放在正文校验之前是因为正文里那批 OPK 可能很大，不该先解析再拒绝。
+    //
+    // **排在幂等之前**：一次被限流的调用不写台账、不占 `operation_id`。这与 §9.1 不冲突
+    // ——那不是一次"被受理的操作"，调用方拿着同一个 `operation_id` 稍后重试，走的正是
+    // 同一条路。
+    const limited = rateLimitFor(spec, meta, authenticatedCaller, at)
+    if (limited !== undefined) return errorResponse(envelope.id, limited)
 
     // 认证在正文之前：正文校验会读 `content_type` 并据此判断，那个字段是请求方写的，
     // 先让它通过签名再据它判，才不至于拿一个未认证的字段做决定。
@@ -293,6 +357,16 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
       const bodyRefusal = bodyRefusalFor(spec, body, meta)
       if (bodyRefusal !== undefined) return errorResponse(envelope.id, bodyRefusal)
 
+      // §9.3 L823–824 / §9.1 L639：这次调用按不按设备定址，是这个方法自己的判断。问一次、
+      // 两处用——幂等键的两段设备，以及下面那次资格检查。
+      //
+      // **位置在正文校验之后**，因为 `get_prekey_bundle` 点名的第二台设备写在正文里
+      // （§7.2 L563 的 `target_device_id`）。早一步算，`body.target_device_id` 还没有被
+      // 判过是不是一个非空字符串，`deviceSelector()` 会把一个 `undefined` 拼进幂等键。
+      const addressed = spec.deviceAddressed?.(meta, body)
+      // 这次请求点名的设备，由下面的资格判定填。空数组是常态（取件面、群、附件都不定址）。
+      const devices: EligibleDevice[] = []
+
       const acceptedAt = at.toISOString()
 
       // A.3 L1044–1050：SRO 只含 method / meta / body，所以重新签过一次、`auth` 换了、
@@ -311,7 +385,7 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
       if (spec.targetScope === undefined) {
         return successResponse(
           envelope.id,
-          perform(spec, envelope.params, acceptedAt, pending, requestDigest, undefined),
+          perform(spec, { params: envelope.params, acceptedAt, pending, requestDigest, devices }),
         )
       }
 
@@ -325,7 +399,7 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
           method: spec.name,
           // §9.1 L639：只有设备定址的 Overlay 才把设备段放进键。Base 那些调用这里拿到
           // `undefined`，于是键里没有设备——"同一个逻辑操作从两台设备发出"仍是一件事。
-          ...(addressed !== undefined ? { deviceSelectors: [...addressed.selectors] } : {}),
+          ...(addressed !== undefined ? { deviceSelectors: addressed.pairs.map(deviceSelector) } : {}),
         }),
       )
 
@@ -344,9 +418,10 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
       if (relayed.kind === 'refused') return errorResponse(envelope.id, relayed.rejection)
       const forwarded = relayed.kind === 'answered' ? relayed.result : undefined
 
-      // P5 §4.1.1 / §10.7 L1388：本地收下这颗密文之前，先确认两台设备此刻都算数。
-      if (addressed !== undefined && !replayed && forwarded === undefined) {
-        const ineligible = await eligibilityFor(addressed, meta)
+      // P5 §4.1.1 / §10.7 L1388：本地收下这颗密文之前，先确认点名的设备此刻都算数。
+      // 重放要不要重判由方法自己定（见 `DeviceAddressed.recheckOnReplay`）。
+      if (addressed !== undefined && (!replayed || addressed.recheckOnReplay === true) && forwarded === undefined) {
+        const ineligible = await eligibilityFor(addressed, devices)
         if (ineligible !== undefined) return errorResponse(envelope.id, ineligible)
       }
 
@@ -354,7 +429,15 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
         storage: deps.storage,
         key,
         fingerprint: requestDigest,
-        perform: () => perform(spec, envelope.params, acceptedAt, pending, requestDigest, forwarded),
+        perform: () =>
+          perform(spec, {
+            params: envelope.params,
+            acceptedAt,
+            pending,
+            requestDigest,
+            ...(forwarded !== undefined ? { relayed: forwarded } : {}),
+            devices,
+          }),
       })
 
       // §10.3 L709：同键不同语义。
@@ -412,10 +495,12 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
   }
 
   /**
-   * P5 §4.1.1：这次调用点名的**两台**设备，此刻算不算数。
+   * P5 §4.1.1：这次调用点名的设备，此刻算不算数。合格的条目**按 `pairs` 的顺序**填进
+   * 调用方给的那个数组——两条 Key 方法的处理器要靠这个顺序认人（发布方是 `[0]`，领取的
+   * 目标设备是 `[1]`），所以它不能在下面被换成 `Map` 或者被排序。
    *
-   * 位置与 `relayFor` 并列——都在 `acceptOperation` 之前，因为它是两次网络往返（要解析
-   * 发送方与收件人各自的 DID 文档），而那个事务里不许有 I/O。
+   * 位置与 `relayFor` 并列——都在 `acceptOperation` 之前，因为它是若干次网络往返（要解析
+   * 每台设备所属的 DID 文档），而那个事务里不许有 I/O。
    *
    * 调用点替这里挡掉了三种不该查的情形，每一种都有硬理由：
    *
@@ -424,33 +509,55 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
    *     的 MUST。收到那颗密文的是对端，它的清单归它解释；我们在这里再查一遍，等于拿一份
    *     我们无权解释的清单替对端做主——那份清单里没有那台设备时，我们回的那个码是在说
    *     对端的用户不合法，而它可能只是换了一台设备。
-   *   - **重放**（`replayed`）：资格是**当下**的事实（§4.1.1 L171 说它是每次操作的前置），
-   *     而 §9.1 L630 要重放得到**同一个**结果。一次早就受理过的重试，不该因为发送方后来
-   *     把设备摘了而变成错误——那会让"重试"变成另一件事，而调用方手里没有任何东西能区分
-   *     这两种结局。
+   *   - **重放**（`replayed` 且方法没要求重判）：资格是**当下**的事实（§4.1.1 L171 说它是
+   *     每次操作的前置），而 §9.1 L630 要重放得到**同一个**结果。`direct.send` 于是跳过
+   *     ——一次早就受理过的重试，不该因为发送方后来把设备摘了而变成错误。但
+   *     `get_prekey_bundle` 是另一回事：它交回的是**密钥材料**，§7.2 L578 与 §12.4 L1515
+   *     要求每一次返回之前都重验，所以那一档自己把 `recheckOnReplay` 打开。
    *
-   * 先查发送方的设备：它才是这次调用的主张，也是调用方能自己改的那一半。收件人的设备不在
-   * 它的控制下，说"你的设备不合格"比说"对方的设备不合格"更接近它要做的事。
+   * 按 `pairs` 的顺序查，于是先查的是调用方自己那台——它才是这次调用的主张，也是调用方
+   * 能自己改的那一半。`get_prekey_bundle` 的第二项不在它的控制下，说"你的设备不合格"比
+   * 说"对方的设备不合格"更接近它要做的事。
    */
-  async function eligibilityFor(addressed: DeviceAddressed, meta: AnpMeta): Promise<AnpRejection | undefined> {
-    const [senderDeviceId, recipientDeviceId] = addressed.selectors
-    // `checkMethod` 已经让 `direct.send` 必带 `sender_did` 与 `target`，所以这两个串在
-    // 这里都拿得到——不是"大概"，是那一步的 MUST 保证的。
-    const pairs = [
-      { identity: meta.sender_did ?? '', deviceId: senderDeviceId },
-      { identity: meta.target?.did ?? '', deviceId: recipientDeviceId },
-    ]
-    for (const { identity, deviceId } of pairs) {
+  async function eligibilityFor(addressed: DeviceAddressed, devices: EligibleDevice[]): Promise<AnpRejection | undefined> {
+    for (const pair of addressed.pairs) {
       const outcome = await checkDevice({
         resolver: deviceResolver,
         requirement: addressed.requirement,
-        identity,
-        deviceId,
+        identity: pair.identity,
+        deviceId: pair.deviceId,
         opts: resolverOptions,
       })
       if (isRejection(outcome)) return outcome
+      devices.push(outcome)
     }
     return undefined
+  }
+
+  /**
+   * P5 §7.3 L598 的限流，只罩着两条 Key 方法。
+   *
+   * 键取**认证过的**身份（跨域时是外层签名验出来的 `serviceDid`），同域明文调用没有这一层
+   * 认证，只能退回自报的 `meta.sender_did`——`rateLimit.ts` 的文件头把那半的性质写清楚了：
+   * 它挡的是"一个身份发得太快"，不是"有人冒充这个身份"。`docs/design/e2ee-direct.md` §9
+   * 记着这条缺口。
+   *
+   * 返回 `undefined` 就是放行（包括"这个方法不限流"）。**不是** `AnpRejection | undefined`
+   * 的另一种写法——那个类型的 `undefined` 在别处都表示"没问题"，这里也一样。
+   */
+  function rateLimitFor(
+    spec: MethodSpec,
+    meta: AnpMeta,
+    authenticatedCaller: string | undefined,
+    at: Date,
+  ): AnpRejection | undefined {
+    if (spec.name !== PUBLISH_PREKEY_BUNDLE && spec.name !== GET_PREKEY_BUNDLE) return undefined
+    const decision = prekeyLimiter.take(callerKeyOf(authenticatedCaller, meta.sender_did), at.getTime())
+    if (decision.allowed) return undefined
+    return anpRejection('anp.rate_limited', `${spec.name} is rate limited for this caller`, {
+      retryable: true,
+      details: { retry_after: decision.retryAfterSeconds },
+    })
   }
 
   /**

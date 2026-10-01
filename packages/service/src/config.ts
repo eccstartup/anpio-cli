@@ -26,6 +26,10 @@ const DEFAULT_MAX_OBJECT_BYTES = 64 * 1024 * 1024
 const DEFAULT_LISTEN = '127.0.0.1:8787'
 const DEFAULT_DB = './agentx.db'
 
+/** P5 §7.3 L598 没给数字，所以这是本实现选的：**一分钟 60 次、允许一次 60 个的突发**。 */
+const DEFAULT_PREKEY_BURST = 60
+const DEFAULT_PREKEY_PER_MINUTE = 60
+
 export interface ListenAddress {
   host: string
   port: number
@@ -80,6 +84,13 @@ export interface Config {
   /** Cap on one attachment object's bytes (P7, C10). Enforced while the upload stream is
    *  read rather than after it is buffered — see `AGENTX_MAX_BODY` for the same reason. */
   maxObjectBytes: number
+  /**
+   * P5 §7.3 L598 的限流：两条 Key 方法每个调用方一分钟能来多少次、一次突发能来多少。
+   *
+   * 这一节只给了一句 MUST，没有数字，所以数字只能是运算符的。缺省按"一台设备多久动一次"
+   * 取：发布是偶发的（一天几次），领取是每个对端建链一次。见 `rpc/rateLimit.ts` 的文件头。
+   */
+  prekeyRate: { burst: number; perMinute: number }
 }
 
 /** `host:port`, with the host allowed to be an IPv6 literal in brackets. The port is
@@ -241,6 +252,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       'AGENTX_MAX_OBJECT_BYTES',
       DEFAULT_MAX_OBJECT_BYTES,
     ),
+    prekeyRate: {
+      burst: parsePositive(env.AGENTX_PREKEY_BURST, 'AGENTX_PREKEY_BURST', DEFAULT_PREKEY_BURST),
+      perMinute: parsePositive(env.AGENTX_PREKEY_PER_MINUTE, 'AGENTX_PREKEY_PER_MINUTE', DEFAULT_PREKEY_PER_MINUTE),
+    },
   }
   if (env.AGENTX_KEY_FILE !== undefined && env.AGENTX_KEY_FILE !== '') {
     config.keyFile = env.AGENTX_KEY_FILE

@@ -25,6 +25,8 @@ import type {
   StoredGroupEvent,
   StoredGroupMember,
   StoredMessage,
+  StoredOneTimePrekey,
+  StoredPrekeyBundle,
 } from './types'
 
 /** A row as `node:sqlite` hands it over: a null-prototype object of SQLite scalars. */
@@ -300,6 +302,32 @@ function toDownloadTicket(row: Row): StoredDownloadTicket {
   const consumedAt = maybeText(row.consumed_at)
   if (consumedAt !== undefined) ticket.consumedAt = consumedAt
   return ticket
+}
+
+function toPrekeyBundle(row: Row): StoredPrekeyBundle {
+  return {
+    ownerDid: text(row.owner_did),
+    ownerDeviceId: text(row.owner_device_id),
+    bundleId: text(row.bundle_id),
+    bundleJson: text(row.bundle_json),
+    publishedAt: text(row.published_at),
+  }
+}
+
+function toOneTimePrekey(row: Row): StoredOneTimePrekey {
+  const key: StoredOneTimePrekey = {
+    ownerDid: text(row.owner_did),
+    ownerDeviceId: text(row.owner_device_id),
+    keyId: text(row.opk_id),
+    publicKeyB64u: text(row.public_key_b64u),
+    state: text(row.state),
+    uploadedAt: text(row.uploaded_at),
+  }
+  const assignedTo = maybeText(row.assigned_to)
+  if (assignedTo !== undefined) key.assignedTo = assignedTo
+  const assignedAt = maybeText(row.assigned_at)
+  if (assignedAt !== undefined) key.assignedAt = assignedAt
+  return key
 }
 
 /**
@@ -735,6 +763,89 @@ class SqliteStorage implements Storage {
       `INSERT INTO group_events (group_did, event_seq, event_type, payload_json, occurred_at)
        VALUES (?, ?, ?, ?, ?)`,
     ).run(event.groupDid, event.eventSeq, event.eventType, event.payloadJson, event.occurredAt)
+  }
+
+  // ---- E2EE key material (P5, C12) -------------------------------------------
+
+  prekeyBundle(ownerDid: string, ownerDeviceId: string): StoredPrekeyBundle | undefined {
+    const row = this.stmt('SELECT * FROM prekey_bundles WHERE owner_did = ? AND owner_device_id = ?').get(
+      ownerDid,
+      ownerDeviceId,
+    ) as Row | undefined
+    return row === undefined ? undefined : toPrekeyBundle(row)
+  }
+
+  upsertPrekeyBundle(bundle: StoredPrekeyBundle): void {
+    this.stmt(
+      `INSERT INTO prekey_bundles (owner_did, owner_device_id, bundle_id, bundle_json, published_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (owner_did, owner_device_id) DO UPDATE SET
+         bundle_id    = excluded.bundle_id,
+         bundle_json  = excluded.bundle_json,
+         published_at = excluded.published_at`,
+    ).run(bundle.ownerDid, bundle.ownerDeviceId, bundle.bundleId, bundle.bundleJson, bundle.publishedAt)
+  }
+
+  insertOneTimePrekeys(keys: readonly StoredOneTimePrekey[]): number {
+    // One statement per key rather than a multi-row INSERT, because the count has to be
+    // what LANDED: `INSERT OR IGNORE` reports 0 changes for a `key_id` that was already
+    // there, and a bulk insert would only give one number for the whole batch. A pool is
+    // uploaded a hundred at a time at most, so the loop costs nothing.
+    const stmt = this.stmt(
+      `INSERT OR IGNORE INTO one_time_prekeys
+         (owner_did, owner_device_id, opk_id, public_key_b64u, state, assigned_to, assigned_at, uploaded_at)
+       VALUES (?, ?, ?, ?, 'available', NULL, NULL, ?)`,
+    )
+    let inserted = 0
+    for (const key of keys) {
+      const result = stmt.run(key.ownerDid, key.ownerDeviceId, key.keyId, key.publicKeyB64u, key.uploadedAt)
+      if (result.changes > 0) inserted += 1
+    }
+    return inserted
+  }
+
+  claimOneTimePrekey(
+    ownerDid: string,
+    ownerDeviceId: string,
+    assignedTo: string,
+    assignedAt: string,
+  ): StoredOneTimePrekey | undefined {
+    // Oldest first, so a pool drains in the order it was uploaded and a prekey does not sit
+    // around long enough to be a stale one. `opk_id` breaks ties deterministically: two
+    // uploads can share a timestamp.
+    const row = this.stmt(
+      `SELECT * FROM one_time_prekeys
+        WHERE owner_did = ? AND owner_device_id = ? AND state = 'available'
+        ORDER BY uploaded_at ASC, opk_id ASC
+        LIMIT 1`,
+    ).get(ownerDid, ownerDeviceId) as Row | undefined
+    if (row === undefined) return undefined
+
+    // The CLAIM is this UPDATE, not the SELECT above. `state = 'available'` in the WHERE
+    // is what makes it exclusive: whoever sees `changes > 0` is the one that moved the row,
+    // so two callers cannot both return the same key (§6.6 L847). Inside an operation's
+    // `BEGIN IMMEDIATE` the two statements cannot interleave at all; called on its own by
+    // two processes, the loser gets `undefined` and reads it as an empty pool — which is
+    // the safe direction, since retrying costs one request and double-issuing does not.
+    const result = this.stmt(
+      `UPDATE one_time_prekeys SET state = 'assigned', assigned_to = ?, assigned_at = ?
+        WHERE owner_did = ? AND owner_device_id = ? AND opk_id = ? AND state = 'available'`,
+    ).run(assignedTo, assignedAt, ownerDid, ownerDeviceId, text(row.opk_id))
+    if (result.changes === 0) return undefined
+
+    const key = toOneTimePrekey(row)
+    key.state = 'assigned'
+    key.assignedTo = assignedTo
+    key.assignedAt = assignedAt
+    return key
+  }
+
+  availableOneTimePrekeys(ownerDid: string, ownerDeviceId: string): number {
+    const row = this.stmt(
+      `SELECT COUNT(*) AS total FROM one_time_prekeys
+        WHERE owner_did = ? AND owner_device_id = ? AND state = 'available'`,
+    ).get(ownerDid, ownerDeviceId) as Row
+    return int(row.total)
   }
 
   // ---- attachments (P7, C10) -------------------------------------------------

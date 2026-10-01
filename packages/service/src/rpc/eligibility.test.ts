@@ -8,15 +8,18 @@
 import { describe, expect, it } from 'vitest'
 import type { DeviceEntry, DeviceResolver } from '@agentx/core'
 import { DIRECT_E2EE_DEVICE } from './e2ee'
-import { checkDevice, isRejection } from './eligibility'
+import { checkDevice, deviceSelector, isRejection, type EligibleDevice } from './eligibility'
 
 const ALICE = 'did:web:example.com:alice'
 const DEV = 'dev-a-7N3KQ2'
 
-/** 一个只答一次问的解析器。`resolveDevice` 是唯一的缝，所以不必模拟 DID 文档。 */
-function resolverAnswering(entries: DeviceEntry[]): DeviceResolver {
+/** 一个只答一次问的解析器。`resolveDevice` 是唯一的缝，所以不必模拟 DID 文档。
+ *
+ *  §4.1.1 L178 第 4 项要的是"这份 Bundle 与**交出它的**那份文档"，所以解析器交回形状里
+ *  文档与条目是一起走的——只回答条目会让 Bundle 的 proof 无从验起（`EligibleDevice`）。 */
+function resolverAnswering(entries: DeviceEntry[], document: Record<string, unknown> = { id: ALICE }): DeviceResolver {
   return {
-    resolveDevice: () => Promise.resolve(entries),
+    resolveDevice: () => Promise.resolve({ entries, document }),
   }
 }
 
@@ -42,7 +45,10 @@ describe('checkDevice', () => {
     const outcome = await check([entry()])
     expect(isRejection(outcome)).toBe(false)
     if (isRejection(outcome)) throw new Error('unreachable')
-    expect(outcome.deviceId).toBe(DEV)
+    expect(outcome.entry.deviceId).toBe(DEV)
+    // 交回的文档与条目是同一次解析的产物——Bundle 的 proof 只有对着**这一份**才说明得了
+    // 事情（`EligibleDevice` 上写了理由）。
+    expect(outcome.document.id).toBe(ALICE)
   })
 
   it('refuses a device the manifest does not list, with 1017', async () => {
@@ -108,7 +114,20 @@ describe('isRejection', () => {
   it('separates the two outcomes on a field only a refusal has', () => {
     // 判别式取 `code`：将来给 `DeviceEntry` 加一个字段不会让它失效，而按"有没有哪个
     // 业务字段"去判会。
+    const eligible: EligibleDevice = { entry: entry(), document: { id: ALICE } }
     expect(isRejection({ code: 1017, anpCode: 'anp.device_not_eligible', message: 'x' } as never)).toBe(true)
-    expect(isRejection(entry())).toBe(false)
+    expect(isRejection(eligible)).toBe(false)
+  })
+})
+
+describe('deviceSelector', () => {
+  it('carries the owner, because a device_id is an opaque string (P2 §5.5 L263)', () => {
+    expect(deviceSelector({ identity: ALICE, deviceId: DEV })).toBe(`${ALICE}#${DEV}`)
+    // 同一个 `device_id` 挂在两个 DID 下必须是两段不同的 selector——这正是"只写设备 id"
+    // 丢掉的那一半。两侧各自取名，撞上同一个 `dev-a` 完全可能，那时
+    // "S 的 a → R 的 b" 与 "S 的 b → R 的 a" 会算出同一个幂等键（1008）。
+    expect(deviceSelector({ identity: ALICE, deviceId: DEV })).not.toBe(
+      deviceSelector({ identity: 'did:web:example.com:bob', deviceId: DEV }),
+    )
   })
 })

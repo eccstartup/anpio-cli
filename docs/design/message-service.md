@@ -959,6 +959,8 @@ AGENTX_MAX_BODY         请求体上限，默认 1 MiB（附件走数据面，�
 AGENTX_MAX_OBJECT_BYTES 单个附件对象上限，默认 64 MiB（数据面 PUT 时边收边判）
 AGENTX_ALLOWED_DID_HOSTS  允许出站解析 DID 文档的域，逗号/空白分隔，**默认空**
 AGENTX_DID_DEV_HOSTS      联调放宽：这些域可以解析私有地址、可以用 http
+AGENTX_PREKEY_BURST       两条 Key 方法每个调用方的突发额度，默认 60
+AGENTX_PREKEY_PER_MINUTE  同上，每分钟补充的令牌数（持续速率），默认 60
 ```
 
 **没有配置项能关掉 `origin_proof` 校验。** 要联调就配一个宽松的 DID 解析策略，

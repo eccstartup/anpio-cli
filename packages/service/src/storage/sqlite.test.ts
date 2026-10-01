@@ -558,3 +558,92 @@ describe('the v6 → v7 migration', () => {
     expect(a2.recipientDeviceId).toBe('dev-1')
   })
 })
+
+/** P5 §7 的密钥材料（C12）。这一层要判的是**行语义**：一设备一行、按上传顺序发、领取是
+ *  一次互斥的 UPDATE。上面那些"哪一步先判"是 `rpc/keys.test.ts` 的事。 */
+describe('prekey bundles and one-time prekeys (P5, C12)', () => {
+  const OWNER = 'did:web:owner.example'
+  const DEV = 'dev-a'
+
+  function bundleRow(bundleId: string, publishedAt = '2026-10-01T00:00:00Z') {
+    return {
+      ownerDid: OWNER,
+      ownerDeviceId: DEV,
+      bundleId,
+      bundleJson: JSON.stringify({ bundle_id: bundleId }),
+      publishedAt,
+    }
+  }
+
+  function opk(keyId: string, uploadedAt: string, publicKeyB64u = 'AA') {
+    return {
+      ownerDid: OWNER,
+      ownerDeviceId: DEV,
+      keyId,
+      publicKeyB64u,
+      state: 'available',
+      uploadedAt,
+    }
+  }
+
+  it('keeps one row per device, replacing the previous bundle (§7.3 L592)', () => {
+    const store = open()
+    expect(store.prekeyBundle(OWNER, DEV)).toBeUndefined()
+
+    store.upsertPrekeyBundle(bundleRow('bundle-1'))
+    expect(store.prekeyBundle(OWNER, DEV)?.bundleId).toBe('bundle-1')
+
+    // 第二次发布覆盖，而不是堆历史：§7.3 L592 交回的是"最新那一份"，而 §6.2.2 L371 的
+    // 唯一性规则看的是接受窗口里那一行，不是全部历史（`types.ts` 的 `upsertPrekeyBundle`）。
+    store.upsertPrekeyBundle(bundleRow('bundle-2', '2026-10-01T00:00:05Z'))
+    expect(store.prekeyBundle(OWNER, DEV)?.bundleId).toBe('bundle-2')
+  })
+
+  it('counts only the prekeys that were actually new', () => {
+    // `key_id` 由发布方选（§6.4 L401），所以重发同一批是正常事。这个数是
+    // `published_opk_count`（§7.1 L497），必须是**落进去的行数**，不是入参长度。
+    const store = open()
+    expect(store.insertOneTimePrekeys([opk('opk-1', '2026-10-01T00:00:00Z'), opk('opk-2', '2026-10-01T00:00:00Z')])).toBe(2)
+    expect(store.insertOneTimePrekeys([opk('opk-1', '2026-10-01T00:00:01Z'), opk('opk-3', '2026-10-01T00:00:01Z')])).toBe(1)
+    expect(store.availableOneTimePrekeys(OWNER, DEV)).toBe(3)
+
+    // 首次写入者赢：重发不能把已经发出去的公开钥换掉。
+    store.insertOneTimePrekeys([opk('opk-1', '2026-10-01T00:00:02Z', 'ZZ')])
+    expect(store.claimOneTimePrekey(OWNER, DEV, 'did:web:asker.example', '2026-10-01T00:00:03Z')?.publicKeyB64u).toBe('AA')
+  })
+
+  it('hands out the oldest prekey first, and only once (§6.6 L847)', () => {
+    const store = open()
+    store.insertOneTimePrekeys([
+      opk('opk-b', '2026-10-01T00:00:01Z'),
+      opk('opk-a', '2026-10-01T00:00:02Z'),
+      // 同一时刻的两枚由 `opk_id` 定序，否则同一批上传的发放在两次读之间没有确定的顺序。
+      opk('opk-c', '2026-10-01T00:00:02Z'),
+    ])
+
+    const first = store.claimOneTimePrekey(OWNER, DEV, 'did:web:asker.example', '2026-10-01T00:00:03Z')
+    expect(first?.keyId).toBe('opk-b')
+    expect(first?.state).toBe('assigned')
+    // 领到了谁：§6.6 要靠它回答"同一枚钥出现在两个会话里"。
+    expect(first?.assignedTo).toBe('did:web:asker.example')
+    expect(first?.assignedAt).toBe('2026-10-01T00:00:03Z')
+
+    expect(store.claimOneTimePrekey(OWNER, DEV, 'did:web:asker.example', '2026-10-01T00:00:03Z')?.keyId).toBe('opk-a')
+    expect(store.availableOneTimePrekeys(OWNER, DEV)).toBe(1)
+    store.claimOneTimePrekey(OWNER, DEV, 'did:web:asker.example', '2026-10-01T00:00:03Z')
+    // 池子干了就是 `undefined`——`require_opk` 靠这个区分"没有"与"领取失败"。
+    expect(store.claimOneTimePrekey(OWNER, DEV, 'did:web:asker.example', '2026-10-01T00:00:03Z')).toBeUndefined()
+    expect(store.availableOneTimePrekeys(OWNER, DEV)).toBe(0)
+  })
+
+  it('keeps one device pool separate from another', () => {
+    const store = open()
+    store.insertOneTimePrekeys([opk('opk-1', '2026-10-01T00:00:00Z')])
+    store.insertOneTimePrekeys([{ ...opk('opk-1', '2026-10-01T00:00:00Z'), ownerDeviceId: 'dev-b' }])
+
+    expect(store.claimOneTimePrekey(OWNER, DEV, 'x', '2026-10-01T00:00:01Z')?.keyId).toBe('opk-1')
+    expect(store.availableOneTimePrekeys(OWNER, DEV)).toBe(0)
+    // 另一台设备那枚还在——池子的键是 `(owner_did, owner_device_id, opk_id)`。
+    expect(store.availableOneTimePrekeys(OWNER, 'dev-b')).toBe(1)
+  })
+})

@@ -21,10 +21,18 @@ import { DIRECT_AUTH_CODES, GROUP_AUTH_CODES, P1_AUTH_CODES, type AuthErrorCodes
 import {
   DIRECT_E2EE_PROFILE,
   DIRECT_E2EE_SECURITY_PROFILE,
+  DIRECT_E2EE_DEVICE,
   directSendDeviceAddressed,
   directSendParams,
 } from './e2ee'
-import type { DeviceAddressed } from './eligibility'
+import {
+  GET_PREKEY_BUNDLE,
+  PUBLISH_PREKEY_BUNDLE,
+  keyMethodParams,
+  validateGetBundleBody,
+  validatePublishBody,
+} from './keys'
+import type { DeviceAddressed, DevicePair } from './eligibility'
 import {
   ATTACHMENT_ABORT_OBJECT,
   ATTACHMENT_COMMIT_OBJECT,
@@ -139,8 +147,12 @@ export interface MethodSpec {
   /** 这次调用是不是**设备定址**的（P5 §9.3 L823–824）。`undefined` = 不是。
    *
    *  只有设备定址的调用才把设备 selector 放进幂等键（§9.1 L639），也只有它才要验那两台
-   *  设备的资格（§10.7 L1388）。两件后果都从这里出，见 {@link DeviceAddressed}。 */
-  deviceAddressed?(meta: AnpMeta): DeviceAddressed | undefined
+   *  设备的资格（§10.7 L1388）。两件后果都从这里出，见 {@link DeviceAddressed}。
+   *
+   *  收 `body` 是因为 **P5 §7.2 的目标设备写在正文里**：`direct.e2ee.get_prekey_bundle` 的
+   *  `meta.target.did` 是**服务**的 DID（§7.2 L543），要点名的那台设备在
+   *  `body.target_device_id`。固定签名收不到它，而"哪台设备"正是这个方法要判的那一件事。 */
+  deviceAddressed?(meta: AnpMeta, body: Record<string, unknown>): DeviceAddressed | undefined
   /** Profile 定义的幂等 `target_scope`（P1 §9.1 L635 + P3 §8.2 L437–442）。
    *  `undefined` 表示这个方法不改状态，也就不进幂等台账。 */
   targetScope?: (meta: AnpMeta, body: Record<string, unknown>) => string
@@ -496,10 +508,135 @@ const ATTACHMENT_GET_DOWNLOAD_TICKET_SPEC = attachmentSpec(
   ticketScope,
 )
 
+/**
+ * 密钥控制面（P5 §7，C12）。
+ *
+ * 两条方法在这一层同形：同一个 Profile（`anp.direct.e2ee.v2` 与 `direct.send` 共用，
+ * §4.3 L161 的 Overlay 规矩）、`transport-protected`（§7.1 L467 与 §9.3 L821 是同一句
+ * ——密钥控制面只走这一档）、`service-scoped`（目标必须是**目标 Agent 暴露的那个服务**，
+ * §7.1 L466）、都要 `sender_did` / `sender_device_id` / `operation_id`。
+ *
+ * ## 为什么不要 `origin_proof`，而且**拒收** `auth`
+ *
+ * §7.1 L492 明写这条方法"does not require an additional business-layer `origin_proof`"
+ * ——这是 §3.8 L140 对 v2 那条规矩的同一件事：认证由建链材料与 AAD 承担。而 §7.1 L472 与
+ * §7.2 L548 又都写着未协商扩展时 `params.auth` **MUST** 缺省。两句合起来，`auth` 既不能
+ * 要求也不能允许，所以 `validateParams` 见到它就拒（1003，与 `directSendParams` 同理由）。
+ *
+ * 这不是一个鉴权缺口。发布这条路上，真正的认证是 **Bundle 自己的 Object Proof**：§6.5 第 2
+ * 项要求它由该设备清单里那条 `signing_key_id` 签出，而那把私钥只有那台设备有。领取这条路
+ * 本来就不按调用方身份授权——它交回的是**目标设备的公开材料**，谁问都一样。
+ * 见 `keys.ts` 的文件头与 `docs/design/e2ee-direct.md` §9。
+ *
+ * ## 两档 `targetScope` 不同，这不是手滑
+ *
+ * §7.1 的幂等键元组是 `(sender_did, sender_device_id, target.did, method, operation_id)`，
+ * §7.2 的是同一串**再加一个 `target_did`**——领取的地址里多一个"问谁要"。`target_device_id`
+ * 已经由设备段承载（`deviceSelector`），所以这里只差 `target_did` 那一段。两条方法各自取
+ * 自己规范里逐字给出的那一段，而不是"看起来差不多就复用"。
+ */
+const KEY_SECURITY_PROFILE = 'transport-protected'
+
+/** `requiredMeta` 保证了这两个字段在场，所以缺了就是方法表与处理器不一致——抛。
+ *  兜空串会让一个代码错误变成一个 1017（"设备不合格"），那是把两件事说成一件。 */
+function senderPair(meta: AnpMeta, method: string): DevicePair {
+  const identity = meta.sender_did
+  const deviceId = meta.sender_device_id
+  if (identity === undefined || deviceId === undefined) {
+    throw new ConnectxError('message_invalid', `${method} requires meta.sender_did and meta.sender_device_id`)
+  }
+  return { identity, deviceId }
+}
+
+/** 正文里的一个非空字符串。实现在 `validateBody` 之后才被调用，所以这里只做类型收窄；
+ *  取不到仍然是当场抛——一个跑到这里的空串说明两处校验对不上了。 */
+function bodyString(body: Record<string, unknown>, key: string): string {
+  const value = body[key]
+  if (typeof value !== 'string' || value === '') {
+    throw new ConnectxError('message_invalid', `body.${key} must be a non-empty string`)
+  }
+  return value
+}
+
+/** `checkMethod` 保证 `meta.target` 在（`service-scoped` 是必须带 target 的模式），
+ *  所以这里同 `direct.send` 的 `targetScope`：抛而不是兜空串。 */
+function serviceTargetDid(meta: AnpMeta, method: string): string {
+  const target = meta.target
+  if (target === undefined) throw new ConnectxError('message_invalid', `${method} requires meta.target`)
+  return target.did
+}
+
+interface KeySpecInput {
+  name: string
+  validateBody: (body: Record<string, unknown>) => AnpRejection | undefined
+  deviceAddressed: (meta: AnpMeta, body: Record<string, unknown>) => DeviceAddressed
+  targetScope: (meta: AnpMeta, body: Record<string, unknown>) => string
+}
+
+function keySpec(input: KeySpecInput): MethodSpec {
+  return {
+    name: input.name,
+    targetMode: 'service-scoped',
+    profiles: [DIRECT_E2EE_PROFILE],
+    securityProfiles: [KEY_SECURITY_PROFILE],
+    requiredMeta: ['sender_did', 'sender_device_id', 'operation_id'],
+    // §7.1 / §7.2 都没有禁止任何 `meta` 字段——不像 P7 那样明说 wire 模型里没有设备
+    // selector。规范没说禁就不自造一个禁令（P1 §10.3 L724 只在 Base 私聊那一处点过名）。
+    forbiddenMeta: [],
+    // §7.1 L492 逐字。见上面那一段。
+    requiresOriginProof: () => false,
+    // 到不了：`requiresOriginProof` 恒假，`authenticate()` 从不被调用。填一个合规的值只是
+    // 方法表的完整性要求——这一族没有规范给的私有认证码（P5 §13 L1533–1545 那一段里
+    // 4000–4012 全是关于**材料**的，没有一条说"你没通过认证"）。
+    authCodes: P1_AUTH_CODES,
+    validateParams: keyMethodParams,
+    validateBody: (body) => input.validateBody(body),
+    deviceAddressed: (meta, body) => input.deviceAddressed(meta, body),
+    targetScope: (meta, body) => input.targetScope(meta, body),
+  }
+}
+
+const PUBLISH_PREKEY_BUNDLE_SPEC = keySpec({
+  name: PUBLISH_PREKEY_BUNDLE,
+  validateBody: validatePublishBody,
+  // §7.1 L476：这条方法点名的设备**只有发布方自己一台**——`meta.target.did` 是服务的 DID，
+  // 收件人无从谈起（这条路上没有收件人）。
+  deviceAddressed: (meta) => ({
+    pairs: [senderPair(meta, PUBLISH_PREKEY_BUNDLE)],
+    requirement: DIRECT_E2EE_DEVICE,
+  }),
+  // §7.1 的键元组：`meta.target.did` 就是那个 `target.did`，设备那一段由 `deviceAddressed`
+  // 交出去（`idempotencyKey()` 收到 `deviceSelectors` 时自己追加）。
+  targetScope: (meta) => serviceTargetDid(meta, PUBLISH_PREKEY_BUNDLE),
+})
+
+const GET_PREKEY_BUNDLE_SPEC = keySpec({
+  name: GET_PREKEY_BUNDLE,
+  validateBody: validateGetBundleBody,
+  // 两台：调用方自己，以及正文里的目标设备（§7.2 L572 要求服务端**按 §4.1.1 验证精确的
+  // `(target_did, target_device_id)`**，那就是这份 `pairs` 的第二项要交给 `checkDevice` 的
+  // 两段）。顺序与规范一致：`pairs[0]` 是调用方，`pairs[1]` 是被问的那台。
+  deviceAddressed: (meta, body) => ({
+    pairs: [
+      senderPair(meta, GET_PREKEY_BUNDLE),
+      { identity: bodyString(body, 'target_did'), deviceId: bodyString(body, 'target_device_id') },
+    ],
+    requirement: DIRECT_E2EE_DEVICE,
+    // §7.2 L578 与 §12.4 L1515：设备一旦失去资格，MUST 停止**返回**它的 PreKey 材料。
+    // 所以重放也要重判——这与 `direct.send` 相反，理由写在 `DeviceAddressed.recheckOnReplay`。
+    recheckOnReplay: true,
+  }),
+  // §7.2 的键元组比 §7.1 多一个 `target_did`。`meta.target.did` 对被本服务受理的请求是常量
+  // （§7.2 L543 要求它等于 `serviceDid`），所以这里只有一个变量，`/` 分隔不可能歧义。
+  targetScope: (meta, body) => `${serviceTargetDid(meta, GET_PREKEY_BUNDLE)}/${bodyString(body, 'target_did')}`,
+})
+
 /** `POST /anp-im/rpc` 认得的方法。两个传输方法**不在其中**——理由写在 `stream.ts`。 */
 const METHODS: readonly MethodSpec[] = [
   GET_CAPABILITIES_SPEC,
   DIRECT_SEND_SPEC,
+  PUBLISH_PREKEY_BUNDLE_SPEC,
+  GET_PREKEY_BUNDLE_SPEC,
   GROUP_CREATE_SPEC,
   GROUP_GET_INFO_SPEC,
   GROUP_JOIN_SPEC,

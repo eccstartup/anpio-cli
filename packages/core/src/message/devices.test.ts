@@ -35,10 +35,20 @@ function document(overrides: Record<string, unknown> = {}): Record<string, unkno
 }
 
 async function resolve(doc: unknown, deviceId: string, identity = ALICE) {
-  return new DidDeviceResolver().resolveDevice(identity, deviceId, { didDocument: doc })
+  return (await new DidDeviceResolver().resolveDevice(identity, deviceId, { didDocument: doc })).entries
 }
 
 describe('reading a deviceManifest', () => {
+  it('hands back the document the entries came from', async () => {
+    // Bundle 的 Object Proof 要从 **issuer 的文档**里取公钥（P5 §6.2.3 L395），而这次
+    // 解析本来就已经把文档拿在手里了。只交条目会让同一次发布把它解析两遍——在验证路径上
+    // 那是把"信任根是谁"确定两次，两次之间隔着一次网络往返。
+    const doc = document()
+    const resolved = await new DidDeviceResolver().resolveDevice(ALICE, 'dev-a-7N3KQ2', { didDocument: doc })
+    expect(resolved.document).toBe(doc)
+    expect(resolved.entries).toHaveLength(1)
+  })
+
   it('hands back the four declared fields for the selected device', async () => {
     const [entry] = await resolve(document(), 'dev-a-7N3KQ2')
     expect(entry).toEqual({

@@ -66,6 +66,21 @@ export interface DeviceEntry {
 }
 
 /**
+ * 一次清单解析的**全部**产出：文档，以及 `device_id` 等于 selector 的那些条目。
+ *
+ * 为什么把文档一起交出来：P5 §6.2.3 L395 要求验 `prekey_bundle.proof`，而那份 Object
+ * Proof 的公钥只能从 **issuer 的 DID 文档**里取（Bundle 自己没有 `id`，不像 DID 文档那样
+ * 能自证）。只条目、不文档的话，同一次发布要把同一份文档解析两遍——而"解析"在网络路径上
+ * 是一次抓取，在验证路径上是一次**信任根的确定**，两者都不该在一次操作里做两遍。
+ */
+export interface ResolvedDeviceManifest {
+  /** 交出这些条目的那份文档。 */
+  document: Record<string, unknown>
+  /** `device_id` 等于 selector 的那些条目。 */
+  entries: DeviceEntry[]
+}
+
+/**
  * 身份 + 设备 selector → 清单里 `device_id` 等于它的**那些**条目。
  *
  * 复数不是笔误：P2 §5.5 规则 3 要求 `device_id` 在清单内唯一，所以正常情况下至多一条；
@@ -73,7 +88,7 @@ export interface DeviceEntry {
  * 在这里悄悄取第一条——取第一条会把一次文档错误变成一次静默的选错设备。
  */
 export interface DeviceResolver {
-  resolveDevice(identity: string, deviceId: string, opts?: LocateOptions): Promise<DeviceEntry[]>
+  resolveDevice(identity: string, deviceId: string, opts?: LocateOptions): Promise<ResolvedDeviceManifest>
 }
 
 /** 文档里的 `deviceManifest` 是否是 P2 §5.5 规定的形状；是就交出它那个 `devices` 数组。
@@ -128,7 +143,11 @@ function toDeviceEntry(document: Record<string, unknown>, value: Record<string, 
  * 会让它对"内联文档"与"取来的文档"两种来源都多知道一件事。
  */
 export class DidDeviceResolver implements DeviceResolver {
-  async resolveDevice(identity: string, deviceId: string, opts: LocateOptions = {}): Promise<DeviceEntry[]> {
+  async resolveDevice(
+    identity: string,
+    deviceId: string,
+    opts: LocateOptions = {},
+  ): Promise<ResolvedDeviceManifest> {
     if (!isDidIdentity(identity)) {
       // 账户 id（CAIP-10）上没有 `deviceManifest` 可读，也不该有：清单挂在 DID 文档上。
       throw new ConnectxError(
@@ -141,10 +160,13 @@ export class DidDeviceResolver implements DeviceResolver {
         ? (opts.didDocument as Record<string, unknown>)
         : (await resolveDidDocument(identity, opts as ResolveDidOptions)).document
     const devices = manifestDevices(document)
-    if (devices === undefined) return []
-    return devices
-      .filter(isDeviceEntry)
-      .filter((entry) => entry.device_id === deviceId)
-      .map((entry) => toDeviceEntry(document, entry))
+    const entries =
+      devices === undefined
+        ? []
+        : devices
+            .filter(isDeviceEntry)
+            .filter((entry) => entry.device_id === deviceId)
+            .map((entry) => toDeviceEntry(document, entry))
+    return { document, entries }
   }
 }

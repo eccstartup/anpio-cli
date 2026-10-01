@@ -247,12 +247,15 @@
     "没有限制"**——默认放行就是默认泄漏。落成一条取表别名的 SQL 谓词 `deviceFilter`。
     `msg inbox` 还没有 `--device`（改 HELP 会动文档站门禁），所以 CLI 只在 `msg listen`
     的补齐里声明设备）
-  - 还剩：两条 Key 方法进方法表（`targetScope` 两档不同）+ OPK 池与分配 + `bundle_id`
-    不可重定义检查（§6.2.2 L371）+ 限流（§7.3 L598 是 MUST 的落点）
+  - ~~两条 Key 方法进方法表（`targetScope` 两档不同）+ OPK 池与分配 + `bundle_id` 不可重定义
+    检查（§6.2.2 L371）+ 限流（§7.3 L598 是 MUST 的落点）~~（2026-10-01。受理路径的判据与
+    码的分派见 [e2ee-direct.md](docs/design/e2ee-direct.md) §2.1，限流的范围/键/码与已知弱点
+    见 §3 末尾）
   - **调用方身份没有答案**：§7.1 L476–477 要求已认证上下文认出确切的
     `(sender_did, sender_device_id)`，而 §3.8 L140 又把 v2 的业务层证明关掉了。选择是
     **不强求外层 hop**（它只会挡住正常的设备客户端，且它验的是一个服务 DID，拦不住谎报），
-    于是自报身份 + §4.1.1 资格，**只保证资格、不保证来源**——
+    于是自报身份 + §4.1.1 资格，**只保证资格、不保证来源**；限流已按身份计数，挡得住
+    "一个身份发得太快"、挡不住"换一串 DID"——
     见 [e2ee-direct.md](docs/design/e2ee-direct.md) §9 第 3 条
   - **挡住 v1 的**：无。两条 Key 方法同域即可跑，跨域部分随 C11
 - C13 P6 群组 E2EE：KeyPackage 状态机 + Device Delivery Queue

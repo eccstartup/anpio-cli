@@ -693,7 +693,9 @@ describe('a device-addressed direct message (P5 anp.direct.e2ee.v2)', () => {
     }
     const withDevices = idempotencyKey({
       ...scope,
-      deviceSelectors: [SENDER_DEVICE, RECEIVER_DEVICE],
+      // 每一段都带 owner：`device_id` 是不透明字符串（P2 §5.5 L263），两侧各自取名撞上
+      // 同一个值是可能的，只写设备 id 会让两台不同设备的调用共用一条键（`deviceSelector`）。
+      deviceSelectors: [`${sender.did}#${SENDER_DEVICE}`, `${receiver.did}#${RECEIVER_DEVICE}`],
     })
     expect(h.storage.idempotentRow(withDevices)).toBeDefined()
     // 少了设备段的那个键必须**不在**库里。它若在，说明键退回到 Base 的四段形状，
