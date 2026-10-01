@@ -148,7 +148,14 @@ const MAX_TTL_SECONDS = 3600
 // The official client sends `Signature: sig1=:<base64>:` (RFC 9421 labeled binary
 // format); the legacy browser shim sent a bare base64 value. Decode both. The label
 // is returned so the verifier can correlate it with Signature-Input.
-function decodeSignatureHeader(header: string): { label: string | null; bytes: Uint8Array } | null {
+/**
+ * Split an RFC 9421 `Signature` field value into its label and raw signature bytes.
+ *
+ * Exported for `message/verify.ts`: the ANP-09 `origin_proof.signature` is the same
+ * field value the ANP-02 carriers carry, so both must accept and reject the same
+ * shapes. A second parser is a second answer to "is this well-formed".
+ */
+export function decodeSignatureValue(header: string): { label: string | null; bytes: Uint8Array } | null {
   const labeled = /^([A-Za-z0-9_-]+)=:([^:]+):\s*$/.exec(header.trim())
   if (labeled) return { label: labeled[1], bytes: base64ToBytes(labeled[2]) }
   const bare = header.trim()
@@ -228,6 +235,35 @@ export type VerifyOutcome =
       cause?: unknown
     }
 
+/**
+ * Curve dispatch for a detached signature over `message` — the ONLY place in this
+ * package that decides how a curve's bytes are laid out.
+ *
+ * Shared by the two ANP-02 carriers (HTTP headers and the JSON envelope) and by the
+ * ANP-09 `origin_proof` verifier (`message/verify.ts`). One copy on purpose: a signer
+ * and a verifier that disagree about a curve's byte layout produce proofs that verify
+ * on one machine and fail on another, and neither side's own tests can catch it.
+ */
+export async function verifySignatureWithKey(input: {
+  signature: Uint8Array
+  message: Uint8Array
+  key: ResolvedKey
+}): Promise<boolean> {
+  const { signature: sig, message: msg, key } = input
+  if (key.curve === 'ed25519') return ed25519.verify(sig, msg, key.bytes)
+  if (sig.length === 65) {
+    // secp256k1. A 65-byte signature carries the trailing recovery id (v) and is
+    // the Ethereum `personal_sign` form: the wallet hashes the base as an EIP-191
+    // personal message, so the verifier reconstructs that same hash and strips `v`
+    // before the ECDSA check. A 64-byte signature is the raw r||s form over the
+    // base and verifies directly. Raw ECDSA is always 64 bytes, so the length
+    // unambiguously picks the scheme. ed25519 and raw secp256k1 need no transform
+    // — the verifier stays chain-agnostic.
+    return secp256k1.verify(sig.slice(0, 64), ethPersonalSignHash(msg), key.bytes, { prehash: false })
+  }
+  return secp256k1.verify(sig, msg, key.bytes)
+}
+
 // Check the `Signature` value against a rebuilt signature base. Shared by both
 // carriers of the same ANP-02 proof (the HTTP headers of §3 and the JSON envelope
 // of §4): the signature format, the label rule and the curve dispatch are carrier
@@ -244,7 +280,7 @@ async function verifyProofSignature(input: {
    *  value). It never relaxes freshness, digest or covered-set checks. */
   mode: 'strict' | 'legacy'
 }): Promise<VerifyOutcome> {
-  const decoded = decodeSignatureHeader(input.signature)
+  const decoded = decodeSignatureValue(input.signature)
   if (!decoded) return FAIL.signature_invalid
   // RFC 9421: the Signature label MUST match the Signature-Input label, otherwise
   // different middleware cannot agree on which signature was verified.
@@ -253,26 +289,7 @@ async function verifyProofSignature(input: {
   // labeled RFC 9421 signature — reject it outside explicit legacy mode.
   if (input.mode === 'strict' && decoded.label == null) return FAIL.signature_invalid
   const sig = decoded.bytes
-  const msg = utf8(input.base)
-
-  let ok: boolean
-  if (input.key.curve === 'ed25519') {
-    ok = ed25519.verify(sig, msg, input.key.bytes)
-  } else if (sig.length === 65) {
-    // secp256k1. A 65-byte signature carries the trailing recovery id (v) and is
-    // the Ethereum `personal_sign` form: the wallet hashes the base as an EIP-191
-    // personal message, so the verifier reconstructs that same hash and strips `v`
-    // before the ECDSA check. A 64-byte signature is the raw r||s form over the
-    // base and verifies directly. Raw ECDSA is always 64 bytes, so the length
-    // unambiguously picks the scheme. ed25519 and raw secp256k1 need no transform
-    // — the verifier stays chain-agnostic.
-    ok = await secp256k1.verify(sig.slice(0, 64), ethPersonalSignHash(msg), input.key.bytes, {
-      prehash: false,
-    })
-  } else {
-    ok = await secp256k1.verify(sig, msg, input.key.bytes)
-  }
-
+  const ok = await verifySignatureWithKey({ signature: sig, message: utf8(input.base), key: input.key })
   return ok ? OK : FAIL.signature_invalid
 }
 

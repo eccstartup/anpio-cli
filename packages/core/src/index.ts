@@ -161,6 +161,80 @@ export type { AnpStore, AnpStoreState } from './store'
 export { createEventEmitter } from './events'
 export type { EventEmitter, WalletEvent, WalletEventType } from './events'
 
+// ---- ANP-09 消息 ---------------------------------------------------------------
+// 信封 + P1 附录 A 的原发者证明 + 身份解析口子。CLI 与服务端共用这一份——两侧各写
+// 一遍签名底，是这类实现最经典的 bug（[vendored-core.md](../../docs/design/vendored-core.md) §6）。
+export {
+  JSONRPC_VERSION,
+  ANP_PROFILE,
+  ANP_SECURITY_PROFILE,
+  ANP_TARGET_KIND,
+  ANP_META_FIELDS,
+  ORIGIN_PROOF_SCHEME,
+  JSON_RPC_ERROR,
+  ANP_ERRORS,
+  toErrorObject,
+  anpRejection,
+  rpcRejection,
+  firstUnknownMetaField,
+  parseEnvelope,
+  isNotification,
+} from './message/envelope'
+export type {
+  AnpProfileId,
+  AnpSecurityProfile,
+  AnpTargetKind,
+  AnpTarget,
+  AnpMeta,
+  AnpOriginProof,
+  AnpAuth,
+  AnpParams,
+  AnpRequest,
+  AnpNotification,
+  AnpErrorData,
+  AnpErrorObject,
+  AnpSuccessResponse,
+  AnpErrorResponse,
+  AnpResponse,
+  AnpErrorCode,
+  AnpRejection,
+  EnvelopeCheck,
+} from './message/envelope'
+export { signOriginProof, buildOriginProofAuth, ed25519OriginProofSigner } from './message/sign'
+export type { OriginProofSigner, SignOriginProofInput } from './message/sign'
+export { verifyOriginProof, verifyOriginProofDetailed, originProofFreshness } from './message/verify'
+export type {
+  VerifyOriginProofInput,
+  OriginProofFailure,
+  OriginProofOutcome,
+} from './message/verify'
+export { DidServiceLocator, DidKeyResolver, isDidIdentity } from './message/locator'
+export type {
+  TrustAnchor,
+  ServiceEntry,
+  LocateOptions,
+  ResolvedIdentityKey,
+  ServiceLocator,
+  KeyResolver,
+} from './message/locator'
+export {
+  ANP_MESSAGE_SERVICE_TYPE,
+  discoverMessageService,
+  parseCapabilities,
+  negotiateProfiles,
+} from './message/discovery'
+export type {
+  AnpMessageServiceTarget,
+  AnpCapabilities,
+  DiscoverMessageServiceOptions,
+} from './message/discovery'
+export { idempotencyKey, idempotencyVerdict, idempotencyScopeFromMeta } from './message/idempotency'
+export type { IdempotencyScope, IdempotencyRecord, IdempotencyVerdict } from './message/idempotency'
+// P1 附录 A.3 的 Signed Request Object 与它的摘要。服务端的幂等指纹就用它——
+// 它已经覆盖 method / meta / body 的全部内容，另算一份摘要等于有两种"等价"。
+export { signedRequestObject, canonicalizeSignedRequestObject, contentDigestOf } from './message/sro'
+export type { SignedRequestObject } from './message/sro'
+
 // ---- 错误模型 -----------------------------------------------------------------
 export { ConnectxError, ConnectorUnavailableError, isConnectxError, errorCode } from './errors'
 export type { ConnectxErrorCode, ConnectxErrorOptions, BlockedReason } from './errors'

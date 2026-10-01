@@ -12,11 +12,20 @@
   另删 `connectors/anpExtension.ts`、`connectors/index.ts`（死 barrel）、`defineConfig.ts`
   （只服务已删除的 `project` 族）。`anpDevShim.ts` **改判保留**，理由见
   [vendored-core.md](docs/design/vendored-core.md) §2）
-- A4 **新增 `core/message/`**：`envelope.ts` / `sign.ts` / `verify.ts` / `discovery.ts` / `idempotency.ts`
-- A5 把 `sign` / `verify` 共用的 JCS 规范化抽到一处，**确认只有一份**
-- A6 **新增 `core/message/locator.ts`**：`ServiceLocator` / `KeyResolver` / `TrustAnchor`
-  （[vendored-core.md](docs/design/vendored-core.md) §6 的口子）。v1 只实现 DID 那一个
-- A7 全仓 grep `resolveDidDocument` 的**直接调用点**，一律改走 locator / resolver
+- ~~A4 **新增 `core/message/`**~~（2026-10-01：`envelope` / `sro` / `sign` / `verify` /
+  `discovery` / `idempotency` / `locator`，38 个测试。逐条引 P1 附录 A 与 P2 §7–§9 行号）
+- ~~A5 sign / verify 共用同一份 JCS~~（2026-10-01 核过：全仓只有 `crypto/fingerprint.ts`
+  一处 `jcsCanonicalize`；`message/sro.ts` 是它唯一的消息层入口）
+- ~~A6 **新增 `core/message/locator.ts`**~~（2026-10-01：`ServiceLocator` / `KeyResolver` /
+  `TrustAnchor` 三个接口 + `DidServiceLocator` / `DidKeyResolver` 两个实现。
+  `caip10_has_no_ingress` 由 `locate()` 抛出——账户 id 与"文档里没有服务条目"是两件事，
+  给两个码）
+- A7 全仓 grep `resolveDidDocument` 的**直接调用点**，一律改走 locator / resolver。
+  2026-10-01 已查：core 里还有 5 处直连（`crypto/wns.ts`、`crypto/agentDescription.ts`、
+  `crypto/serverAuth.ts`、`did/chain.ts`、`protocol/anp.ts`），**都留着**——它们是
+  ANP-02/03/04/07/08 自己的解析，不是"给消息定址"。账户 id 上没有 handle、没有
+  ad.json、没有更新链，硬塞进 locator 只会把两个协议的正确性互相污染。
+  **这条剩下的部分在 B/C：`packages/cli` 与 `packages/service` 里不得直连**
 
 ## B. `packages/cli` —— connectx
 
@@ -67,6 +76,8 @@
   `packages/service` 的 `engines` 定 `>=24.16.0`，见 [message-service.md](docs/design/message-service.md) §2）
 - E2 命令面门禁：把 `help.test.ts` 那两条不变量（「页面写出的旗标集合 ＝ 它接受的集合」
   「页面声明的参数 ＝ 它的 usage 行」）一起搬过来
+- **远程未配**：本仓库只有本地 `git init`，`git push` 无处可去。需要一个 GitHub remote
+  （建仓是对外可见的动作，等用户定）
 - E3 **加的评审清单**：CLI 与服务端里**不得出现 `isDid()` 之类的身份类型分支**
   （[vendored-core.md](docs/design/vendored-core.md) §6.3）
 - E4 端到端：`connectx msg send` → `AgentXAgent` → `connectx msg listen` 收到

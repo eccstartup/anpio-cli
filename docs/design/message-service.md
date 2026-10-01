@@ -102,14 +102,21 @@ Postgres 的事等真需要多实例时再说，现在不做抽象层之上的�
 
 | 规则 | 违反时的错误 |
 |---|---|
-| `jsonrpc` 精确等于 `"2.0"` | `anp.invalid_jsonrpc_version` |
-| `params` **必须**是对象（数组不行） | `anp.invalid_params_shape` |
-| `id` **必须**是非空字符串；数字 / `null` 都不行 | `anp.invalid_request_id` |
-| **禁 batch** | `anp.batch_not_supported`（注意这是 `anp_code`，不是 JSON-RPC `-32600`） |
-| 有 `id` = Request，无 `id` = Notification；除 Notification 外**必须**回 Response | — |
-| 顶层固定为 `params = {meta, auth, body}` | — |
-| 未知**核心** `meta` 字段 **MUST** 拒绝；仅 `x_` 前缀 MAY 忽略 | `anp.unknown_meta_field` |
-| 计数器 / 序号 / epoch 等 **MUST** 是十进制**字符串** | — |
+| `jsonrpc` 精确等于 `"2.0"`（§4.1 L127） | `-32600`（§10.1 L672「非法 JSON-RPC 对象」） |
+| `params` **必须**是对象，数组不行（§5.1 L151） | `anp.invalid_params_shape`（1003，§10.3 L704） |
+| `id` **必须**是非空字符串；数字 / `null` 都不行（§5.2 L157–159） | `anp.invalid_request_id`（1000，§10.3 L701） |
+| **禁 batch**（§5.4 L177–179） | `anp.batch_not_supported`（1004，§10.3 L705）。注意这是 `anp_code`，不是 `-32600` |
+| 有 `id` = Request，无 `id` = Notification；除 Notification 外**必须**回 Response（§5.6 L201） | — |
+| 顶层固定为 `params = {meta, auth, body}`；除这三个之外的顶层成员只有 Profile 明确定义时才允许（§6.1 L224–230） | — |
+| 未知**核心** `meta` 字段 **MUST** 拒绝；仅 `x_` 前缀 MAY 忽略（§12.1 L776–777） | `-32600` |
+| 未知 `auth` 字段 **MUST** 拒绝；未知 `body` 字段只有 Profile 声明可忽略时才 MAY 忽略（§12.1 L778–780） | `-32600` |
+| `meta.target.kind` 与方法声明的目标建模模式不一致（§6.2.5.1 L382） | `anp.invalid_target_binding`（1014，§10.3 L715） |
+| 计数器 / 序号 / epoch 等 **MUST** 是十进制**字符串**（§7.3 L491–499） | — |
+
+⚠ **规范里没有 `anp.invalid_jsonrpc_version`，也没有 `anp.unknown_meta_field`**（已全文 grep 核实，
+2026-10-01）。§4.1 与 §12.1 只写 MUST，不指定码；§10.1 L667–677 把这些形状指向 JSON-RPC 标准码。
+§10.2 L695 规定只有 `code` 落在 ANP 自定义段（1000+）时才强制 `error.data.anp_code`，
+所以 `-32600` 那条**不带** `anp_code` 是合规的——客户端在标准码上用 `message` 分支。
 
 错误响应的统一形状（P1，所有自定义错误都走它）：
 

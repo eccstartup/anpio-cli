@@ -55,11 +55,6 @@ export type ConnectxErrorCode =
   | 'handle_not_found' // the Resolution Endpoint answered 404 (never registered) or 410 (revoked) — ANP-04 §4.8
   | 'handle_fetch_failed' // a WNS document could not be fetched: network/HTTP failure, timeout, size cap, too many redirects, or refused by the network policy
   | 'handle_malformed' // a fetched WNS body is not JSON, or is not a well-formed Handle Resolution Document
-  // --- ZK site descriptor (ZKTODO1 §12.1) --------------------------------------
-  | 'zk_descriptor_unavailable' // the descriptor could not be fetched: network/HTTP failure, timeout, or a body over the size cap (retry)
-  | 'zk_descriptor_malformed' // the fetched body is not a well-formed ZK site descriptor (the site must fix it — do not guess)
-  // --- ZK escrow vault (ZKTODO1 §10) (auditor-local, never a wire rejection) -----
-  | 'zk_vault_invalid' // a sealed escrow vault could not be opened: wrong auditor key, or the envelope was altered
   // --- key parsing (agent/CLI input) (fix) ------------------------------------
   | 'key_invalid' // malformed key material (length/hex/mnemonic/keystore params/PEM)
   | 'key_wrong_password' // keystore MAC mismatch — wrong password
@@ -71,7 +66,6 @@ export type ConnectxErrorCode =
   | 'agent_ambiguous' // agent detection matched more than one agent; pass --agent <id> or set $CONNECTX_AGENT
   | 'session_invalid' // stored session could not be decrypted / was tampered with (wrong password or corrupt file)
   | 'session_busy' // another process holds the session write lock (retry)
-  | 'zk_store_invalid' // stored ZK key / membership could not be decrypted or parsed (wrong password, corrupt file, or a record this build cannot read)
   // --- signature / protocol (fix, or report on peer) --------------------------
   | 'signature_malformed' // malformed Signature-Input header / params / label
   | 'signature_invalid' // signature or key bytes are invalid / mismatched
@@ -85,11 +79,17 @@ export type ConnectxErrorCode =
   | 'forbidden_did' // server 403 `forbidden_did`: the DID authenticated but has no permission (ANP-02 vocabulary)
   | 'authorization_denied' // server refused authorization without a more specific ANP-02 error
   | 'response_too_large' // remote response body exceeded the SDK byte cap (fix the server or raise maxBytes)
-  // --- framework bindings (react / vue) ----------------------------------------
-  | 'react_outside_provider' // hooks used outside <AnpProvider>
-  | 'react_session_not_configured' // `usePersistedSession()` without `<AnpProvider session>`
-  | 'vue_outside_provider' // composables used outside <AnpProvider>
-  | 'vue_session_not_configured' // `usePersistedSession()` without `<AnpProvider session>`
+  // --- ANP-09 messages (fix, or report on peer) ----------------------------------
+  // The peer's own answer always arrives as `serverCode` (the ANP `anp_code`, e.g.
+  // `anp.unsupported_profile`); the SDK code stays coarse, as it does for login.
+  | 'message_invalid' // the envelope/message we built, parsed, or were handed is not spec-shaped (ANP-09 P1 §4–§6)
+  | 'message_service_not_found' // the target DID document exposes no single usable `ANPMessageService` (P2 §7.1, §9.1)
+  | 'message_send_failed' // the peer rejected a message operation (non-2xx, or a JSON-RPC error object)
+  | 'unsupported_extension' // the peer does not implement the requested extension method — it is NOT a Profile, and MUST NOT be advertised as one
+  // The CAIP-10 door (docs/design/vendored-core.md §6): a wallet account id has no
+  // ingress of its own, so it cannot be a message address. Raised BY THE LOCATOR,
+  // never by a call site guessing at the identity's shape.
+  | 'caip10_has_no_ingress'
 
 /** The gate that refused a fetch. See `ConnectxErrorOptions.blockedReason`. */
 export type BlockedReason =
