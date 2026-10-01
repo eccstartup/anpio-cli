@@ -202,11 +202,14 @@ MTI 第 14 项（§10 L661）。
    `authentication` 授权的验证方法（§6.2.1 L330）。我们的 DID 文档**不由本服务托管**
    （[message-service.md](message-service.md) §13 / [cli.md](cli.md) §3.4，发布方是
    `awiki-open-server`），所以 keyid 的 fragment 必须与**发布方写进去的那一条**对上。
-   **这是一处部署耦合，C11 只把它写进配置与文档，不去猜。**
+   **这是一处部署耦合，C11 只把它写进配置与文档，不去猜。** 落地就是 `AGENTX_KEY_ID`：
+   完整 DID URL，且必须挂在 `serviceDid` 下——配置层会拒掉别的，因为不一致时我们签出去的
+   每一份请求都会被对端按第 6 步拒成 `forbidden_did`，而那个错误看起来像对端的问题。
 3. **私钥从哪来。** `AGENTX_KEY_FILE`（`config.ts` L206）早就解析了却没人用。
-   C11 就是它的第一个消费者：读一把 Ed25519 私钥，按 ANP-02 §3.1.2 造
-   `Signature-Input` + `Signature` + `Content-Digest`。core 现有的签名器**不能**直接用
-   ——它是 ANP-02 的 DID 服务登录流程，不是通用外层的（见 `crypto/signer.ts`）。
+   C11 就是它的第一个消费者：读一把 Ed25519 私钥（hex 或 PEM，与 `connectx --key` 认的
+   同两种），按 ANP-02 §3.1.2 造 `Signature-Input` + `Signature` + `Content-Digest`。
+   core 现有的签名器**不能**直接用——它是 ANP-02 的 DID 服务登录流程，不是通用外层的
+   （见 `crypto/signer.ts`）。
 
 ## 5. 群与附件的跨域落点
 

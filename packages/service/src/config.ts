@@ -62,6 +62,11 @@ export interface Config {
   /** The key that signs outbound cross-domain requests (P8, C11). Absent means this
    *  deployment does not call other domains. */
   keyFile?: string
+  /** Which verification method that key is. ANP-02 L82 requires `keyid` to be a full
+   *  DID URL, and the fragment names an entry the publisher of {@link serviceDid}'s
+   *  document wrote — so it can only be configured, never derived (federation.md §4).
+   *  Present exactly when {@link keyFile} is. */
+  keyId?: string
   /** SQLite file, or `:memory:`. */
   dbPath: string
   /** Where attachment objects are written (P7, C10). Always present: `AGENTX_OBJECT_DIR`
@@ -236,6 +241,42 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       DEFAULT_MAX_OBJECT_BYTES,
     ),
   }
-  if (env.AGENTX_KEY_FILE !== undefined && env.AGENTX_KEY_FILE !== '') config.keyFile = env.AGENTX_KEY_FILE
+  if (env.AGENTX_KEY_FILE !== undefined && env.AGENTX_KEY_FILE !== '') {
+    config.keyFile = env.AGENTX_KEY_FILE
+    config.keyId = parseKeyId(env.AGENTX_KEY_ID, config.serviceDid)
+  } else if (env.AGENTX_KEY_ID !== undefined && env.AGENTX_KEY_ID !== '') {
+    // 只有 keyid 没有钥：要么少配一个变量，要么名字打错了。两者都在启动时说不清，
+    // 到了第一次跨域调用才炸会难查得多。
+    throw new ConnectxError('invalid_argument', 'AGENTX_KEY_ID is set but AGENTX_KEY_FILE is not')
+  }
   return config
+}
+
+/**
+ * `AGENTX_KEY_ID`：完整 DID URL（ANP-02 L82），且必须挂在 `serviceDid` 下。
+ *
+ * 后半句不是格式检查，是配置一致性：`keyid` 所属的 DID 必须等于对方按 §6.2.2 第 6 步
+ * 读出来的那个 `serviceDid`，否则每一份我们签出去的请求都会被对端按 `forbidden_did` 拒掉
+ * ——而那个错误看起来像对端的问题。fragment 本身不校验：它是文档发布方写的那一条，
+ * 本服务无从验证，只能配成一致（federation.md §4 第 2 点）。
+ */
+function parseKeyId(raw: string | undefined, serviceDid: string): string {
+  if (raw === undefined || raw === '') {
+    throw new ConnectxError('invalid_argument', 'AGENTX_KEY_ID is required when AGENTX_KEY_FILE is set')
+  }
+  const hash = raw.indexOf('#')
+  if (hash <= 0 || hash === raw.length - 1) {
+    throw new ConnectxError(
+      'invalid_argument',
+      `AGENTX_KEY_ID must be a full DID URL, e.g. ${serviceDid}#key-1 (got ${JSON.stringify(raw)})`,
+    )
+  }
+  const did = raw.slice(0, hash)
+  if (did !== serviceDid) {
+    throw new ConnectxError(
+      'invalid_argument',
+      `AGENTX_KEY_ID must name a verification method of ${serviceDid} (got ${JSON.stringify(did)})`,
+    )
+  }
+  return raw
 }

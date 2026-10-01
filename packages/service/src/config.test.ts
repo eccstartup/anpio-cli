@@ -119,15 +119,46 @@ describe('AGENTX_MAX_BODY', () => {
 
 describe('optional paths', () => {
   it('are set only when non-empty', () => {
-    const set = loadConfig({ AGENTX_KEY_FILE: '/keys/agentx.pem', AGENTX_OBJECT_DIR: '/var/agentx/objects' })
+    const set = loadConfig({
+      AGENTX_KEY_FILE: '/keys/agentx.pem',
+      AGENTX_KEY_ID: `${didWebFor('http://127.0.0.1:8787')}#key-1`,
+      AGENTX_OBJECT_DIR: '/var/agentx/objects',
+    })
     expect(set.keyFile).toBe('/keys/agentx.pem')
     expect(set.objectDir).toBe('/var/agentx/objects')
 
     // An empty value is a shell accident, not a path: `objectDir` falls back to the
     // derivation rather than becoming ''.
-    const blank = loadConfig({ AGENTX_KEY_FILE: '', AGENTX_OBJECT_DIR: '' })
+    const blank = loadConfig({ AGENTX_KEY_FILE: '', AGENTX_KEY_ID: '', AGENTX_OBJECT_DIR: '' })
     expect('keyFile' in blank).toBe(false)
+    expect('keyId' in blank).toBe(false)
     expect(blank.objectDir).toBe('objects')
+  })
+})
+
+describe('AGENTX_KEY_FILE / AGENTX_KEY_ID', () => {
+  const SERVICE_DID = didWebFor('http://127.0.0.1:8787')
+
+  it('requires a keyid that names a method of this service own DID', () => {
+    // 半个配置没有意义：`keyid` 的 DID 必须等于对端按 §6.2.2 第 6 步读出的 `serviceDid`，
+    // 不一致时我们签出去的每一份请求都会被拒成 `forbidden_did`——那个错误看起来像对端的
+    // 问题，所以要在启动时挡掉。
+    expect(() => loadConfig({ AGENTX_KEY_FILE: '/keys/k' })).toThrow(/AGENTX_KEY_ID is required/)
+    expect(() => loadConfig({ AGENTX_KEY_FILE: '/keys/k', AGENTX_KEY_ID: 'key-1' })).toThrow(/full DID URL/)
+    expect(() => loadConfig({ AGENTX_KEY_FILE: '/keys/k', AGENTX_KEY_ID: `${SERVICE_DID}#` })).toThrow(/full DID URL/)
+    expect(() =>
+      loadConfig({ AGENTX_KEY_FILE: '/keys/k', AGENTX_KEY_ID: 'did:web:elsewhere#key-1' }),
+    ).toThrow(/verification method of/)
+  })
+
+  it('accepts a keyid under this service own DID', () => {
+    const config = loadConfig({ AGENTX_KEY_FILE: '/keys/k', AGENTX_KEY_ID: `${SERVICE_DID}#key-1` })
+    expect(config.keyId).toBe(`${SERVICE_DID}#key-1`)
+  })
+
+  it('rejects a keyid with no key file', () => {
+    // 打错一个变量名时说清楚，比等到第一次跨域调用才炸好查。
+    expect(() => loadConfig({ AGENTX_KEY_ID: `${SERVICE_DID}#key-1` })).toThrow(/AGENTX_KEY_FILE is not/)
   })
 })
 

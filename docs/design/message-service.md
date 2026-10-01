@@ -945,7 +945,8 @@ Profile 决定，所以没有按传输再分一层——多一层形状就多一
 AGENTX_LISTEN           监听地址，默认 127.0.0.1:8787
 AGENTX_PUBLIC_URL       对外可见的基址（用于 serviceEndpoint / object_uri）
 AGENTX_SERVICE_DID      自己的服务 DID，默认由 PUBLIC_URL 推出 did:web
-AGENTX_KEY_FILE         服务签名钥（跨域时签外层请求）
+AGENTX_KEY_FILE         服务签名钥（跨域时签外层请求；hex 或 PEM）
+AGENTX_KEY_ID           该钥的 keyid，完整 DID URL 且挂在 SERVICE_DID 下（配了 KEY_FILE 就必填）
 AGENTX_DB               SQLite 路径，默认 ./agentx.db
 AGENTX_OBJECT_DIR       附件对象目录（按摘要寻址，见 attachments.md §4）
 AGENTX_MAX_BODY         请求体上限，默认 1 MiB（附件走数据面，不经这里）
