@@ -25,7 +25,10 @@
   `crypto/serverAuth.ts`、`did/chain.ts`、`protocol/anp.ts`），**都留着**——它们是
   ANP-02/03/04/07/08 自己的解析，不是"给消息定址"。账户 id 上没有 handle、没有
   ad.json、没有更新链，硬塞进 locator 只会把两个协议的正确性互相污染。
-  **这条剩下的部分在 B/C：`packages/cli` 与 `packages/service` 里不得直连**
+  `packages/cli` 同理：`commands/did.ts` 里那两处是 `did resolve` / `did update` 读
+  一个 DID 自己的文档，属 ANP-02，留。
+  **剩下的部分只在 C：`packages/service` 里不得直连**（消息定址一律走
+  `ServiceLocator` / `KeyResolver`）
 
 ## B. `packages/cli` —— connectx
 
@@ -35,11 +38,17 @@
   `auth.ts` 的整段 `runZkLogin` 与它的属性/描述符助手、`help/commands.ts` 的 Zero-knowledge 旗标组与 `project` 页。
   `SessionWrite` 的 `uncacheable` 与 `LoginCard` 的 `note` / `identity.label` 随之删除：它们的唯一取值来源就是 ZK。
   `packages/cli/package.json` 本就已是 `@agentx/cli` + 四个运行时依赖，无需再改）
-- B3 `help/commands.ts` 加 `msg` / `group` **两族**（页面数据，见 [cli.md](docs/design/cli.md) §3）
-- B4 `msg send`：发现 → 构造 → 签名 → POST → 报错，全链路
-- B5 `msg caps` / `msg inbox` / `msg show` / `msg read`
+- B3 `help/commands.ts` 加 `msg` / `group` **两族**（页面数据，见 [cli.md](docs/design/cli.md) §3）。
+  2026-10-01：`msg` 族按子命令逐条落地，`send` / `caps` 两页已随之进来；**`group` 一族随 B6**
+- ~~B4 `msg send`：发现 → 构造 → 签名 → POST → 报错，全链路~~（2026-10-01。含 P1 §10.3 L726 与
+  P3 §5.5 L206–208 要求的 `anp.did_superseded` 重试）
+- B5 `msg caps` 已做（匿名探测，`meta` 按 P1 §8.2.1 L524–539 的例子给）。
+  **`msg inbox` / `show` / `read` 未做**：扩展面 `params` 的形状是实现的，不是规范的
+  （`message.get_batch` 收 `event_ids` 而非 `message_ids`，`inbox.get` 收 `limit`/`skip`/`include_read`），
+  要与 B8 的 `unsupported_extension` 判定合成一遍
 - B6 `group` 六条命令
-- B7 `msg` 族拒绝账户 id，错误码 `caip10_has_no_ingress`——**拒绝点在 locator 层，不在命令层判断**
+- ~~B7 `msg` 族拒绝账户 id，错误码 `caip10_has_no_ingress`~~（2026-10-01：拒绝点确在
+  `DidServiceLocator.locate()`，命令层无判断；`caps` 侧有测试钉住）
 - B8 对端不支持扩展面时报 `unsupported_extension`（不是模糊失败）
 - B9 **`msg listen`**：WebSocket 连接 + 补齐 + 实时渲染 + 重连退避
   （契约全在 [realtime.md](docs/design/realtime.md) §7）

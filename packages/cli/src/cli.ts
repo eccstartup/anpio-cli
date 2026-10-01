@@ -3,6 +3,7 @@ import { parseArgs } from 'node:util'
 import { runAgent } from './commands/agent'
 import { runDidStore, runAnp } from './commands/auth'
 import { runDid } from './commands/did'
+import { runMsg } from './commands/msg'
 import { cliVersion } from './version'
 import { acceptedArgs, acceptedFlags, findCommand, findPage } from './help/commands'
 import {
@@ -45,6 +46,14 @@ const OPTIONS = {
   provider: { type: 'string' },
   // the endpoint a signed request is delivered to — login, register, sign, did update
   target: { type: 'string' },
+  // msg send — the recipient of a `direct.send` and the body it carries. `--to` is NOT
+  // `--target`: a target is the URL a request is POSTed to, while this is the DID a
+  // message is addressed to, whose service endpoint is discovered rather than given.
+  to: { type: 'string' },
+  text: { type: 'string' },
+  body: { type: 'string' },
+  'content-type': { type: 'string' },
+  'operation-id': { type: 'string' },
   // session store — the token cache written by `login`. On by default, so declared as
   // `--no-save-session`; `--save-session` is unknown.
   'no-save-session': { type: 'boolean', default: false },
@@ -226,6 +235,11 @@ async function main(argv: string[]): Promise<number> {
         return 0
       }
       return await runDid(v, sub, positionals[2])
+    case 'msg':
+      // The message layer's own client. The page layer has already rejected any flag or
+      // extra argument this family does not take, so `runMsg` sees only its own.
+      await runMsg(v, sub, positionals[2])
+      return 0
     case 'agent':
       // The store's current agent: which id the other commands act as when neither
       // `--agent` nor `$CONNECTX_AGENT` names one. Reads and writes one file, and

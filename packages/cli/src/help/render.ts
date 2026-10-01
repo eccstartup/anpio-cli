@@ -210,7 +210,7 @@ export function renderCommandIndex(command: CommandSpec): string {
 
 /** L0: every command, grouped. */
 export function renderIndex(): string {
-  const out: string[] = ['connectx — ANP-02 identity, login, and request signing', '']
+  const out: string[] = ['connectx — identity, login, and messaging on the Agent Network Protocol', '']
   out.push(...section('Usage', [`${INDENT}connectx <command> [subcommand] [options]`]))
 
   const groups = new Map<string, Array<{ form: string; brief: string }>>()

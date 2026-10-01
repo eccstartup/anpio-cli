@@ -32,6 +32,7 @@ import {
   anpCli,
   chainWallet,
   chainWalletConnector,
+  keypairWallet,
   ConnectxError,
 } from '@agentx/core'
 import type {
@@ -41,6 +42,7 @@ import type {
   AnpConnector,
   DidChainOptions,
   DidDocumentServices,
+  IWallet,
   ParsedKey,
   ParsedKeyCurve,
   RegisterOutcome,
@@ -80,9 +82,15 @@ export function cliError(code: string, message: string): Error {
   return err
 }
 
-interface Resolved {
+export interface Resolved {
   config: AnpConfig
   connector: AnpConnector
+  /** The same wallet the connector signs with, handed out so a caller can sign
+   *  something the connector's `signRequest` does not model — the ANP-09 origin proof
+   *  is one (`walletOriginProofSigner`). A connector seals its signing behind
+   *  `getIdentity` / `signRequest`, so without this a command would have to build a
+   *  second wallet from the key material and get the curve wrong on its own. */
+  wallet: IWallet
   /** Target host — also the key this session is stored under. */
   host: string
   /** On-disk location of this (agent, profile); `session.json` lives here too. */
@@ -788,7 +796,7 @@ interface BuildConnectorOptions {
   service?: DidDocumentServices
 }
 
-async function buildConnector(v: Values, opts: BuildConnectorOptions = {}): Promise<Resolved> {
+export async function buildConnector(v: Values, opts: BuildConnectorOptions = {}): Promise<Resolved> {
   const wallet = (v.wallet as string) ?? 'cli'
   const chainId = v['chain-id'] as string | undefined
   const address = v.address as string | undefined
@@ -830,7 +838,10 @@ async function buildConnector(v: Values, opts: BuildConnectorOptions = {}): Prom
       caipAddress = evmAddress(parsed.privateKey)
     }
     const connector = anpCli(parsed, { host, chainId, address: caipAddress, path, service: opts.service })
-    return { config: createConfig([connector], connector.id), connector, host, location, password, key }
+    // `anpCli` wraps the same key in the same local wallet (`toWallet`), so a caller
+    // signing its own proof signs with exactly the key this connector signs with.
+    const wallet = keypairWallet(parsed.privateKey, { curve: parsed.curve })
+    return { config: createConfig([connector], connector.id), connector, wallet, host, location, password, key }
   }
 
   if (wallet === 'web3') {
@@ -850,6 +861,7 @@ async function buildConnector(v: Values, opts: BuildConnectorOptions = {}): Prom
     return {
       config: createConfig([connector], connector.id),
       connector,
+      wallet: w,
       host,
       location,
       password,
@@ -980,7 +992,7 @@ function evmAddress(privateKey: Uint8Array): string {
   )
 }
 
-function require(v: Values, ...keys: string[]) {
+export function require(v: Values, ...keys: string[]) {
   for (const k of keys) {
     if (v[k] === undefined || v[k] === '') {
       throw cliError('missing_flag', `missing required option --${k}`)

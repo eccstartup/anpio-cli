@@ -150,9 +150,11 @@ const KEY: OptionGroup = {
  *  path. The difference is the whole layering rule between the two groups. */
 const KEY_CLI_ROW_SIGNATURES = ['--key <spec>', '--curve <ed25519|secp256k1>', '--bip39-path <path>']
 
-/** Key resolution for the DID layer. `--wallet` is absent on purpose: a web3 wallet
- *  yields a CAIP-10 account id (`eip155:1:0x…`), which is not a DID, so no page here
- *  accepts it. A caller whose identity lives in a wallet uses the `anp` group. */
+/** Key resolution for a page that takes NO wallet. The DID layer excludes it because a
+ *  web3 wallet yields a CAIP-10 account id (`eip155:1:0x…`), which is not a DID. The
+ *  message layer excludes it for the complementary reason (cli.md §6): a v1 message is
+ *  addressed to a DID, so the sending half has no account id to sign as either. A caller
+ *  whose identity lives in a wallet uses the `anp` group. */
 const KEY_CLI: OptionGroup = {
   title: 'Key',
   rows: KEY.rows.filter((row) => KEY_CLI_ROW_SIGNATURES.includes(row.signature)),
@@ -166,6 +168,26 @@ const KEY_WALLET: OptionGroup = {
   title: 'Key',
   note: KEY.note,
   rows: KEY.rows.filter((row) => !KEY_CLI_ROW_SIGNATURES.includes(row.signature)),
+}
+
+/** The private-address gate. One row, wherever a host might be local without being
+ *  spelled as loopback: the sentence is the same question on every page that asks it. */
+const ALLOW_PRIVATE_HOST: OptionRow = {
+  signature: '--allow-private-host <host>',
+  summary:
+    'allow a host that is local without being spelled that way to be private and to answer over http',
+}
+
+/** A `direct.send` or a capabilities probe is sent to a host DERIVED from the identifier
+ *  being addressed, never to one the caller names in a flag, so the allowlist is not a
+ *  question the page can ask. What is left of the network policy is the private-address
+ *  gate, because a message service on this machine is a development setup. */
+function derivedHostPolicy(source: string): OptionGroup {
+  return {
+    title: 'Network policy',
+    rows: [ALLOW_PRIVATE_HOST],
+    note: `The host to contact comes from ${source} rather than from a flag, and a loopback host needs none.`,
+  }
 }
 
 const OUTPUT: OptionGroup = {
@@ -322,10 +344,7 @@ export const COMMANDS: CommandSpec[] = [
                 summary:
                   'required, repeatable. hostname allowed to be contacted; no port, no scheme, no default. localhost, 127.0.0.1 and ::1 are also allowed to be private and to answer over http',
               },
-              {
-                signature: '--allow-private-host <host>',
-                summary: 'allow a host that is local without being spelled that way to be private and to answer over http',
-              },
+              ALLOW_PRIVATE_HOST,
             ],
           },
           {
@@ -523,6 +542,107 @@ export const COMMANDS: CommandSpec[] = [
           'anp sign --target https://site/api/resource --method GET',
         ],
         see: 'cli/api/anp.md',
+      },
+    ],
+  },
+  {
+    name: 'msg',
+    purpose:
+      "deliver a message to another agent through its ANPMessageService, and ask that service what it supports",
+    // Its own group, on the same rule the `group` family follows: a family is named
+    // after the peer it talks to. `anp` is an application's login endpoint (`anp login`
+    // posts a session), while `msg` is an ANPMessageService holding a mailbox for a DID.
+    // One command does not turn `anp` into the message layer, either way round.
+    group: 'Message service',
+    index: [
+      { form: 'msg send', brief: 'deliver one message to a DID' },
+      { form: 'msg caps <did>', brief: 'ask a message service what it supports' },
+    ],
+    pages: [
+      {
+        sub: 'send',
+        purpose: "discover the recipient's message service, sign a direct.send, and deliver it",
+        // Two usage lines rather than one with an alternation: a reader copies a line,
+        // and `(--text <s> | --body <json>)` is not a thing to copy.
+        usage: [
+          'msg send --to <did> --text <string> [options]',
+          'msg send --to <did> --body <json> [options]',
+        ],
+        options: [
+          {
+            title: 'Message',
+            rows: [
+              { signature: '--to <did>', summary: 'required. The DID the message is addressed to' },
+              { signature: '--text <string>', summary: 'the message body, as text' },
+              { signature: '--body <json>', summary: 'the message body, as a JSON object' },
+              {
+                signature: '--content-type <type>',
+                summary: 'media type the body is sent as',
+                fallback: 'default: text/plain with --text, application/json with --body',
+              },
+              {
+                signature: '--operation-id <id>',
+                summary:
+                  'the idempotency key for the message, and its message id with it. Reuse it to send the same message again after a failure',
+                fallback: 'default: a random id',
+              },
+            ],
+            note:
+              'A message carries exactly one body, so --text and --body are alternatives rather than companions. ' +
+              'The content type decides which of the two the profile has a place for: text/plain pairs with --text, ' +
+              'application/json with --body.',
+          },
+          KEY_CLI,
+          derivedHostPolicy('--to'),
+          {
+            title: 'Chain policy',
+            rows: [
+              {
+                signature: '--accept-provider-asserted',
+                summary: 'follow a migration whose hops are only provider asserted',
+                fallback: 'default: off',
+              },
+              {
+                signature: '--report-low-assurance',
+                summary: 'finish the retry even when the migration is low assurance',
+              },
+            ],
+            note: 'Used only when the recipient answers anp.did_superseded.',
+          },
+          STORE,
+          OUTPUT,
+        ],
+        output: [
+          'The message id, the operation id, the DID the message was finally addressed to, and when the service accepted it.',
+          'The recipient is discovered first: its DID document, then the one ANPMessageService that document names. The request is signed with the stored identity, or with the material of --key.',
+          'A recipient that answers anp.did_superseded is not retargeted on its word. The migration is walked from the DID that was sent to, and only a chain this run verified becomes the new target; the DID the peer named is printed as an unverified claim.',
+        ],
+        exits: [
+          { code: '0', meaning: 'the service accepted the message' },
+          { code: '1', meaning: 'failed: refused, undeliverable, or rejected input' },
+        ],
+        examples: [
+          'msg send --to did:wba:example.com:user:bob:e1_xyz --text hello',
+          "msg send --to did:wba:example.com:user:bob:e1_xyz --body '{\"kind\":\"ping\"}'",
+        ],
+        see: 'cli/api/msg.md',
+      },
+      {
+        sub: 'caps',
+        purpose: 'ask a DID message service which profiles and content types it supports, before sending anything',
+        usage: ['msg caps <did> [options]'],
+        args: [{ name: 'did', required: true }],
+        options: [derivedHostPolicy('the DID'), OUTPUT],
+        output: [
+          'The service DID, the profiles, the security profiles, the content types it accepts, and the limits it publishes.',
+          'The call carries no identity, so this is the probe to run before one exists: a host that answers it can be talked to at all.',
+        ],
+        exits: [
+          { code: '0', meaning: 'printed' },
+          { code: '1', meaning: 'failed: no message service found, refused, or a malformed answer' },
+        ],
+        examples: ['msg caps did:wba:example.com:user:bob:e1_xyz'],
+        see: 'cli/api/msg.md',
       },
     ],
   },

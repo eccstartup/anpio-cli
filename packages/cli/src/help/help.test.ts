@@ -222,15 +222,16 @@ describe('command surface', () => {
   })
 
   it('keeps the web3 wallet out of the DID layer, and inside the ANP layer', () => {
-    // The layering rule, as an executable claim: `did` is DID-protocol only, and a web3
-    // wallet yields a CAIP-10 account id (`eip155:1:0x…`) rather than a DID, so no page
-    // there may offer one. `anp` signs for an application, where a wallet and a stored key
-    // are two sources of the same thing, so every one of its pages takes both.
+    // The layering rule, as an executable claim. `did` is DID-protocol only, and `msg`
+    // addresses a DID, so neither may offer a wallet: a web3 wallet yields a CAIP-10
+    // account id (`eip155:1:0x…`) rather than a DID, and neither family has a place to
+    // put one. `anp` signs for an application, where a wallet and a stored key are two
+    // sources of the same thing, so every one of its pages takes both.
     const WALLET_FLAGS = ['wallet', 'provider', 'address', 'chain-id']
     for (const command of COMMANDS) {
-      if (command.name === 'did') {
-        const flags = acceptedFlagsOfCommand('did')
-        expect(WALLET_FLAGS.filter((f) => flags.has(f))).toEqual([])
+      if (command.name === 'did' || command.name === 'msg') {
+        const flags = acceptedFlagsOfCommand(command.name)
+        expect(WALLET_FLAGS.filter((f) => flags.has(f)), `${command.name} takes a wallet flag`).toEqual([])
       }
       if (command.name === 'anp') {
         for (const { path, page } of pagesOf(command)) {
