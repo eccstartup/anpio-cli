@@ -63,6 +63,8 @@ const MAIN = [
   'verifyDidDocument',
   'createDidDocumentStore',
   'didToUrl',
+  // 带请求体的受控出站：跨域那一层（P8 §2.4）要把非 2xx 读成答复，而不是异常
+  'fetchControlledResponse',
   'verifyHttpMessageSignature',
   // 跨域那一半（P8 §6.2.2）：`verifyHttpSignatureForServer` 是入站服务端用的同一套
   // 校验，理由收成 ANP-02 的九个词；`anpErrorForResolveFailure` 把解析失败也收进同一张表

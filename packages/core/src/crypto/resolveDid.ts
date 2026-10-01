@@ -752,6 +752,11 @@ async function exchangeControlled(input: {
   codes: FetchErrorCodes
   request?: ControlledRequest
   consume: ResponseConsumer
+  /** Which status codes count as an answer. Defaults to `res.ok` — the document
+   *  callers read a 4xx/5xx body as a failure of the fetch. A caller that speaks a
+   *  protocol where the status IS the answer (ANP-02's 401, P8 §2.4) passes
+   *  `() => true` and reads it out of `consume`. */
+  accept?: (status: number) => boolean
 }): Promise<unknown> {
   const { options, codes, request } = input
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
@@ -868,7 +873,7 @@ async function exchangeControlled(input: {
         continue
       }
 
-      if (!res.ok) {
+      if (!res.ok && !(input.accept?.(res.status) ?? false)) {
         // Carry the status: it is the one thing about a non-2xx that a caller can act
         // on without parsing the message (a 404 is an answer, a 503 is a retry).
         throw new ConnectxError(codes.failed, `Failed to fetch ${codes.subject} from ${current} (${res.status})`, {
@@ -932,6 +937,39 @@ export function fetchControlledDiscardingBody(
       return undefined
     },
   }).then(() => undefined)
+}
+
+/**
+ * 同一条网络策略下的一次交换，**任何状态码都当答复交回来**。
+ *
+ * 与 {@link fetchControlledJson} 的差别只有一处，而那一处是协议定的：ANP-02 §3.2.4.1
+ * 把外层认证的失败放在 **HTTP 状态**与 `WWW-Authenticate` 上，不是放在 JSON-RPC 的
+ * `error` 里（P8 §2.4）。对端回 401 是一次**跑通的交换**，它的答复就是那个状态码与头；
+ * 按异常抛掉，调用方就只剩"发送失败"这一句话，既分不出"我被拒了"与"网络不通"，也拿不到
+ * 挑战头。
+ *
+ * 仍然受全套策略约束：白名单、逐跳验证、连接钉在已验证地址上、超时、字节上限。**任何
+ * 2xx/3xx 之外的跳转也不跟随**——带 body 的请求被 301/302 改写成 GET 之后，重发的是一份
+ * 对端从未同意过的、要求签名的东西。
+ */
+export async function fetchControlledResponse(
+  url: string,
+  options: ResolveDidOptions,
+  codes: FetchErrorCodes,
+  request?: ControlledRequest,
+): Promise<{ status: number; headers: Headers; text: string }> {
+  return (await exchangeControlled({
+    url,
+    options,
+    codes,
+    ...(request !== undefined ? { request } : {}),
+    accept: () => true,
+    consume: async (res, _current, maxBytes) => ({
+      status: res.status,
+      headers: res.headers,
+      text: await readCapped(res, maxBytes, codes),
+    }),
+  })) as { status: number; headers: Headers; text: string }
 }
 
 async function fetchDidDocument(url: string, options: ResolveDidOptions): Promise<DidDocument> {

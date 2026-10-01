@@ -59,8 +59,9 @@ export interface Config {
   serviceDid: string
   /** How far outbound DID resolution is allowed to reach. */
   didResolution: DidResolution
-  /** The key that signs outbound cross-domain requests (P8, C11). Absent means this
-   *  deployment does not call other domains. */
+  /** The key that signs outbound cross-domain requests (P8, C11). Absent, outbound calls
+   *  still go out but carry no outer identity, so the peer reads them as local calls
+   *  (§2.3) — what is lost is domain-level attribution, not acceptance. */
   keyFile?: string
   /** Which verification method that key is. ANP-02 L82 requires `keyid` to be a full
    *  DID URL, and the fragment names an entry the publisher of {@link serviceDid}'s

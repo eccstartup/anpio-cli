@@ -63,6 +63,10 @@ export { createWebIdentity } from './crypto/webIdentity'
 // ---- 服务端验签 ---------------------------------------------------------------
 export { resolveVerificationKey, resolveDidDocument, verifyDidDocument, didToUrl, isSuperseded } from './crypto/resolveDid'
 export { createDidDocumentStore } from './crypto/resolveDid'
+// 带请求体的受控出站（P8 §2.4）：`fetchControlledJson` 把非 2xx 读成失败，而跨域那一层
+// 要把它读成**答复**（ANP-02 §3.2.4.1 的 401 与挑战头就在状态和头上）。
+export { fetchControlledResponse } from './crypto/resolveDid'
+export type { FetchErrorCodes, ControlledRequest } from './crypto/resolveDid'
 export type {
   ResolvedKey,
   ResolvedDidDocument,

@@ -214,8 +214,11 @@
   - **动手前先修**：`delivery/worker.ts` 转发的是 `direct.incoming`，而 P8 §5.1 L206–210 要的是**原始
     `direct.send`**（§6.2.2 L348–368 的跨域方法表里没有 `direct.incoming`），且 P3 §7.2.1 L397 把它
     定义成"已被目标 ingress 接受"之后的那一跳——跨域时它语义上不成立。C5b 写的，当时没读 P8
-  - 还剩：外层八步 + `http_nonces` + 出站签名（`AGENTX_KEY_FILE` 的第一个消费者，core 现有签名器
-    是 ANP-02 登录流程，不能直接用）+ 请求/通知两条出站路的拆分 + 非 2xx 读成答复而不是异常
+  - ~~外层八步 + `http_nonces`~~、~~出站签名（`AGENTX_KEY_ID`，配上 `AGENTX_KEY_FILE` 才签；
+    没钥就不签，§2.3 说那失去的是域级归属而不是受理）~~、~~非 2xx 读成答复而不是异常
+    （core 新原语 `fetchControlledResponse`，两条既有出站函数把非 2xx 读成失败，不能走）~~
+  - 还剩：请求/通知两条出站路的拆分，即上面那条"动手前先修"——请求在事务外同步转发**原始
+    `direct.send`**（对端接受才落库），通知继续走 outbox；`direct.incoming` 不再入队
   - **挡住 v1 的**：群 DID 文档没人发布（§5.2 L220 要求解析 `group_did` 才能找到 Host），
     挡 MTI 第 1/4/5 项；`serviceDid` 文档由 `awiki-open-server` 托管，外层 `keyid` 的 fragment
     必须与它写进去的一致
