@@ -191,6 +191,16 @@
   - 还剩：九条方法进方法表 + 成员状态机与权限判定 + 群消息 fan-out +
     `group.state_changed`（含被移除者的"最后一封"）
 - C10 P7 附件数据面（Slot → PUT → commit → ticket → GET）
+  - ~~设计~~（2026-10-01：[attachments.md](docs/design/attachments.md)。定下的是几个规范没说话
+    的地方——票据是不透明令牌、不签名；数据面用真 HTTP 状态码（§2.1 那条"一律 200"在数据面
+    不成立）；对象按摘要寻址放文件系统；6004 / 6007 / 6011 在 v1 没有产生路径；回环下
+    `object_uri` 允许 http，这是对 §7.5 L488 那条 MUST 的显式偏离；同域仍要求 `origin_proof`）
+  - 还剩：四条方法进方法表 + 上传槽状态机 + 两条数据面路由（含 HTTP 层的字节路）+
+    Grant 建在受理事务里（群路径与 C9 共用）+ 票据签发与下载校验
+  - **动手前先修**：`rpc/direct.ts` L18–21 / L65 把 P3 §6.2.5 L268 那条**单向**规则
+    （"content_type 是 application/json 时 MUST 用 payload"）读成了等号，P7 §6.1 L350
+    要求的 `application/anp-attachment-manifest+json` 会被 1003 拒掉；C9 写 `group.send`
+    正文校验时别把等号抄过去
 - C11 P8 跨域：`serviceDid` 外层认证 + **caller anchor 单点判断** + 并发投递
 - C12 P5 E2EE：prekey bundle + Mailbox
 - C13 P6 群组 E2EE：KeyPackage 状态机 + Device Delivery Queue
@@ -198,6 +208,11 @@
 ## D. 待用户裁定
 
 - D2 P6 发布前置：MLS `ExtensionType 0xF0A1` 的 IANA 注册（不在本仓库，但会挡住 P6）
+- D4 P6 客户端侧的 MLS 库放哪（C13 才有影响，现在只是记下）。规范不点名实现，只要求
+  MLS 1.0 语义 + 套件 `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`；服务端一行不碰
+  MLS（P6 L146 / L1266 的 MUST NOT）。两选：**(a)** 内嵌进 `connectx`（Rust 库走
+  napi / wasm 绑进 Node）；**(b)** 另起一个本地进程/库持有 MLS 状态，`connectx` 只收发。
+  区别是"设备身份 + MLS 私有状态"是一处落盘还是两处
 
 ~~D1 包名：`@agentx/*`~~（2026-10-01 定：`@agentx/core` / `@agentx/cli` / `@agentx/service`，用户说后面可改）
 

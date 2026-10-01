@@ -112,6 +112,7 @@ HTTP 层用 `node:http` 自己写路由：整个服务只有**两个**端点
 | `GET /anp-im/stream`，**不是**升级请求 | `426` + `Upgrade: websocket` |
 | `GET /.well-known/anp-message-service.json` | `200`，体是 §13 那个条目 |
 | `PUT <upload_uri>` | 数据面，附件对象字节（P7） |
+| `GET <object_uri>` | 数据面，凭票据取对象字节（P7） |
 | 其余路径 | `404` |
 | 已知路径、方法不对 | `405` + `Allow` |
 
@@ -131,6 +132,10 @@ HTTP 层用 `node:http` 自己写路由：整个服务只有**两个**端点
 `426`（流路径上的非升级 GET）以及上表的 `404` / `405`。**流一旦升级，状态码这套就不
 适用了**：连接上的每一次失败都是 `200` 里的一份 JSON-RPC 响应，只有握手认证失败才关连接
 （[realtime.md](realtime.md) §4.1）。
+
+**数据面是这条规则的一个例外，而且是有意的**：它没有 JSON-RPC 信封、没有 `id` 可答，
+客户端是普通 HTTP 客户端，读的就是状态码——所以那两条路由用真的 4xx/5xx，同时把
+`anp_code` 放进 JSON 体里。理由与逐条对照见 [attachments.md](attachments.md) §3.1。
 
 **存储接口化**：`Storage` 是一个 interface，`sqlite` 是 v1 唯一实现。
 Postgres 的事等真需要多实例时再说，现在不做抽象层之上的抽象。
@@ -226,7 +231,12 @@ KeyPackage 的 reserved / consumed 状态由本服务管。
 
 ### P7 附件 — `anp.attachment.v1`
 
-全部 **service-scoped**，走 `target.did = serviceDid`。
+全部 **service-scoped**，走 `target.did = serviceDid`：
+`create_slot` / `commit_object` / `abort_object` / `get_download_ticket`。
+
+四个方法都**不验 `origin_proof`**（§10.1 L799–800：跨域那一跳由外层服务身份保证），
+是本服务里唯一一组这样的非匿名方法；同域那一侧的取舍、授权链（Grant 在承载消息被接受
+时才出现）、数据面两条路由与票据形状，单开一份 [attachments.md](attachments.md)。
 
 ### P9 Mention
 
@@ -442,6 +452,8 @@ CREATE TABLE group_key_packages (
 );
 
 -- P7：对象字节 + 摘要，不含 object_key / nonce（那些只随 P5/P6 内层 manifest 走）
+-- 这张表随 C10 定稿（加 upload_token 一列），另三张表——attachment_objects /
+-- attachment_grants / download_tickets——见 [attachments.md](attachments.md) §8，schema 到 v4
 CREATE TABLE attachment_slots (
   attachment_id TEXT NOT NULL, slot_id TEXT NOT NULL, owner_did TEXT NOT NULL,
   object_encryption_mode TEXT NOT NULL, message_security_profile TEXT NOT NULL,
@@ -814,6 +826,10 @@ GET  object_uri             → Authorization: Bearer {download_ticket}
 - 服务端存**不透明字节 + 摘要**，**不含** `object_key` / `nonce`——
   对象密钥只随 P5/P6 的内层 manifest 下发。
 
+这一节是**服务的视角**，只有流程和五条约束。三个平面各自站在哪、Access Grant 在哪一刻
+长出来、票据为什么不签名、对象字节落盘与两条数据面路由、以及错误码里哪些在 v1 没有
+产生路径，见 [attachments.md](attachments.md)。
+
 ## 13. 服务自我描述
 
 agent 的 DID 文档里那条 `ANPMessageService` 服务条目是**发现链的落点**：
@@ -883,8 +899,9 @@ AGENTX_PUBLIC_URL       对外可见的基址（用于 serviceEndpoint / object_
 AGENTX_SERVICE_DID      自己的服务 DID，默认由 PUBLIC_URL 推出 did:web
 AGENTX_KEY_FILE         服务签名钥（跨域时签外层请求）
 AGENTX_DB               SQLite 路径，默认 ./agentx.db
-AGENTX_OBJECT_DIR       附件对象目录
+AGENTX_OBJECT_DIR       附件对象目录（按摘要寻址，见 attachments.md §4）
 AGENTX_MAX_BODY         请求体上限，默认 1 MiB（附件走数据面，不经这里）
+AGENTX_MAX_OBJECT_BYTES 单个附件对象上限，默认 64 MiB（数据面 PUT 时边收边判）
 AGENTX_ALLOWED_DID_HOSTS  允许出站解析 DID 文档的域，逗号/空白分隔，**默认空**
 AGENTX_DID_DEV_HOSTS      联调放宽：这些域可以解析私有地址、可以用 http
 ```
@@ -910,7 +927,8 @@ AGENTX_DID_DEV_HOSTS      联调放宽：这些域可以解析私有地址、可
 
 7. P4 群组 + Group Host 语义（线性顺序、`group_state_version` / `group_event_seq`）
    —— 语义见 [groups.md](groups.md)
-8. P7 附件数据面
+8. P7 附件数据面 —— 三平面、Grant 在承载消息被接受时才出现、数据面两条路由
+   —— 决策见 [attachments.md](attachments.md)
 9. P8 跨域（`serviceDid` 外层认证 + caller anchor）
 
 **v3**
