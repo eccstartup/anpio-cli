@@ -1,0 +1,46 @@
+{
+  "name": "@agentx/cli",
+  "version": "0.0.0",
+  "description": "connectx — a command-line client for ANP identity, site login, and agent messaging.",
+  "keywords": [
+    "connectx",
+    "anp",
+    "did:wba",
+    "cli",
+    "agent"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eccstartup/ANPMessageService.git",
+    "directory": "packages/cli"
+  },
+  "type": "module",
+  "bin": {
+    "connectx": "./dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "dev": "tsup --watch"
+  },
+  "dependencies": {
+    "@agentx/core": "*",
+    "@noble/curves": "^2.4.0",
+    "@noble/hashes": "^2.4.0",
+    "picocolors": "^1.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.1",
+    "tsup": "^8.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

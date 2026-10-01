@@ -2,10 +2,12 @@ node_modules/
 dist/
 *.tsbuildinfo
 
-# AgentXAgent 运行时产物
+# SQLite (WAL mode leaves sidecars)
 *.db
 *.db-wal
 *.db-shm
+
+# attachment object store
 objects/
 
 .DS_Store

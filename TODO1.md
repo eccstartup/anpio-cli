@@ -6,9 +6,12 @@
 
 ## A. `packages/core` —— 裁剪与新增
 
-- A1 从 `anp-sdk` 搬候选模块进来（清单见 [vendored-core.md](docs/design/vendored-core.md) §2/§3），**先不删**
-- A2 删 ZK：`core/zk/*`、`src/zk.ts`、CLI 侧 `zkstore.ts` / `auth.ts` 的 `--zk` 段 / `help/commands.ts` 的 `ZK` 组
-- A3 复核 §3 那四个「保留但需复核」模块：`tsc --noEmit` 反向收敛，没人 import 的删掉
+- ~~A1 从 `anp-sdk` 搬候选模块进来~~（2026-10-01）
+- ~~A2 删 ZK~~（2026-10-01：`core/zk/*` + 4 个 zk 测试文件；core 里本就没有引它的地方）
+- ~~A3 反向收敛~~（2026-10-01：`tsc --noEmit` 只报一处测试的 `../advanced` 路径。
+  另删 `connectors/anpExtension.ts`、`connectors/index.ts`（死 barrel）、`defineConfig.ts`
+  （只服务已删除的 `project` 族）。`anpDevShim.ts` **改判保留**，理由见
+  [vendored-core.md](docs/design/vendored-core.md) §2）
 - A4 **新增 `core/message/`**：`envelope.ts` / `sign.ts` / `verify.ts` / `discovery.ts` / `idempotency.ts`
 - A5 把 `sign` / `verify` 共用的 JCS 规范化抽到一处，**确认只有一份**
 - A6 **新增 `core/message/locator.ts`**：`ServiceLocator` / `KeyResolver` / `TrustAnchor`
@@ -50,8 +53,9 @@
 
 ## D. 待用户裁定
 
-- D1 包名：`@agentx/core` / `@agentx/cli` / `@agentx/service` 是否可用
 - D2 P6 发布前置：MLS `ExtensionType 0xF0A1` 的 IANA 注册（不在本仓库，但会挡住 P6）
+
+~~D1 包名：`@agentx/*`~~（2026-10-01 定：`@agentx/core` / `@agentx/cli` / `@agentx/service`，用户说后面可改）
 
 ~~D1 命令面分两族~~（2026-10-01 定：分 `msg` / `group`）
 ~~D2 `msg listen` 进不进命令面~~（2026-10-01 定：做，按 IM 模型设计，见 realtime.md）
@@ -59,7 +63,8 @@
 
 ## E. 工程
 
-- E1 仓库脚手架：`package.json` workspace + `tsup` + `vitest` + `tsconfig`（照搬旧仓库形状）
+- ~~E1 仓库脚手架~~（2026-10-01：workspace + 每包 `tsup` / `vitest` / `tsconfig`；
+  `packages/service` 的 `engines` 定 `>=24.16.0`，见 [message-service.md](docs/design/message-service.md) §2）
 - E2 命令面门禁：把 `help.test.ts` 那两条不变量（「页面写出的旗标集合 ＝ 它接受的集合」
   「页面声明的参数 ＝ 它的 usage 行」）一起搬过来
 - E3 **加的评审清单**：CLI 与服务端里**不得出现 `isDid()` 之类的身份类型分支**

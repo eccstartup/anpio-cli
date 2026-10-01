@@ -15,8 +15,9 @@
 | `src/zk.ts` | — | zk 的对外入口 |
 | `packages/zk-pairing` | — | 独立的证明后端包 |
 | `packages/react` / `packages/vue` / `src/react.ts` / `src/vue.ts` / `packages/brand` | — | 浏览器/UI 绑定，与 CLI + 服务端无关 |
-| `core/connectors/anpExtension.ts` | 58 | 浏览器扩展连接器，CLI 与服务端都不走这条路 |
-| `core/connectors/anpDevShim.ts` | 206 | 开发期 mock 连接器 |
+| `core/connectors/anpExtension.ts` | 58 | 浏览器扩展连接器（`window.anp`），CLI 与服务端都不走这条路 |
+| `core/connectors/index.ts` | 3 | 没人 import 的 barrel，随上面两个连接器一起删 |
+| `core/defineConfig.ts` | 36 | `connectx.config.ts` 的类型 schema，只服务 `connectx project generate`——那一族已整族删除。**它是 `defineConfig` / `ConnectxConfig` 唯一的家，删它必须同步改 `index.ts` 与 `index.test.ts` 的公开面清单** |
 | CLI 侧 `project.ts` / `generate/` / `template/` / `templates/` | ~1500 | 脚手架，**不是 ANP 协议**。这是"只做 ANP 相关 CLI"要砍掉的主体 |
 | CLI 侧 `identity/zkstore.ts` | 151 | ZK 入会记录存储 |
 | CLI 侧 `runZkLogin` / `readPlan` / `readSiteDescriptor` / `sameOrigin` / `sameRoot` / `namedAttributes` / `requestedAttributes` / `agreesWithMembership` / `loadBackendFactory` | ~600 | `auth.ts` 里 `--- anp login --zk ---` 分隔线以下的整段 |
@@ -57,10 +58,14 @@
 - `core/crypto/base58.ts`、`multicodec.ts`、`encoding.ts`
 
 **配置与错误**
-- `core/errors.ts`（185）、`core/types.ts`（297）、`core/config.ts`（33）、`core/defineConfig.ts`（36）、`core/store.ts`（148）、`core/nodeBuiltin.ts`（23）
+- `core/errors.ts`（185）、`core/types.ts`（297）、`core/config.ts`（33）、`core/store.ts`（148）、`core/nodeBuiltin.ts`（23）
 
 **连接器**
 - `core/connectors/anpCli.ts`（84）—— CLI 自己那条本地密钥路；CAIP-10 模式下 `chainId` + `address` 直接构成身份
+- `core/connectors/anpDevShim.ts`（206）—— **原打算删，收敛时改判保留**。理由是 §3 那条方法本身：
+  `actions.{error,register,webpage}.test.ts` 与 `connectors/ids.test.ts` 四个测试文件拿它当连接器桩，
+  删它就得先重写这四个覆盖 `register` / `update` 错误路径的测试。它是"没人 import 的才删"里的**有人 import**。
+  注意它用 `localStorage`，是浏览器取向的；日后若要把这四个测试换成更小的桩，再删它不迟。
 
 ## 3. 保留但需复核（协议相关，但可能超出当下范围）
 

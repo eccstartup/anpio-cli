@@ -1,0 +1,60 @@
+{
+  "name": "@agentx/service",
+  "version": "0.0.0",
+  "description": "AgentXAgent — an ANPMessageService: receives, stores, delivers, and serves ANP agent messages.",
+  "keywords": [
+    "anp",
+    "anp-09",
+    "anpmessageservice",
+    "agentx",
+    "message-service"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eccstartup/ANPMessageService.git",
+    "directory": "packages/service"
+  },
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    }
+  },
+  "bin": {
+    "agentx": "./dist/main.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "dev": "node --watch src/main.ts",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@agentx/core": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.1",
+    "tsup": "^8.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=24.16.0"
+  }
+}
