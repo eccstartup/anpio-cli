@@ -55,7 +55,11 @@ function send(
   body: string,
   extra: Record<string, string> = {},
 ): void {
-  res.writeHead(status, { 'content-type': contentType, 'content-length': Buffer.byteLength(body), ...extra })
+  // An empty body gets no content type: a Notification is answered with nothing at all
+  // (§5.6 L201), and promising JSON that is not there is a lie about the payload.
+  const headers: Record<string, string | number> = { 'content-length': Buffer.byteLength(body), ...extra }
+  if (body !== '') headers['content-type'] = contentType
+  res.writeHead(status, headers)
   res.end(body)
 }
 

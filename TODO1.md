@@ -82,10 +82,18 @@
   `idempotencyKey()` 的字符串）并补 `deliveries` 表。另：`tsup` 加
   `removeNodeProtocol: false`——`node:sqlite` 没有裸名字，tsup 默认去前缀会把它变成
   import 一个叫 `sqlite` 的第三方包）
-- C2 Envelope 校验（[message-service.md](docs/design/message-service.md) §3 那张表的每一条）
+- ~~C2 Envelope 校验（[message-service.md](docs/design/message-service.md) §3 那张表的每一条）~~
+  （2026-10-01。校验本身全在 core 的 `parseEnvelope`（B 线已做），`rpc/envelope.ts` 只补
+  CLI 用不到的两件：进来的是**文本**，以及每个失败都要带正确的 `id` 出去。
+  `ParsedRequest` 是 `AnpRequest | AnpNotification` 的联合，但 `AnpRequest` 结构上是
+  `AnpNotification` 加一个 `id`——所以 `isNotification` 这个类型守卫在否定分支会把联合收成
+  `never`，判别一律用 `'id' in value`（`envelope.ts` 里写了原因，`main.ts` 与测试都照做）。
+  §3 表里有两行**不在这里**，它们要方法自己的声明而不是信封：target 建模模式（§6.2.5.1 L382）
+  与 §7.3 L491–499 的十进制字符串计数器，随 C5 的方法表一起来）
 - C3 Auth：`origin_proof` 验签 + `keyid` 归属 + `authentication` 授权
 - C4 幂等（事务内写消息 + 幂等记录），含 DID 取代时的精确重放
 - C5 `direct.send` 全流程 + `direct.incoming` 异步推送 + `outbox` 退避重试
+  （含 C2 挪过来的两行：target 建模模式 §6.2.5.1 L382、§7.3 L491–499 计数器）
 - C6 取件扩展面 + 游标（`delivery_cursor`）
 - C7 **订阅路**：`GET /anp-im/stream` + 订阅者注册表 + 补齐期间缓冲与背压
   （时序见 [realtime.md](docs/design/realtime.md) §5.2/§5.3）
