@@ -382,9 +382,11 @@ async function waitFor(done: () => boolean, deadlineMs = 2000): Promise<void> {
 }
 
 describe('the schema the worker reads', () => {
-  it('is the version whose outbox holds a recipient DID, not an endpoint', () => {
-    // §8.1 L731: a retry re-resolves. `outbox.recipient_did` is what makes that possible
-    // and it arrived with the v2 migration, so the worker's contract is v2's.
-    expect(SCHEMA_VERSION).toBe(2)
+  it('is at least the version whose outbox holds a recipient DID, not an endpoint', () => {
+    // §8.1 L731: a retry re-resolves, and `outbox.recipient_did` (v2) is what makes that
+    // possible. The assertion is pinned to the CURRENT version rather than to `>= 2` so
+    // that a bump lands here and gets read: the worker reads `dueOutbox` and writes it
+    // back, so any change to the outbox shape has to be checked against this file.
+    expect(SCHEMA_VERSION).toBe(3)
   })
 })

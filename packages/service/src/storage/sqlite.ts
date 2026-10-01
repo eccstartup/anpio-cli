@@ -12,6 +12,8 @@ import { SCHEMA, SCHEMA_VERSION } from './schema'
 import type {
   DeliveryRecord,
   IdempotencyRow,
+  InboxQuery,
+  InboxRow,
   OutboxEntry,
   Storage,
   StoredMessage,
@@ -160,6 +162,56 @@ function toOutbox(row: Row): OutboxEntry {
   return entry
 }
 
+/**
+ * Newest first, ties broken by id.
+ *
+ * The tie-break is not decoration: `skip` is an offset, and an order that is not total
+ * pages over a different list on every call — a reader would see one message twice and
+ * never see another, with nothing in the responses saying so.
+ */
+function newestFirst(a: InboxRow, b: InboxRow): number {
+  if (a.createdAt !== b.createdAt) return a.createdAt < b.createdAt ? 1 : -1
+  if (a.messageId !== b.messageId) return a.messageId < b.messageId ? 1 : -1
+  return 0
+}
+
+/** An incoming row, shaped from the DELIVERY rather than from the `messages` table.
+ *
+ *  The delivery row is the per-owner copy, and it is the only side that exists for every
+ *  profile: a group message's `messages` row is addressed to the GROUP, so joining it
+ *  back to a member's delivery would need a rule this table does not have. Its
+ *  `params_json` is the notification `direct.incoming` / `group.incoming` carries, whose
+ *  `meta` has the sender and the content type (§7.2.3 L411–418). */
+function toIncomingRow(row: Row): InboxRow {
+  const params = JSON.parse(text(row.params_json)) as { meta?: unknown; body?: unknown }
+  const meta = (typeof params.meta === 'object' && params.meta !== null ? params.meta : {}) as Record<string, unknown>
+  return {
+    messageId: text(row.message_id),
+    senderDid: typeof meta.sender_did === 'string' ? meta.sender_did : '',
+    recipientDid: text(row.owner_did),
+    contentType: typeof meta.content_type === 'string' ? meta.content_type : '',
+    direction: 'incoming',
+    bodyJson: JSON.stringify(params.body ?? {}),
+    createdAt: text(row.accepted_at),
+    readAt: maybeText(row.read_at) ?? null,
+  }
+}
+
+/** The other direction: a message this owner sent. There is no delivery row for the
+ *  sender's own copy, so the `messages` row is the only source. */
+function toOutgoingRow(row: Row): InboxRow {
+  return {
+    messageId: text(row.message_id),
+    senderDid: text(row.sender_did),
+    recipientDid: text(row.target_did),
+    contentType: text(row.content_type),
+    direction: 'outgoing',
+    bodyJson: text(row.body_json),
+    createdAt: text(row.accepted_at),
+    readAt: maybeText(row.read_at) ?? null,
+  }
+}
+
 class SqliteStorage implements Storage {
   private readonly db: DatabaseSync
   private readonly statements = new Map<string, StatementSync>()
@@ -305,6 +357,114 @@ class SqliteStorage implements Storage {
       `INSERT INTO delivery_cursor (owner_did, device_id, last_seq) VALUES (?, ?, ?)
          ON CONFLICT (owner_did, device_id) DO UPDATE SET last_seq = MAX(last_seq, excluded.last_seq)`,
     ).run(ownerDid, deviceId, seq)
+  }
+
+  /** 每个方向各取 `limit + skip` 行，在内存里并成一条时间线再切页。
+   *
+   *  这不需要把两张表合成一个视图：全局第 k 行必定落在**任一侧**的前 k 行之内，所以
+   *  取够 `limit + skip` 就不可能切错，而每一侧各自走自己的索引（PK 与 `messages_*`），
+   *  不产生一次全表排序。硬要并成一条 SQL 就得 `UNION ALL` 两张形状不同的表，还得把
+   *  `params_json` 里的字段用 `json_extract` 挖出来——那才是把口子开在错误的地方。 */
+  inboxPage(ownerDid: string, query: InboxQuery): InboxRow[] {
+    const want = query.limit + query.skip
+    const rows = [
+      ...this.incomingRows(ownerDid, want, query.includeRead),
+      ...this.outgoingRows(ownerDid, want),
+    ]
+    rows.sort(newestFirst)
+    return rows.slice(query.skip, query.skip + query.limit)
+  }
+
+  inboxSize(ownerDid: string, includeRead: boolean): number {
+    const row = this.stmt(
+      `SELECT
+         (SELECT COUNT(*) FROM deliveries d
+            LEFT JOIN message_reads r
+              ON r.owner_did = d.owner_did AND r.message_id = d.message_id
+           WHERE d.owner_did = ? AND (? = 1 OR r.read_at IS NULL))
+       + (SELECT COUNT(*) FROM messages WHERE sender_did = ?) AS total`,
+    ).get(ownerDid, includeRead ? 1 : 0, ownerDid) as Row
+    return int(row.total)
+  }
+
+  inboxRows(ownerDid: string, messageIds: readonly string[]): InboxRow[] {
+    if (messageIds.length === 0) return []
+    // `json_each` rather than an `IN (?, ?, …)`: the id list comes from the caller and
+    // `msg read --all` hands over every unread id at once, so the arity is unbounded —
+    // and SQLite's variable limit is a real ceiling. One parameter, one cached statement.
+    const ids = JSON.stringify(messageIds)
+    const rows = [
+      ...(this.stmt(
+        `SELECT d.owner_did, d.message_id, d.params_json, d.accepted_at, r.read_at
+           FROM deliveries d
+           LEFT JOIN message_reads r
+             ON r.owner_did = d.owner_did AND r.message_id = d.message_id
+          WHERE d.owner_did = ? AND d.message_id IN (SELECT value FROM json_each(?))`,
+      ).all(ownerDid, ids) as Row[]).map(toIncomingRow),
+      ...(this.stmt(
+        `SELECT m.message_id, m.sender_did, m.target_did, m.content_type, m.body_json, m.accepted_at, r.read_at
+           FROM messages m
+           LEFT JOIN message_reads r
+             ON r.owner_did = m.sender_did AND r.message_id = m.message_id
+          WHERE m.sender_did = ? AND m.message_id IN (SELECT value FROM json_each(?))`,
+      ).all(ownerDid, ids) as Row[]).map(toOutgoingRow),
+    ]
+    // The SQL layer has no order to give: the caller asked for a list, and `IN` answers
+    // as a set. Restore the order asked for, keeping the first of any repeat.
+    const order = new Map(messageIds.map((id, index) => [id, index]))
+    return [...new Map(rows.map((row) => [row.messageId, row])).values()].sort(
+      (a, b) => (order.get(a.messageId) ?? 0) - (order.get(b.messageId) ?? 0),
+    )
+  }
+
+  markRead(ownerDid: string, messageIds: readonly string[], readAt: string): string[] {
+    return this.transaction(() => {
+      const marked: string[] = []
+      const holds = this.stmt(
+        `SELECT 1 AS found
+          WHERE EXISTS (SELECT 1 FROM deliveries WHERE owner_did = ? AND message_id = ?)
+             OR EXISTS (SELECT 1 FROM messages WHERE sender_did = ? AND message_id = ?)`,
+      )
+      // `OR IGNORE`: the first read wins. Re-marking must not move `read_at` forward —
+      // "when did you read it" has one answer, and a second call is not a new event.
+      const insert = this.stmt(
+        'INSERT OR IGNORE INTO message_reads (owner_did, message_id, read_at) VALUES (?, ?, ?)',
+      )
+      for (const id of messageIds) {
+        // An id the owner does not hold is skipped, not recorded: the mailbox is the
+        // scope of this operation, and without this check any caller could write rows
+        // for messages that are none of its business.
+        if (holds.get(ownerDid, id, ownerDid, id) === undefined) continue
+        if (int(insert.run(ownerDid, id, readAt).changes) > 0) marked.push(id)
+      }
+      return marked
+    })
+  }
+
+  private incomingRows(ownerDid: string, limit: number, includeRead: boolean): InboxRow[] {
+    const rows = this.stmt(
+      `SELECT d.owner_did, d.message_id, d.params_json, d.accepted_at, r.read_at
+         FROM deliveries d
+         LEFT JOIN message_reads r
+           ON r.owner_did = d.owner_did AND r.message_id = d.message_id
+        WHERE d.owner_did = ? AND (? = 1 OR r.read_at IS NULL)
+        ORDER BY d.accepted_at DESC, d.message_id DESC
+        LIMIT ?`,
+    ).all(ownerDid, includeRead ? 1 : 0, limit) as Row[]
+    return rows.map(toIncomingRow)
+  }
+
+  private outgoingRows(ownerDid: string, limit: number): InboxRow[] {
+    const rows = this.stmt(
+      `SELECT m.message_id, m.sender_did, m.target_did, m.content_type, m.body_json, m.accepted_at, r.read_at
+         FROM messages m
+         LEFT JOIN message_reads r
+           ON r.owner_did = m.sender_did AND r.message_id = m.message_id
+        WHERE m.sender_did = ?
+        ORDER BY m.accepted_at DESC, m.message_id DESC
+        LIMIT ?`,
+    ).all(ownerDid, limit) as Row[]
+    return rows.map(toOutgoingRow)
   }
 
   enqueueOutbox(draft: Omit<OutboxEntry, 'seq' | 'attempts' | 'lastError'>): number {

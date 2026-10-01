@@ -647,7 +647,7 @@ body                    = <下面的参数>
   群自己的 `kind: "group"` 出现在**投递帧自己的** `meta.target` 里（§8.2），那是另一个信封，不是请求的。
 - 不取 `service`：`service` 是"服务自身"这一类目标（如 §13 自述），
   而读收件箱是**代理某个身份的数据**，不是服务的数据。
-- 不取 `peer_did`：`direct.get_history` 的 `peer_did` 在 `body` 里，
+- 不取 `peer_did`：`direct.get_history`（见下面那张表，v1 未实现）的 `peer_did` 在 `body` 里，
   它是**筛选条件**，不是签名绑定的对象。
 
 **重建规则：服务端只从收到的 `meta.target` 重建 `@target-uri`**，即
@@ -698,6 +698,16 @@ Profile"的答案，混进一个 `x_` 值就把它变成另一个问题了。扩
 | `message.get_batch` | `{message_ids: [...]}`，≤ 100 且不重复 | `{items: [{message_id, message}], unavailable: [...]}` |
 | `direct.get_history` | `{peer_did, since_seq?, limit?}` | `{messages: [...], has_more}` |
 | `sync.delta` | `{since, limit?}` | `{messages: [{seq, method, params}], next_since, has_more}` |
+
+**`direct.get_history` v1 不实现。** 它不是"没人要"，而是它的 `since_seq` 没有定义：
+出站消息**不带序号**——`direct.send` 的 `body` 里没有这个字段，服务也从不给它分配，
+因为序号是**收件箱级**的交付计数器（`deliveries.seq` 按 `(owner_did)` 递增，§7 与
+[realtime.md](realtime.md) §5.1），而 `peer_did` 问的是**一个会话里**的历史。
+"会话内第 N 条"这个数本服务手上没有，造一个（按 `created_at` 排名？）会得到一个
+在不同实现间对不上的私有游标，正是 `sync.delta` 的 `seq` 已经做对的事。
+所以 v1 不发这个方法，也**不用 `inbox.get` 的 `skip` 顶替**：`skip` 是**时间序偏移**，
+会话之外的新消息落进来会让它错位——那不是游标，是页码。
+实现一个还在犹豫用的东西，不如先让 `inbox.get` + `message.get_batch` 把这一半跑顺。
 
 `sync.delta` 的每一项就是订阅路会推的那一帧，原样（`method` 是
 `direct.incoming` / `group.incoming` / `group.state_changed` / `group.e2ee.notice`，

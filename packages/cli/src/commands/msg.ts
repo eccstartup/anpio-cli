@@ -36,7 +36,6 @@ import {
   rejection,
   rowsOf,
   senderFor,
-  type Channel,
   type Row,
   type Sender,
 } from './channel'
@@ -59,18 +58,26 @@ const MESSAGE_GET_BATCH = 'message.get_batch'
 /** How many unread ids `msg read --all` asks for at a time. */
 const ALL_PAGE = 100
 
-export async function runMsg(v: Values, sub: string | undefined, args: string[]): Promise<void> {
+/** `caller` reaches the three read commands only; a test supplies one so their rendering
+ *  can be driven without a keystore or a peer. `send`, `caps` and `listen` open their own
+ *  channel and ignore it. */
+export async function runMsg(
+  v: Values,
+  sub: string | undefined,
+  args: string[],
+  caller?: ExtensionCaller,
+): Promise<void> {
   switch (sub) {
     case 'send':
       return runSend(v)
     case 'caps':
       return runCaps(v, args[0])
     case 'inbox':
-      return runInbox(v)
+      return runInbox(v, caller)
     case 'show':
-      return runShow(v, args[0])
+      return runShow(v, args[0], caller)
     case 'read':
-      return runRead(v, args)
+      return runRead(v, args, caller)
     case 'listen':
       return runListen(v)
     default:
@@ -262,10 +269,22 @@ function limitOf(v: Values): number {
 
 // ---- msg inbox / show / read -------------------------------------------------
 
-async function runInbox(v: Values): Promise<void> {
+/** One extension call, already bound to a service. */
+export type ExtensionCaller = (method: string, body: Record<string, unknown>) => Promise<Record<string, unknown>>
+
+/** The three read commands take one so a test can drive them against a fake service:
+ *  `openChannel` opens the keystore and discovers the peer, and neither is needed to
+ *  decide what to print. Production passes nothing and gets the real thing. */
+async function callerFor(v: Values, caller?: ExtensionCaller): Promise<ExtensionCaller> {
+  if (caller !== undefined) return caller
+  const channel = await openChannel(v)
+  return (method, body) => callExtension(channel, method, body)
+}
+
+async function runInbox(v: Values, caller?: ExtensionCaller): Promise<void> {
   const body: Record<string, unknown> = { limit: limitOf(v) }
   if (v['include-read'] === true) body.include_read = true
-  const result = await callExtension(await openChannel(v), INBOX_GET, body)
+  const result = await (await callerFor(v, caller))(INBOX_GET, body)
   if (v.json === true) {
     console.log(JSON.stringify(result, null, 2))
     return
@@ -279,11 +298,11 @@ async function runInbox(v: Values): Promise<void> {
   for (const row of rows) console.log(renderMessage(row).join('\n'))
 }
 
-async function runShow(v: Values, id: string | undefined): Promise<void> {
+async function runShow(v: Values, id: string | undefined, caller?: ExtensionCaller): Promise<void> {
   if (id === undefined || id === '') {
     throw cliError('missing_flag', 'missing required argument <message_id>')
   }
-  const result = await callExtension(await openChannel(v), MESSAGE_GET_BATCH, { message_ids: [id] })
+  const result = await (await callerFor(v, caller))(MESSAGE_GET_BATCH, { message_ids: [id] })
   if (v.json === true) {
     console.log(JSON.stringify(result, null, 2))
     return
@@ -299,7 +318,7 @@ async function runShow(v: Values, id: string | undefined): Promise<void> {
   for (const row of rows) console.log(renderMessage(row).join('\n'))
 }
 
-async function runRead(v: Values, ids: string[]): Promise<void> {
+async function runRead(v: Values, ids: string[], caller?: ExtensionCaller): Promise<void> {
   const all = v.all === true
   if (all && ids.length > 0) {
     throw cliError('invalid_argument', '--all and <message_id> are two spellings of the same thing; pass one')
@@ -307,14 +326,14 @@ async function runRead(v: Values, ids: string[]): Promise<void> {
   if (!all && ids.length === 0) {
     throw cliError('missing_flag', 'missing required argument <message_id>, or --all')
   }
-  const channel = await openChannel(v)
-  const messageIds = all ? await unreadIds(channel) : ids
+  const call = await callerFor(v, caller)
+  const messageIds = all ? await unreadIds(call) : ids
   if (messageIds.length === 0) {
     if (v.json === true) console.log(JSON.stringify({ updated_count: 0, message_ids: [], read_at: null }, null, 2))
     else console.log('nothing unread')
     return
   }
-  const result = await callExtension(channel, INBOX_MARK_READ, { message_ids: messageIds })
+  const result = await call(INBOX_MARK_READ, { message_ids: messageIds })
   if (v.json === true) {
     console.log(JSON.stringify(result, null, 2))
     return
@@ -326,11 +345,11 @@ async function runRead(v: Values, ids: string[]): Promise<void> {
 /** Every unread id, paged. `--all` marks the ids that were LISTED, not "whatever is unread
  *  when the write lands": a message arriving between the two calls is left unread, which is
  *  the only reading of the flag that does not silently swallow one (message-service.md §9.3). */
-async function unreadIds(channel: Channel): Promise<string[]> {
+async function unreadIds(call: ExtensionCaller): Promise<string[]> {
   const ids: string[] = []
   let skip = 0
   for (;;) {
-    const page = await callExtension(channel, INBOX_GET, { limit: ALL_PAGE, skip, include_read: false })
+    const page = await call(INBOX_GET, { limit: ALL_PAGE, skip, include_read: false })
     const rows = rowsOf(page, 'messages')
     for (const row of rows) {
       const id = idOf(row)
@@ -358,7 +377,12 @@ function summaryOf(rows: Row[], result: Row): string {
   return `${rows.length} message${rows.length === 1 ? '' : 's'}, ${unread} unread${more}`
 }
 
+/** Unread means "the owner has not read it". An outgoing row is the owner's own copy of
+ *  something they sent, and the service leaves its `read_at` null because the field has no
+ *  meaning there (message-service.md §9.3) — reading that null as "unread" would count
+ *  every message the user ever sent into the unread tally. */
 function isUnread(row: Row): boolean {
+  if (row.direction === 'outgoing') return false
   return row.read_at === null || row.read_at === undefined
 }
 

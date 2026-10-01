@@ -16,21 +16,39 @@ import {
   type AnpTarget,
   type AnpTargetKind,
 } from '@agentx/core'
-import { DIRECT_AUTH_CODES, type AuthErrorCodes } from './auth'
+import { DIRECT_AUTH_CODES, P1_AUTH_CODES, type AuthErrorCodes } from './auth'
+import { validateDirectBody } from './direct'
+import {
+  EXTENSION_PROFILE,
+  INBOX_GET,
+  INBOX_MARK_READ,
+  MESSAGE_GET_BATCH,
+  SYNC_DELTA,
+  validateDeltaBody,
+  validateGetBatchBody,
+  validateInboxGetBody,
+  validateMarkReadBody,
+} from './inbox'
 
 /**
- * P1 §6.2.5.1 L361–378 的四种模式。
+ * P1 §6.2.5.1 L361–378 的四种模式，加上本服务给取件面自定的第五种。
  *
  * `endpoint-local` 是"允许省略 target"，不是"target 随便写"——它同样没有一个 `kind`
  * 要对上，所以下面那张表里它是 `undefined`。
+ *
+ * `self-addressed` 是取件面的建模（[message-service.md](../..) §9.1.1）：P1 A.4 L1070
+ * 把 endpoint-local 方法引入 `origin_proof` 时的目标建模**指名交给 Profile 定义**，
+ * 而取件面正是一组这样的方法。它的语义是"target 必须在，`kind` 是 `agent`，且 `did`
+ * 就是签名者本人"——三项一起才是"读自己的信箱"，少最后一项就是"代别人读"。
  */
-export type TargetMode = 'agent-addressed' | 'group-addressed' | 'service-scoped' | 'endpoint-local'
+export type TargetMode = 'agent-addressed' | 'group-addressed' | 'service-scoped' | 'endpoint-local' | 'self-addressed'
 
 const TARGET_KIND: Record<TargetMode, AnpTargetKind | undefined> = {
   'agent-addressed': 'agent',
   'group-addressed': 'group',
   'service-scoped': 'service',
   'endpoint-local': undefined,
+  'self-addressed': 'agent',
 }
 
 /** `meta` 里可以被方法声明点名的那几个字段。
@@ -57,6 +75,11 @@ export interface MethodSpec {
   requiresOriginProof(meta: AnpMeta): boolean
   /** 证明不通过时用哪一对码（P1 §10.3 L706 vs P3 §11 L599–600）。 */
   authCodes: AuthErrorCodes
+  /** Profile 层对 `body` 的校验。缺省表示这个方法没有正文规则。
+   *
+   *  签名收 `meta` 而不只是 `body`：`direct.send` 的正文规则要用 `content_type` 判
+   *  负载字段对不对得上，而那是 `meta` 里的。 */
+  validateBody?(body: Record<string, unknown>, meta: AnpMeta): AnpRejection | undefined
   /** Profile 定义的幂等 `target_scope`（P1 §9.1 L635 + P3 §8.2 L437–442）。
    *  `undefined` 表示这个方法不改状态，也就不进幂等台账。 */
   targetScope?: (meta: AnpMeta, body: Record<string, unknown>) => string
@@ -80,6 +103,7 @@ const DIRECT_SEND_SPEC: MethodSpec = {
   // 判断保持写在这一处。
   requiresOriginProof: (meta) => meta.profile !== 'anp.direct.e2ee.v2',
   authCodes: DIRECT_AUTH_CODES,
+  validateBody: (body, meta) => validateDirectBody(body, meta.content_type ?? ''),
   // P3 §8.2 L437–442：`(sender_did, target.did, method, operation_id)`。
   targetScope: (meta) => {
     const target = meta.target
@@ -90,7 +114,56 @@ const DIRECT_SEND_SPEC: MethodSpec = {
   },
 }
 
-const METHODS: readonly MethodSpec[] = [DIRECT_SEND_SPEC]
+/**
+ * 取件面（message-service.md §9）共有的那几项。
+ *
+ * 四个方法在这一层完全同形：自己那个 Profile、只认 `transport-protected`、要 proof、
+ * 认证失败回 P1 §10.3 L706 的公共码（**这一族没有规范给的私有码**，`1005` 是公共段里
+ * 唯一说"没通过认证"的那个）、目标必须是自己（§9.1.1）。差异只有正文校验与是否改状态，
+ * 所以下面每个方法只写这两件，其余从这来。
+ */
+function extensionSpec(
+  name: string,
+  validateBody: (body: Record<string, unknown>) => AnpRejection | undefined,
+  targetScope?: (meta: AnpMeta) => string,
+): MethodSpec {
+  return {
+    name,
+    targetMode: 'self-addressed',
+    profiles: [EXTENSION_PROFILE],
+    securityProfiles: ['transport-protected'],
+    // §9.1 那一段线上形状里，每个方法都带 `operation_id`（P1 §6.2.6）与 `sender_did`
+    // （要 proof 就必须有锚点）。`message_id` / `content_type` 是消息自己的字段，
+    // 取件面读的是"消息们"，不是"一条消息"，所以不在这里。
+    requiredMeta: ['sender_did', 'operation_id'],
+    forbiddenMeta: [],
+    requiresOriginProof: () => true,
+    authCodes: P1_AUTH_CODES,
+    validateBody: (body) => validateBody(body),
+    ...(targetScope !== undefined ? { targetScope: (meta) => targetScope(meta) } : {}),
+  }
+}
+
+/** 四个读方法不改状态，所以只有 `inbox.mark_read` 带 `targetScope`——它也是这一族里
+ *  唯一进幂等台账的。作用域就是信箱主人，与 `direct.send` 取 `target.did` 同理。 */
+function selfScope(meta: AnpMeta): string {
+  const target = meta.target
+  if (target === undefined) throw new ConnectxError('message_invalid', `${INBOX_MARK_READ} requires meta.target`)
+  return target.did
+}
+
+const INBOX_GET_SPEC = extensionSpec(INBOX_GET, validateInboxGetBody)
+const INBOX_MARK_READ_SPEC = extensionSpec(INBOX_MARK_READ, validateMarkReadBody, selfScope)
+const MESSAGE_GET_BATCH_SPEC = extensionSpec(MESSAGE_GET_BATCH, validateGetBatchBody)
+const SYNC_DELTA_SPEC = extensionSpec(SYNC_DELTA, validateDeltaBody)
+
+const METHODS: readonly MethodSpec[] = [
+  DIRECT_SEND_SPEC,
+  INBOX_GET_SPEC,
+  INBOX_MARK_READ_SPEC,
+  MESSAGE_GET_BATCH_SPEC,
+  SYNC_DELTA_SPEC,
+]
 
 export function lookupMethod(name: string): MethodSpec | undefined {
   return METHODS.find((spec) => spec.name === name)
@@ -154,6 +227,15 @@ export function checkMethod(spec: MethodSpec, meta: AnpMeta): AnpRejection | und
       'anp.invalid_target_binding',
       `${spec.name} is ${spec.targetMode}; meta.target.kind MUST be ${String(TARGET_KIND[spec.targetMode])}`,
       { details: { received: meta.target.kind } },
+    )
+  }
+  // §9.1.1：取件面的 `target.did` 必须就是签名者。前一条只保证了 `kind` 对，这一条才是
+  // "读的是自己的信箱"。做成显式拒绝而不是靠"反正也读不到"——那是一种隐式结果，一旦
+  // 别处把 `ownerOf()` 写成了 `meta.target.did` 就会变成越权读，而且没有任何测试会红。
+  if (spec.targetMode === 'self-addressed' && meta.target.did !== meta.sender_did) {
+    return anpRejection(
+      'anp.invalid_target_binding',
+      `${spec.name} is self-addressed; meta.target.did MUST equal meta.sender_did`,
     )
   }
   return undefined

@@ -29,6 +29,22 @@ export type { MetaField, MethodSpec, TargetMode } from './rpc/methods'
 export { storeDirectMessage, incomingParams, validateDirectBody, DIRECT_INCOMING } from './rpc/direct'
 export type { IncomingParamsInput, StoreDirectInput } from './rpc/direct'
 
+export {
+  EXTENSION_PROFILE,
+  INBOX_GET,
+  INBOX_MARK_READ,
+  MESSAGE_GET_BATCH,
+  SYNC_DELTA,
+  markRead,
+  readBatch,
+  readDelta,
+  readInbox,
+  validateDeltaBody,
+  validateGetBatchBody,
+  validateInboxGetBody,
+  validateMarkReadBody,
+} from './rpc/inbox'
+
 export { createDeliveryWorker } from './delivery/worker'
 export type { DeliveryOptions, DeliveryWorker } from './delivery/worker'
 
@@ -38,6 +54,8 @@ export { SCHEMA, SCHEMA_VERSION } from './storage/schema'
 export type {
   DeliveryRecord,
   IdempotencyRow,
+  InboxQuery,
+  InboxRow,
   OutboxEntry,
   Storage,
   StoredMessage,

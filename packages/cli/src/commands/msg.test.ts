@@ -3,10 +3,10 @@
 // part of the command a test can reach without a peer: everything past it needs a store,
 // a DID document and a live service endpoint.
 
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { ConnectxError } from '@agentx/core'
 import { callExtension, payloadOf, type Channel } from './channel'
-import { runMsg } from './msg'
+import { runMsg, type ExtensionCaller } from './msg'
 import type { Values } from './auth'
 
 const TO = 'did:wba:example.com:user:bob:e1_xyz'
@@ -238,5 +238,187 @@ describe('callExtension', () => {
     )
     expect(refusal.code).toBe('unsupported_extension')
     expect(refusal.message).toContain('inbox.get')
+  })
+})
+
+// ---- the read commands, against a fake service --------------------------------
+//
+// `runMsg` takes an optional caller for `inbox` / `show` / `read`, so what those three
+// print can be pinned without a keystore or a peer — the same reason `payloadOf` is
+// exported: the decision belongs to the command, and everything past it needs a store, a
+// DID document and a live endpoint.
+//
+// The behaviour first under test is the unread test. §9.3 gives a row a `read_at` and
+// leaves it null for one direction; a client that treats null as "unread" for both
+// directions counts every message the user ever SENT into the unread tally.
+
+/** One row as §9.3 defines it, overridable field by field. */
+function row(overrides: Record<string, unknown>): Record<string, unknown> {
+  return {
+    message_id: 'm-1',
+    sender_did: 'did:wba:peer.example:user:bob:e1_bbb',
+    recipient_did: DID,
+    content_type: 'text/plain',
+    direction: 'incoming',
+    created_at: '2026-10-01T12:00:00.000Z',
+    read_at: null,
+    body: { text: 'hello' },
+    ...overrides,
+  }
+}
+
+interface Fake {
+  caller: ExtensionCaller
+  calls: { method: string; body: Record<string, unknown> }[]
+}
+
+/** A service that answers method by method, recording what it was asked. A method with
+ *  no answer throws rather than returning an empty result: a command calling a method the
+ *  test did not expect is the finding, and an empty object would hide it. */
+function service(answers: Record<string, (body: Record<string, unknown>) => Record<string, unknown>>): Fake {
+  const calls: Fake['calls'] = []
+  const caller: ExtensionCaller = async (method, body) => {
+    calls.push({ method, body })
+    const answer = answers[method]
+    if (answer === undefined) throw new Error(`${method} was called, which this fake does not answer`)
+    return answer(body)
+  }
+  return { caller, calls }
+}
+
+/** The lines a command printed, one `console.log` per entry. */
+async function printed(run: () => Promise<void>): Promise<string[]> {
+  const lines: string[] = []
+  const spy = vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
+    lines.push(args.map((arg) => String(arg)).join(' '))
+  })
+  try {
+    await run()
+  } finally {
+    spy.mockRestore()
+  }
+  return lines
+}
+
+/** The value half of a `field()` line, which pads its label to 20 columns. */
+function fieldOf(lines: string[], label: string): string | undefined {
+  return lines.find((line) => line.startsWith(label))?.slice(label.length).trim()
+}
+
+describe('msg inbox rendering', () => {
+  it('does not count an outgoing row as unread, however its read_at reads', async () => {
+    const { caller } = service({
+      'inbox.get': () => ({
+        messages: [
+          row({ message_id: 'out-1', direction: 'outgoing', sender_did: DID, read_at: null }),
+          row({ message_id: 'in-1' }),
+        ],
+        total: 2,
+        has_more: false,
+      }),
+    })
+
+    const lines = await printed(() => runMsg({ 'include-read': true }, 'inbox', [], caller))
+
+    expect(lines[0]).toBe('2 messages, 1 unread')
+    // The service has no timestamp to give for an outgoing row — nobody read it, the owner
+    // wrote it — so the field is null and the client must not read that as "unread".
+    const outgoing = lines.find((line) => line.includes('outgoing'))
+    expect(outgoing?.startsWith('  read')).toBe(true)
+    expect(lines.find((line) => line.includes('incoming'))?.startsWith('  unread')).toBe(true)
+  })
+
+  it('counts a read incoming row out of the tally and keeps it out of the unread paging', async () => {
+    const read = row({ message_id: 'read-1', read_at: '2026-10-01T12:05:00.000Z' })
+    const { caller, calls } = service({
+      // The fake filters the way the service does, so the tally and the walk are answering
+      // two different questions rather than the same one twice.
+      'inbox.get': (body) => ({
+        messages: body.include_read === true ? [read] : [],
+        total: 1,
+        has_more: false,
+      }),
+      'inbox.mark_read': (body) => ({ updated_count: (body.message_ids as string[]).length, read_at: '2026-10-01T12:30:00.000Z', message_ids: body.message_ids }),
+    })
+
+    const lines = await printed(() => runMsg({ 'include-read': true }, 'inbox', [], caller))
+
+    expect(lines[0]).toBe('1 message, 0 unread')
+    // `--all` walks the unread side, so a row already read is not in the set it marks — the
+    // point of `include_read: false` on that walk rather than a client-side filter.
+    const all = await printed(() => runMsg({ all: true }, 'read', [], caller))
+    expect(all).toEqual(['nothing unread'])
+    expect(calls.filter((call) => call.method === 'inbox.get').at(-1)?.body.include_read).toBe(false)
+  })
+
+  it('says which way to look when the unread list is empty', async () => {
+    const { caller } = service({ 'inbox.get': () => ({ messages: [], total: 0, has_more: false }) })
+    expect(await printed(() => runMsg({}, 'inbox', [], caller))).toEqual([
+      'no unread messages; pass --include-read to see the rest',
+    ])
+    expect(await printed(() => runMsg({ 'include-read': true }, 'inbox', [], caller))).toEqual(['no messages'])
+  })
+
+  it('asks for the offset it was given, not for a page it then discards', async () => {
+    const { caller, calls } = service({ 'inbox.get': () => ({ messages: [], total: 0, has_more: false }) })
+    await printed(() => runMsg({ limit: '5', 'include-read': true }, 'inbox', [], caller))
+    expect(calls).toEqual([{ method: 'inbox.get', body: { limit: 5, include_read: true } }])
+  })
+})
+
+describe('msg show rendering', () => {
+  it('prints the batch item the service returned', async () => {
+    const { caller, calls } = service({
+      'message.get_batch': () => ({ items: [{ message_id: 'm-1', message: row({ message_id: 'm-1' }) }], unavailable: [] }),
+    })
+
+    const lines = await printed(() => runMsg({}, 'show', ['m-1'], caller))
+
+    expect(calls).toEqual([{ method: 'message.get_batch', body: { message_ids: ['m-1'] } }])
+    expect(lines.join('\n')).toContain('hello')
+    expect(lines.join('\n')).toContain('id m-1')
+  })
+
+  it('reports a message it could not resolve rather than an empty screen', async () => {
+    // `unavailable` is the peer's own list, and it is the difference between "no such
+    // message" and "your command asked for something that is not there".
+    const { caller } = service({ 'message.get_batch': () => ({ items: [], unavailable: ['m-9'] }) })
+    const err = await fails(() => runMsg({}, 'show', ['m-9'], caller))
+    expect(err.code).toBe('message_not_found')
+    expect(err.message).toContain('m-9')
+  })
+})
+
+describe('msg read --all paging', () => {
+  it('marks the ids it listed, and asks for the next page by offset', async () => {
+    const pages: Record<string, unknown>[] = [
+      { messages: [row({ message_id: 'a' }), row({ message_id: 'b' })], total: 3, has_more: true },
+      { messages: [row({ message_id: 'c' })], total: 3, has_more: false },
+    ]
+    const { caller, calls } = service({
+      'inbox.get': () => pages.shift() ?? { messages: [], total: 0, has_more: false },
+      'inbox.mark_read': (body) => ({
+        updated_count: (body.message_ids as string[]).length,
+        message_ids: body.message_ids,
+        read_at: '2026-10-01T12:30:00.000Z',
+      }),
+    })
+
+    const lines = await printed(() => runMsg({ all: true }, 'read', [], caller))
+
+    expect(calls.filter((call) => call.method === 'inbox.get').map((call) => call.body.skip)).toEqual([0, 2])
+    // The ids LISTED, then marked — a message arriving between the two calls is left
+    // unread rather than being swallowed (§9.3).
+    expect(calls.at(-1)).toEqual({ method: 'inbox.mark_read', body: { message_ids: ['a', 'b', 'c'] } })
+    expect(fieldOf(lines, 'marked read:')).toBe('3')
+  })
+
+  it('marks an id given on the command line without listing first', async () => {
+    const { caller, calls } = service({
+      'inbox.mark_read': (body) => ({ updated_count: 1, message_ids: body.message_ids, read_at: '2026-10-01T12:30:00.000Z' }),
+    })
+    const lines = await printed(() => runMsg({}, 'read', ['m-1', 'm-2'], caller))
+    expect(calls).toEqual([{ method: 'inbox.mark_read', body: { message_ids: ['m-1', 'm-2'] } }])
+    expect(fieldOf(lines, 'read at:')).toBe('2026-10-01T12:30:00.000Z')
   })
 })

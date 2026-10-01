@@ -12,8 +12,13 @@
  *  next to the code that decides whether to run it.
  *
  *  v2: `messages` gained a composite primary key and `outbox` traded a pinned endpoint
- *  for the recipient's DID. Neither is an in-place change for SQLite. */
-export const SCHEMA_VERSION = 2
+ *  for the recipient's DID. Neither is an in-place change for SQLite.
+ *
+ *  v3: `message_reads` is new. It needs no migration step of its own — an
+ *  `IF NOT EXISTS` table is exactly what the top-up pass in `applySchema` is for — but
+ *  the version still has to move: without it a file written by v2 would return early
+ *  from `applySchema` and never get the table. */
+export const SCHEMA_VERSION = 3
 
 export const SCHEMA: readonly string[] = [
   // ---- idempotency -----------------------------------------------------------
@@ -57,6 +62,8 @@ export const SCHEMA: readonly string[] = [
      PRIMARY KEY (sender_did, target_did, message_id)
    )`,
   `CREATE INDEX IF NOT EXISTS messages_target ON messages (target_did, accepted_at)`,
+  // 取件面按"我发出去的"这一侧翻页用的就是这一条。
+  `CREATE INDEX IF NOT EXISTS messages_sender ON messages (sender_did, accepted_at)`,
 
   // ---- deliveries ------------------------------------------------------------
   // NOT in §7's draft, and needed: the cursor below is a monotonic sequence per
@@ -85,6 +92,23 @@ export const SCHEMA: readonly string[] = [
      device_id  TEXT NOT NULL DEFAULT '',
      last_seq   INTEGER NOT NULL DEFAULT 0,
      PRIMARY KEY (owner_did, device_id)
+   )`,
+
+  // ---- read state ------------------------------------------------------------
+  // 已读：**不是**交付游标（realtime.md §6 用一整节把这两件事分开）。游标说"这台设备
+  // 收到哪儿了"，由 ack 推进；这张表说"某个信箱主人处理过哪条消息"，由取件面显式标记。
+  // 两者混成一处就会出现"客户端断了没 ack，消息显示成未读"这类永远说不清的状态。
+  //
+  // 键是 (owner_did, message_id) 而不是交付序号：发件人自己那一侧没有交付行
+  // （`deliveries` 只收件人一份），而 `inbox.get` 两个方向都返回，得有一个两边都有的
+  // 标识符。`message_id` 由发送方起（P1 §6.2.7 L402），两个发送方可能撞名——所以键里
+  // 必须有 `owner_did`，它把撞名限定在一个信箱内部，而同一信箱里同名的两条消息本来就
+  // 是同一条（§8.2 L444–450 认的就是这个）。
+  `CREATE TABLE IF NOT EXISTS message_reads (
+     owner_did   TEXT NOT NULL,
+     message_id  TEXT NOT NULL,
+     read_at     TEXT NOT NULL,
+     PRIMARY KEY (owner_did, message_id)
    )`,
 
   // ---- groups ----------------------------------------------------------------

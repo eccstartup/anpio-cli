@@ -16,6 +16,7 @@ import {
   JSON_RPC_ERROR,
   rpcRejection,
   signedRequestObject,
+  type AnpMeta,
   type AnpParams,
   type AnpRejection,
   type KeyResolver,
@@ -27,7 +28,8 @@ import type { Storage } from '../storage/types'
 import { acceptOperation } from './accept'
 import { authenticate, callerAnchor } from './auth'
 import { DIRECT_SEND, lookupMethod, checkMethod, type MethodSpec } from './methods'
-import { storeDirectMessage, validateDirectBody } from './direct'
+import { storeDirectMessage } from './direct'
+import { INBOX_GET, INBOX_MARK_READ, MESSAGE_GET_BATCH, SYNC_DELTA, markRead, readBatch, readDelta, readInbox } from './inbox'
 import { errorResponse, failureId, noResponse, parseRequestText, successResponse } from './envelope'
 
 export interface DispatchDeps {
@@ -73,6 +75,14 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
           ...(auth !== undefined ? { auth } : {}),
           acceptedAt,
         })
+      case INBOX_GET:
+        return readInbox(deps.storage, meta, body)
+      case MESSAGE_GET_BATCH:
+        return readBatch(deps.storage, meta, body)
+      case SYNC_DELTA:
+        return readDelta(deps.storage, meta, body)
+      case INBOX_MARK_READ:
+        return markRead(deps.storage, meta, body, acceptedAt)
       default:
         // 方法表里有它、这里没分支：两张表不一致，是代码错，不是请求错。
         throw new Error(`no handler for ${spec.name}`)
@@ -129,7 +139,7 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
     }
 
     try {
-      const bodyRefusal = bodyRefusalFor(spec, body, meta.content_type)
+      const bodyRefusal = bodyRefusalFor(spec, body, meta)
       if (bodyRefusal !== undefined) return errorResponse(envelope.id, bodyRefusal)
 
       const acceptedAt = at.toISOString()
@@ -167,16 +177,17 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
 }
 
 /**
- * Profile 层对 `body` 的校验。
+ * Profile 层对 `body` 的校验，**由方法表自己声明**。
  *
- * 现在只有 `direct.send` 一个方法，所以这里是一个按名字的分支而不是表里的一个函数字段：
- * 第二个方法的正文规则出现时，那个字段该长什么样就清楚了，现在设计它只是猜。
+ * 之前这里是按方法名的分支，注释写着"第二个方法的正文规则出现时，那个字段该长什么样
+ * 就清楚了"——C6 的取件面就是那第二个（第四、第五个）方法，于是它成了 `MethodSpec` 上
+ * 的一个字段。这样"这个方法有哪些正文规则"和"它要哪些 meta 字段"在同一处，不会有一边
+ * 改了另一边没改。
  */
 function bodyRefusalFor(
   spec: MethodSpec,
   body: Record<string, unknown>,
-  contentType: string | undefined,
+  meta: AnpMeta,
 ): AnpRejection | undefined {
-  if (spec.name !== DIRECT_SEND) return undefined
-  return validateDirectBody(body, contentType ?? '')
+  return spec.validateBody?.(body, meta)
 }

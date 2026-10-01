@@ -140,7 +140,19 @@
   §8.2：A.3 L1046 让 SRO 只含 `method`，而 §7.2.3 要求转发后除 `method` 外逐字段相同，
   A.6 L1136 又要求按**当前请求的** `method` 重建——本服务按 §7.2.3 与 A.8 转发逐字节
   不变的原证明，验证留给收件人。164 个测试）
-- C6 取件扩展面 + 游标（`delivery_cursor`）
+- ~~C6 取件扩展面 + 游标（`delivery_cursor`）~~（2026-10-01。`rpc/inbox.ts`＝四个方法
+  `inbox.get` / `inbox.mark_read` / `message.get_batch` / `sync.delta`，线上 Profile 取
+  `x_agentx.inbox.v1`，另加一条本服务自己的约束：`meta.target.did` MUST 等于
+  `meta.sender_did`，否则 1014（本扩展面没有"代别人读收件箱"）。`MethodSpec` 因此长了
+  `validateBody`——C5a 里那句"第二个方法的正文规则出现时就清楚了"说的就是这个。
+  `message_reads`（v3）：**已读不是投递游标**，键取 `(owner_did, message_id)`，因为
+  `inbox.get` 两个方向都返回而只有 incoming 有投递行；`msg read --all` 递过来的是无界 id
+  列表，查它走 `json_each(?)` 而不是 `IN (?,?,…)`。`inbox.get` 按时序归并两个方向
+  （两侧各取 `limit+skip` 再排：全局第 k 条必在任一侧的前 k 条里），outgoing 的 `read_at`
+  诚实地留 null，于是 CLI 的未读判定**排除 outgoing**——不排的话用户发过的每条都进未读计数。
+  `delivery_cursor` 表在 C5a 就建好了，推进它的是 C7 的 `ack` 而不是 `sync.delta`。
+  **`direct.get_history` v1 不发**，`since_seq` 没有覆盖出站一半的定义，理由写进 §9.3。
+  存储 9 + 派发 13 + CLI 渲染 8 个测试；service 186 / core 666 / cli 206）
 - C7 **订阅路**：`GET /anp-im/stream` + 订阅者注册表 + 补齐期间缓冲与背压
   （时序见 [realtime.md](docs/design/realtime.md) §5.2/§5.3）
 - C8 `/.well-known/anp-message-service.json` + `x_agentx` 扩展块
