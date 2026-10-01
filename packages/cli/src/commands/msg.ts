@@ -36,6 +36,7 @@ import type {
 } from '@agentx/core'
 import { buildConnector, cliError, require, type Values } from './auth'
 import { didHost, relaxedHosts } from './did'
+import { runListen } from './listen'
 
 /** P3 §7.1.2 L353–355: the three fixed values of a `direct.send`. */
 const DIRECT_SEND = 'direct.send'
@@ -84,6 +85,8 @@ export async function runMsg(v: Values, sub: string | undefined, args: string[])
       return runShow(v, args[0])
     case 'read':
       return runRead(v, args)
+    case 'listen':
+      return runListen(v)
     default:
       // cli.ts resolves the page first and answers an unknown subcommand itself.
       throw new Error(`No subcommand "${sub}" for \`connectx msg\``)
@@ -158,9 +161,14 @@ async function discover(identity: string, v: Values): Promise<Endpoint> {
 
 // ---- the sender --------------------------------------------------------------
 
-interface Sender {
+export interface Sender {
   did: string
   signer: OriginProofSigner
+  /** The local `agent` / `profile` names this run signs under. They are what `msg listen`
+   *  derives its default `device_id` from (realtime.md §5.4), so they belong with the
+   *  identity rather than being looked up a second time by whichever command needs them. */
+  agent: string
+  profile: string
 }
 
 /** The identity this run signs as.
@@ -170,9 +178,14 @@ interface Sender {
  *  identity no DID server has taken on has no such thing, and composing one from
  *  whatever `--target` happened to say would name a host that never accepted this key. */
 async function senderFor(v: Values): Promise<Sender> {
-  const { connector, wallet } = await buildConnector(v, { requireRegistered: true })
+  const { connector, wallet, location } = await buildConnector(v, { requireRegistered: true })
   const identity = await connector.getIdentity()
-  return { did: identity.did, signer: walletOriginProofSigner(wallet, identity.keyid) }
+  return {
+    did: identity.did,
+    signer: walletOriginProofSigner(wallet, identity.keyid),
+    agent: location.agent,
+    profile: location.profile,
+  }
 }
 
 // ---- the payload -------------------------------------------------------------
@@ -407,13 +420,15 @@ async function runCaps(v: Values, positional: string | undefined): Promise<void>
 /** A read is addressed to the caller's OWN message service. There is no `--to`: the
  *  owner of the inbox is `meta.sender_did`, so the DID whose document has to be fetched
  *  for the service entry is the one we sign as. */
-interface Channel {
+export interface Channel {
   sender: Sender
   target: AnpMessageServiceTarget
   options: ResolveDidOptions
 }
 
-async function openChannel(v: Values): Promise<Channel> {
+/** Exported for `msg listen`, which authenticates the same way but over a socket instead
+ *  of a POST: one channel resolution, one signer, two transports (realtime.md §3). */
+export async function openChannel(v: Values): Promise<Channel> {
   const sender = await senderFor(v)
   const { target, options } = await discover(sender.did, v)
   return { sender, target, options }
@@ -423,20 +438,33 @@ async function openChannel(v: Values): Promise<Channel> {
  *  `{method, meta, body}`, no bearer token — because the CLI does not hold one and the
  *  proof is the stronger answer anyway (cli.md §6).
  *
- *  `meta.target` is left out on purpose: `sender_did` already names the inbox, and a
- *  target would be read as a recipient by anything that maps it (awiki's `normalize_params`
- *  does exactly that), which a read has none of. */
-async function callExtension(channel: Channel, method: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+ *  `meta.target` is the mailbox owner, i.e. the identity in use. That is not a formality:
+ *  P1 附录 A.4 L1068 requires `meta.target` whenever a method carries an `origin_proof`,
+ *  and the same appendix requires an endpoint-local method to have its target modelling
+ *  written down by its Profile — which is message-service.md §9.1.1. Reading one's own
+ *  inbox is addressed to oneself, so `target.did` and `sender_did` are the same DID.
+ *
+ *  Exported, and `post` is injectable, only so the wire shape above can be asserted
+ *  without a service: this is the one place every extension command goes through, and
+ *  the envelope it builds is the part a live service would otherwise be the first to
+ *  check (`msg.test.ts`). */
+export async function callExtension(
+  channel: Channel,
+  method: string,
+  body: Record<string, unknown>,
+  post: typeof postMessage = postMessage,
+): Promise<Record<string, unknown>> {
   const meta: AnpMeta = {
     profile: EXTENSION_PROFILE,
     security_profile: TRANSPORT_PROTECTED,
     sender_did: channel.sender.did,
+    target: { kind: 'agent', did: channel.sender.did },
     operation_id: randomUUID(),
     created_at: new Date().toISOString(),
   }
   const auth = await buildOriginProofAuth({ method, meta, body, signer: channel.sender.signer })
   const request = buildMessageRequest({ id: randomUUID(), method, meta, auth, body })
-  const response = await postMessage(channel.target.endpoint, request, channel.options)
+  const response = await post(channel.target.endpoint, request, channel.options)
   if (isError(response)) throw extensionRejection(response, method, channel.sender.did)
   return response.result
 }

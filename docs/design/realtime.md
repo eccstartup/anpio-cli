@@ -136,6 +136,27 @@ client                                server
 `--since <seq>` 覆盖服务端游标（排查用）。**本地不存游标**——
 存了就变成两处状态，而它们一定会不一致。
 
+### 5.5 实时帧上不带 `seq`
+
+推送的那一帧就是规范的信封（§9），`params` 的键由 P1 定死为 `{meta, auth, body}`，
+**多一个 `seq` 就不是规范信封了**。所以实时帧不带序号，而客户端仍然知道每条消息的
+序号：
+
+- 注册那一刻服务端报了 `head_seq = H`（`stream.ready`），补齐覆盖 `(C, H]`；
+- 补齐之后刷出来的帧必然从 `H+1` 起，且**同一条 WebSocket 上按序到达**；
+- 于是客户端从 `H` 起自己数，第 n 条实时帧的序号就是 `H+n`。
+
+`sync.delta` 的每一项**带** `seq`（那是扩展面的结果，不是信封，见
+[message-service.md](message-service.md) §9.3），所以补齐这段的序号是服务端给的、
+实时那段是客户端数的，两边接在 `H` 上。
+
+这个"数出来"的序号只用于 §5.2 的去重：重连后再补齐一遍时，服务端给回的 `seq`
+会和客户端已渲染过的高水位撞上，撞上的就丢掉。**服务端缓冲溢出时必须断连**
+（§5.3），正是为了不让客户端数出来的序号与真实序号悄悄错位。
+
+`direct.incoming` 这类通知是 Message Service 自己的用法；`group.*` 同理。
+§7.1 的 NDJSON 里那条 `seq` 是客户端重建后的值，不是从帧上读的。
+
 ## 6. 投递 ≠ 已读
 
 必须分开的三件事：
@@ -238,10 +259,19 @@ subscribers: Map<`${owner_did}\u0000${device_id}`, { socket, headSeq, buffer }>
 - 推的帧就是 `direct.incoming` / `group.incoming` / `group.state_changed` /
   `group.e2ee.notice`，payload 约束与 [message-service.md](message-service.md) §8.2 完全一致，
   尤其 **`origin_proof` 必须是原始无损副本，本服务不得重签**。
-- **`sync.delta` / `inbox.mark_read` 是扩展面，不是任何 Profile。**
+- **`sync.delta` / `inbox.mark_read` 是扩展面，不是规范能力。**
   它们照旧**不得**出现在 `anp.get_capabilities` 的 `profiles[]` 里。
-  流端点自己另开一个能力标识（如 `x_agentx.stream.v1`），且**必须**能被对端探测到——
-  连上以后 `stream.hello` 里自报。
+  但它们**有**自己的 Profile 值（P1 §6.2.2 L277 把 `meta.profile` 定成 MUST，
+  且是"本次请求的唯一解释"，所以线上必须有值）：业务方法用
+  `x_agentx.inbox.v1`（[message-service.md](message-service.md) §9.1），
+  传输握手另用一个 `x_agentx.stream.v1`——两者都是 `x_` 命名空间下的扩展标识，
+  与 §13 那条"扩展不进 `profiles[]`"并不冲突：那里说的是**规范符合性**那张清单。
+  流端点自己的能力由 `stream.hello` 自报，客户端连上即知。
+- **两个扩展 Profile 走同一套目标建模**：`stream.auth` / `sync.delta` 与业务扩展方法
+  一样要 `auth.origin_proof`，所以一样 **MUST** 带 `meta.target`
+  （P1 附录 A.4 L1068），取值也一样是 `{kind: "agent", did: <本端身份>}`
+  （P1 A.4 L1070 把 endpoint-local 方法的建模规则交给 Profile 定）。
+  建模与重建规则只写一份，在 [message-service.md](message-service.md) §9.1.1。
 - WebSocket 这条传输**不在规范里**。规范只规定 `direct.incoming` 这个 Notification 的存在
   和它的 payload，不规定它走什么传输。所以这是实现自由，但**要按规范的信封发**，
   这样 A 路（POST 到端点）与 B 路（订阅）对客户端是同一种东西。

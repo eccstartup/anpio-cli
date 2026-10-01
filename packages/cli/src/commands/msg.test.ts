@@ -5,7 +5,7 @@
 
 import { describe, it, expect } from 'vitest'
 import { ConnectxError } from '@agentx/core'
-import { payloadOf, runMsg } from './msg'
+import { callExtension, payloadOf, runMsg, type Channel } from './msg'
 import type { Values } from './auth'
 
 const TO = 'did:wba:example.com:user:bob:e1_xyz'
@@ -153,5 +153,89 @@ describe('msg read argument validation', () => {
 describe('msg dispatch', () => {
   it('refuses a subcommand it does not have', async () => {
     await expect(runMsg({}, 'fetch', [])).rejects.toThrow(/No subcommand "fetch"/)
+  })
+})
+
+// Every extension command (`inbox`, `show`, `read`) goes through this one call, so pinning
+// the envelope here pins all three. The regression it guards was real: the commands shipped
+// without `meta.target` and would have been rejected by any conforming service, because a
+// method carrying `origin_proof` MUST name its target (P1 附录 A.4 L1068).
+
+const DID = 'did:wba:example.com:user:alice:e1_key'
+
+function extensionChannel(): Channel {
+  return {
+    sender: {
+      did: DID,
+      signer: { keyid: `${DID}#key-1`, sign: () => new Uint8Array(64) },
+      agent: 'claude-code',
+      profile: 'default',
+    },
+    target: {
+      identity: DID,
+      serviceId: 'anp-message-service',
+      endpoint: 'https://agentx.example/anp-im/rpc',
+      serviceDid: 'did:wba:agentx.example',
+      hintedProfiles: [],
+      hintedSecurityProfiles: [],
+    },
+    options: { allowedHosts: [] },
+  }
+}
+
+/** Capture the request `callExtension` puts on the wire, without a service. */
+async function sentRequest(method: string, body: Record<string, unknown>) {
+  let seen: Record<string, unknown> | undefined
+  const result = await callExtension(extensionChannel(), method, body, async (_endpoint, request) => {
+    seen = request as unknown as Record<string, unknown>
+    return { jsonrpc: '2.0', id: request.id, result: { ok: true } }
+  })
+  if (seen === undefined) throw new Error('nothing was posted')
+  return { request: seen, result }
+}
+
+describe('callExtension', () => {
+  it('names the mailbox owner as the target of the proof', async () => {
+    const { request } = await sentRequest('inbox.get', { limit: 20 })
+    const params = request.params as Record<string, unknown>
+    expect(params.meta).toMatchObject({
+      profile: 'x_agentx.inbox.v1',
+      sender_did: DID,
+      target: { kind: 'agent', did: DID },
+    })
+    expect(params.auth).toMatchObject({
+      scheme: 'anp-rfc9421-origin-proof-v1',
+      origin_proof: { signature: expect.stringMatching(/^sig1=:/) },
+    })
+    expect(params.body).toEqual({ limit: 20 })
+  })
+
+  it('signs over that target, so a service can rebuild @target-uri from it', async () => {
+    // The signature base is not this test's to check — core pins it byte for byte. What is
+    // pinned here is that the target is not something the service has to guess from the body.
+    const { request } = await sentRequest('message.get_batch', { message_ids: ['m-1'] })
+    const params = request.params as Record<string, unknown>
+    const meta = params.meta as Record<string, unknown>
+    const proof = (params.auth as { origin_proof: Record<string, unknown> }).origin_proof
+    expect(meta.target).toBeDefined()
+    expect(proof.signatureInput).toContain('@target-uri')
+  })
+
+  it('returns the result on success and the name of the method on refusal', async () => {
+    const { result } = await sentRequest('inbox.get', {})
+    expect(result).toEqual({ ok: true })
+
+    const refusal = await callExtension(extensionChannel(), 'inbox.get', {}, async (_endpoint, request) => ({
+      jsonrpc: '2.0',
+      id: request.id,
+      error: { code: -32601, message: 'no such method' },
+    })).then(
+      () => {
+        throw new Error('expected the call to fail')
+      },
+      (err: unknown) => err as ConnectxError,
+    )
+    expect(refusal.code).toBe('unsupported_extension')
+    expect(refusal.message).toContain('inbox.get')
   })
 })

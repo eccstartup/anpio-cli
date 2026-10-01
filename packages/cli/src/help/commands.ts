@@ -565,6 +565,7 @@ export const COMMANDS: CommandSpec[] = [
       { form: 'msg inbox', brief: 'the messages waiting for the identity in use' },
       { form: 'msg show <message_id>', brief: 'print one message in full' },
       { form: 'msg read <message_id>...', brief: 'mark messages as read' },
+      { form: 'msg listen', brief: 'stay connected and print messages as they arrive' },
     ],
     pages: [
       {
@@ -735,6 +736,63 @@ export const COMMANDS: CommandSpec[] = [
           { code: '1', meaning: 'failed: refused, or unsupported_extension' },
         ],
         examples: ['msg read 3f2a1c9e-6b2e-4f0a-9c31-8e2b7d4a5c60', 'msg read --all'],
+        see: 'cli/api/msg.md',
+      },
+      {
+        sub: 'listen',
+        purpose: 'stay connected to the message service of the identity in use, and print messages as they arrive',
+        usage: ['msg listen [options]'],
+        options: [
+          {
+            title: 'Stream',
+            rows: [
+              {
+                signature: '--device <id>',
+                summary: 'the name this client queue is stored under on the service',
+                fallback: 'default: the agent and profile in use, as <agent>/<profile>',
+              },
+              {
+                signature: '--since <seq>',
+                summary: 'start from this delivery number instead of the one the service holds',
+                fallback: 'default: the cursor the service has for this device',
+              },
+              {
+                signature: '--ack',
+                summary: 'mark each message read as it is printed',
+                fallback: 'default: off, so a later run prints the same messages again',
+              },
+              {
+                signature: '--once',
+                summary: 'print what was missed and exit, instead of staying connected',
+                fallback: 'default: off',
+              },
+            ],
+            note:
+              'Without --ack the service does not move this device past what it has printed, so a run that ends ' +
+              'prints the same messages again next time. That is the safe direction: a message printed twice is a ' +
+              'nuisance, and one marked read that nobody saw is gone. --ack is for a pipeline that has stored what ' +
+              'it printed.',
+          },
+          KEY_CLI,
+          derivedHostPolicy('the signing DID'),
+          STORE,
+          OUTPUT,
+        ],
+        output: [
+          'On a terminal, each message as it arrives: who it is from and when, then the body. Connection notices go to stderr, so redirecting stdout leaves a file holding only messages.',
+          'When stdout is not a terminal, or with --json, the stream is one JSON object per line: connection and reconnection notices, then one object per message with its delivery number.',
+          'The connection starts where the service says this device left off, prints what was missed, then prints messages as they arrive. A dropped connection is retried with a growing delay; a refusal is not retried, because the same key would be refused again.',
+          'The stream address is derived from the message service endpoint in the DID document, by replacing its last path segment with "stream". A service that mounts its stream anywhere else cannot be reached by this command.',
+        ],
+        exits: [
+          { code: '0', meaning: 'interrupted with Ctrl-C, or --once finished' },
+          { code: '1', meaning: 'failed: refused, no message service found, or unsupported_extension' },
+        ],
+        examples: [
+          'msg listen',
+          'msg listen --once',
+          'msg listen --device laptop --json > messages.ndjson',
+        ],
         see: 'cli/api/msg.md',
       },
     ],

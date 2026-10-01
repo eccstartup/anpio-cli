@@ -39,8 +39,8 @@
   `SessionWrite` 的 `uncacheable` 与 `LoginCard` 的 `note` / `identity.label` 随之删除：它们的唯一取值来源就是 ZK。
   `packages/cli/package.json` 本就已是 `@agentx/cli` + 四个运行时依赖，无需再改）
 - B3 `help/commands.ts` 加 `msg` / `group` **两族**（页面数据，见 [cli.md](docs/design/cli.md) §3）。
-  2026-10-01：`msg` 族按子命令逐条落地，`send` / `caps` / `inbox` / `show` / `read` 五页
-  已随之进来（`listen` 随 B9）；**`group` 一族随 B6**
+  2026-10-01：`msg` 族按子命令逐条落地，`send` / `caps` / `inbox` / `show` / `read` /
+  `listen` 六页都已进来；**`group` 一族随 B6**
 - ~~B4 `msg send`：发现 → 构造 → 签名 → POST → 报错，全链路~~（2026-10-01。含 P1 §10.3 L726 与
   P3 §5.5 L206–208 要求的 `anp.did_superseded` 重试）
 - ~~B5 取件三命令 `msg inbox` / `show` / `read`~~（2026-10-01。扩展面的接口定义落进
@@ -56,11 +56,17 @@
   `-32601 method_not_found` 与 `1001 anp.unsupported_profile`（Profile 是 `x_agentx.*` 时）
   都映射过去。不先探 `anp.get_capabilities`——扩展本来就不该出现在 `profiles[]` 里，
   探它只能证明"没有"却多一次往返）
-- B9 **`msg listen`**：WebSocket 连接 + 补齐 + 实时渲染 + 重连退避
-  （契约全在 [realtime.md](docs/design/realtime.md) §7）
-- B10 `msg listen` 的两套渲染器：TTY 人类可读 / 非 TTY 或 `--json` 出 NDJSON，
-  复用 `login-view.ts` 的既有模式
-- B11 `msg listen --once`（等价 `msg inbox`）与 `SIGINT` → exit 0
+- ~~B9 **`msg listen`**：WebSocket 连接 + 补齐 + 实时渲染 + 重连退避~~
+  （2026-10-01。契约在 [realtime.md](docs/design/realtime.md) §7；`listen.ts` 19 个测试，
+  只注入 socket，握手/游标/退避/解码都是真跑的代码。顺带修了一个已提交的缺陷：
+  `inbox` / `show` / `read` 与监听握手都没带 `meta.target`，P1 附录 A.4 L1068 要求
+  带 `origin_proof` 的方法必须有它——之前只有 core 的签名器会拦。建模规则写进
+  [message-service.md](docs/design/message-service.md) §9.1.1（A.4 L1070 要求 endpoint-local
+  方法的 Profile 自己定义），`msg.test.ts` 钉住信封形状）
+- ~~B10 `msg listen` 的两套渲染器：TTY 人类可读 / 非 TTY 或 `--json` 出 NDJSON~~（2026-10-01：
+  `listen-view.ts`，连接提示一律走 stderr）
+- ~~B11 `msg listen --once`（等价 `msg inbox`）与 `SIGINT` → exit 0~~（2026-10-01。另把
+  `--since` 的校验提到开 keystore 之前：参数写错不该先付一次口令提示与发现往返）
 
 ## C. `packages/service` —— AgentXAgent
 
@@ -92,7 +98,10 @@
 ## E. 工程
 
 - ~~E1 仓库脚手架~~（2026-10-01：workspace + 每包 `tsup` / `vitest` / `tsconfig`；
-  `packages/service` 的 `engines` 定 `>=24.16.0`，见 [message-service.md](docs/design/message-service.md) §2）
+  `packages/service` 的 `engines` 定 `>=24.16.0`，见 [message-service.md](docs/design/message-service.md) §2。
+  2026-10-01 补：`packages/service` 还没有 src，它的 `tsc` 因 `include` 匹配不到文件报 TS18003、
+  `vitest` 因没有测试文件退 1，把根 `typecheck` / `test` 一起弄红。改成 `include: ["src", "*.ts"]`
+  与 `--passWithNoTests`，C1 落地时把前者收回 `["src"]`）
 - E2 命令面门禁：`help.test.ts` 已随 B1 一并搬来（两条不变量都在跑）。
   **缺口**：原文件的第三条门禁读 `skill/connectx/SKILL.md`，而这份 skill 没有搬过来，已随删除
   记录在此——要搬 skill 就把它一起恢复

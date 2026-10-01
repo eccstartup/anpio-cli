@@ -414,10 +414,42 @@ message.get_batch
 meta.profile            = "x_agentx.inbox.v1"
 meta.security_profile   = "transport-protected"
 meta.sender_did         = <读自己的收件箱的那个 DID>
+meta.target             = { kind: "agent", did: <同一个 DID> }
 meta.operation_id       = <随机>
 meta.created_at         = <ISO 8601>
 body                    = <下面的参数>
 ```
+
+#### 9.1.1 目标建模：`{kind: "agent", did: <收件箱主人>}`
+
+**这一行不能省。** P1 附录 A.4 L1068：`当某方法要求 auth.origin_proof 时，meta.target MUST 存在`
+——这六个方法每一个都要求。P1 A.4 L1069 又限定 `kind` 只能取 `agent` / `group` / `service`。
+而 P1 A.4 L1070 把剩下的问题指名交给本 Profile：
+`endpoint-local 方法若未来需要引入 auth.origin_proof，MUST 由对应 Profile 显式定义其目标建模与重建规则`
+——取件面正是一组 endpoint-local 方法，所以**建模规则写在下面，服务端按它实现校验，不算实现细节**。
+
+**建模：`kind` 取 `agent`，`did` 取收件箱主人，与 `meta.sender_did` 同值。**
+
+- 不取 `group`：群消息也进同一个收件箱（§9.3 的 `inbox.get` 一次返回两种），
+  而 `kind` 描述的是**这次请求作用在谁的身份上**，不是里面装了哪些消息。
+  群自己的 `kind: "group"` 出现在**投递帧自己的** `meta.target` 里（§8.2），那是另一个信封，不是请求的。
+- 不取 `service`：`service` 是"服务自身"这一类目标（如 §13 自述），
+  而读收件箱是**代理某个身份的数据**，不是服务的数据。
+- 不取 `peer_did`：`direct.get_history` 的 `peer_did` 在 `body` 里，
+  它是**筛选条件**，不是签名绑定的对象。
+
+**重建规则：服务端只从收到的 `meta.target` 重建 `@target-uri`**，即
+`anp://agent/{pct-encoded meta.target.did}`（P1 A.4 L1062、L1067），
+并且 **MUST NOT** 从 `body` 的任何字段去推它——`peer_did` / `message_ids` 都是调用方给的，
+拿它们拼签名基准等于让调用方决定自己签的是什么。
+校验时另加一条本服务自己的约束：`meta.target.did` **MUST** 等于 `meta.sender_did`，
+否则拒绝，回 P1 公共错误 **1014 `anp.invalid_target_binding`**（P1 §10.3 错误表 L715；
+L734 把 "目标绑定错误、service-scoped / endpoint-local 误用" 一并指向这个码）
+——本扩展面没有"代别人读收件箱"这种操作，
+把这一点做成显式校验，而不是留给"反正也读不到"的隐式结果。
+
+跨服务转发下这条也稳：`@target-uri` 由 `meta.target` 重建，
+而 `meta.target` 进了 `contentDigest`（P1 A.4 L1074），所以联邦转发时签名不因中间域改写而失效。
 
 **不得出现在 `anp.get_capabilities` 的 `profiles[]` 里**——那是"这个服务实现了哪些规范
 Profile"的答案，混进一个 `x_` 值就把它变成另一个问题了。扩展能力的自报位置见 §13
@@ -453,6 +485,12 @@ Profile"的答案，混进一个 `x_` 值就把它变成另一个问题了。扩
 | `inbox.mark_read` | `{message_ids: [...]}` | `{updated_count, message_ids, read_at}` |
 | `message.get_batch` | `{message_ids: [...]}`，≤ 100 且不重复 | `{items: [{message_id, message}], unavailable: [...]}` |
 | `direct.get_history` | `{peer_did, since_seq?, limit?}` | `{messages: [...], has_more}` |
+| `sync.delta` | `{since, limit?}` | `{messages: [{seq, method, params}], next_since, has_more}` |
+
+`sync.delta` 的每一项就是订阅路会推的那一帧，原样（`method` 是
+`direct.incoming` / `group.incoming` / `group.state_changed` / `group.e2ee.notice`，
+`params` 是 §8.2 那个形状），外加它被分配的**交付序号** `seq`。这样补齐与实时两条路
+在客户端汇成同一个渲染器——[realtime.md](realtime.md) §5.5 说明为什么实时帧上不需要带 `seq`。
 
 `inbox.get` 的每一行就是 `direct.send` 的 `body` 加上投递元数据，并**必须**带：
 

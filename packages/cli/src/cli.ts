@@ -60,6 +60,14 @@ const OPTIONS = {
   limit: { type: 'string' },
   'include-read': { type: 'boolean', default: false },
   all: { type: 'boolean', default: false },
+  // msg listen — the stream's options (realtime.md §5.4, §6, §7.2). `--device` renames this
+  // client's server-side queue, `--since` overrides the cursor the service holds for it,
+  // `--ack` opts into advancing read state as messages arrive, and `--once` turns the
+  // long-running command into a one-shot backfill.
+  device: { type: 'string' },
+  since: { type: 'string' },
+  ack: { type: 'boolean', default: false },
+  once: { type: 'boolean', default: false },
   // session store — the token cache written by `login`. On by default, so declared as
   // `--no-save-session`; `--save-session` is unknown.
   'no-save-session': { type: 'boolean', default: false },
