@@ -69,6 +69,20 @@ export interface SubscriberRegistry {
   /** One delivered message, to every connection watching its owner. Ordering follows the
    *  delivery sequence, which is the order the caller publishes in. */
   publish(record: DeliveryRecord): void
+  /**
+   * One frame to exactly one device, with no delivery row behind it.
+   *
+   * The P6 Device Delivery Queue (§12.6) is not group history and the Profile defines no
+   * P6 pull method, so a P6 envelope has no `deliveries` row to hang a push off — this is
+   * the push half on its own. Device-addressed by construction: a connection that declared
+   * another device ID never sees it (the same rule {@link reaches} applies, and §12.6 item 4
+   * is the reason for it).
+   *
+   * Returns whether a live connection took it. `false` is not an error and does not mean the
+   * frame is lost: for a device with no live socket the caller keeps the envelope queued and
+   * retries, which is what §12.6's bounded retention is for.
+   */
+  publishDevice(ownerDid: string, deviceId: string, frame: string): boolean
   /** Connected subscriptions, for a shutdown line and for tests. */
   size(): number
   /** Drop every subscription without closing the targets. For shutdown only. */
@@ -195,6 +209,25 @@ export function createSubscriberRegistry(): SubscriberRegistry {
         if (!reaches(entry, record)) continue
         deliver(record.ownerDid, entry, frame, record.seq)
       }
+    },
+
+    publishDevice(ownerDid, deviceId, frame) {
+      const set = watching.get(ownerDid)
+      if (set === undefined) return false
+      let served = false
+      // Only live connections, and only this device. A connection still backfilling has not
+      // yet said where its cursor is, so there is no honest place to park a frame that has
+      // no position in the delivery sequence — the caller retries instead.
+      for (const entry of [...set]) {
+        if (entry.gone || !entry.live || entry.deviceId !== deviceId) continue
+        entry.target.send(frame)
+        served = true
+        if (entry.target.bufferedAmount() > MAX_BUFFERED) {
+          entry.target.close('write queue is over its bound; reconnect with your cursor')
+          forget(ownerDid, entry)
+        }
+      }
+      return served
     },
 
     size() {

@@ -13,6 +13,7 @@
 import { ConnectxError } from '@agentx/core'
 import { loadConfig } from './config'
 import { createDataPlane } from './dataplane'
+import { createDeviceQueueWorker } from './delivery/deviceQueue'
 import { createDeliveryWorker } from './delivery/worker'
 import { createEgress } from './federation/egress'
 import { createRelay } from './federation/forward'
@@ -75,6 +76,12 @@ async function main(): Promise<void> {
   // Outbound `direct.incoming` pushes. Started only after the socket is up: a startup
   // that fails should exit without a background timer having already spent attempts.
   const delivery = createDeliveryWorker({ config, storage })
+  // P6's device-addressed envelopes (§12.6). A separate queue and a separate worker by
+  // design: this one is keyed by `(recipient_did, recipient_device_id)` and must not fan
+  // out to a sibling device, so it cannot ride the DID-keyed outbox above. It does need the
+  // registry, because a P6 envelope has no `deliveries` row to push off when the recipient
+  // is one of this service's own devices.
+  const deviceQueue = createDeviceQueueWorker({ config, storage, registry })
 
   try {
     await server.listen()
@@ -84,6 +91,7 @@ async function main(): Promise<void> {
     throw err
   }
   delivery.start()
+  deviceQueue.start()
 
   process.stdout.write(`AgentXAgent listening on http://${server.address.host}:${server.address.port}\n`)
   process.stdout.write(`  service did   ${config.serviceDid}\n`)
@@ -113,6 +121,7 @@ async function main(): Promise<void> {
     closing = true
     process.stdout.write(`\n${signal}: shutting down\n`)
     delivery.stop()
+    deviceQueue.stop()
     // Before `server.close()`: an upgraded socket is detached from the HTTP server, so its
     // `close()` waits for connections it cannot reach. Nowhere else can end these.
     session.closeAll('server shutting down')

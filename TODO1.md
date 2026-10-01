@@ -284,9 +284,15 @@
     （被拒请求靠回滚不烧 nonce）、`send` 刻意不写 `validateBody`（§13.3 L1627 要载荷检查
     排在成员判定之后）——七条都在 [e2ee-group.md](docs/design/e2ee-group.md) §4.2。同 DID 的
     Remove 分支 v1 不做（回 5003），§12 记了。service 555）
-  - 还剩：队列内排序与最终 Remove 通知的有界收尾 + `group_did_updates` 的暂停/串行化
-    （`send` 返回 5004；表与访问器已在，但编排的触发事件 `member-did-updated` 还没进 P4，
-    今天 `paused` 从投影现算，见 §8）
+  - ~~队列内排序与最终 Remove 通知的有界收尾~~（2026-10-02：出站是 `delivery/deviceQueue.ts`
+    那条独立 worker。它拥有四件事——**严格队头优先**（`dueDeviceEnvelopes` 把"队头没到期
+    就一行不返回"做进 SQL，避免一台卡住的设备既乱序又饿死别的队列）、**每次尝试前的资格
+    复核**（§12.6 第 3 条，含点名的那两个例外）、**本地设备直推订阅**（P6 信封没有
+    `deliveries` 行，推不到就是留着重试，不记尝试）、**两条有界保留闸门**（尝试次数与在队
+    时长，默认 8 次 / 24 小时）。§12.3 选定 SHOULD：已入队的应用信封按序投完，最终通知压在
+    最后。见 [e2ee-group.md](docs/design/e2ee-group.md) §6.2。service 577）
+  - 还剩：`group_did_updates` 的暂停/串行化（`send` 返回 5004；表与访问器已在，但编排的
+    触发事件 `member-did-updated` 还没进 P4，今天 `paused` 从投影现算，见 §8）
   - **动手前先留列**：与 C12 同一条缝（`deliveries` 没有设备列、C7 按 `owner_did` 路由）
   - **挡住 v1 的**：`0xF0A1` 还是草案私有值，规范说 ANP **在发布 v2 前 MUST 公布稳定
     注册 code point**（§6.3.1 L430、§20 L2457）——**决定 P6 能不能对外声明**

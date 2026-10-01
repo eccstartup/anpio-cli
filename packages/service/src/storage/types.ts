@@ -651,9 +651,15 @@ export interface Storage {
    *  `group_event_seq` (and commits by epoch), which is enqueue order: assigning it
    *  anywhere else would let two transactions interleave into a queue that is not sorted. */
   enqueueDeviceEnvelope(envelope: Omit<StoredDeviceEnvelope, 'seq'>): number
-  /** Envelopes due at or before `now`, ordered by `(recipient_did, recipient_device_id,
-   *  seq)` — the queue's own order, so a caller that walks it in order walks each device's
-   *  queue in order. */
+  /** Envelopes that may be delivered now, ordered by `(recipient_did, recipient_device_id,
+   *  seq)` — the queue's own order, so a caller walking it in order walks each device's
+   *  queue in order, and each queue only ever yields its head first.
+   *
+   *  A queue whose head is not due (it failed and was rescheduled) contributes **nothing**,
+   *  even though its later rows are due: §12.6 requires `group.incoming` in `group_event_seq`
+   *  order, so the head blocks its queue. Handing those later rows back would be handing the
+   *  caller a delivery it is forbidden to make, and would let one stalled device crowd out
+   *  every other queue's work inside the same `limit`. */
   dueDeviceEnvelopes(now: string, limit: number): StoredDeviceEnvelope[]
   rescheduleDeviceEnvelope(
     recipientDid: string,

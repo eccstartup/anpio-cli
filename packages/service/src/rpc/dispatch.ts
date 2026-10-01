@@ -320,6 +320,9 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
       requestDigest: input.requestDigest,
       devices: input.devices,
       ...(input.proofKeyId !== undefined ? { proofKeyId: input.proofKeyId } : {}),
+      // §13.6 L1670：`group.incoming` 那一档要把原 proof 连同 `origin_context` 原样保留，
+      // 所以 handler 得看见提交时那份 `params.auth`（[groupEnvelopes.ts] 装配）。
+      ...(input.params.auth !== undefined ? { auth: input.params.auth } : {}),
     }
   }
 

@@ -74,6 +74,11 @@ import type { Storage } from '../storage/types'
 import type { EligibleDevice } from './eligibility'
 import { P1_AUTH_CODES } from './auth'
 import {
+  emitAddEnvelopes,
+  emitIncomingEnvelopes,
+  emitRemoveEnvelopes,
+} from './groupEnvelopes'
+import {
   bindingProblem,
   device,
   groupE2eeError,
@@ -352,6 +357,9 @@ export interface GroupControlContext {
   devices: readonly EligibleDevice[]
   /** proof 里声明的 `keyid`（A.2 L1018）。`send` 用它 §13.3 第 6 项。 */
   proofKeyId?: string
+  /** 被接受的提交的 `params.auth`，**原样**。只有 `group.incoming` 那一档用它：§13.6 L1670
+   *  要求重建时把原 proof 连同 `origin_context` 一起保留（[groupEnvelopes.ts] 里装配）。 */
+  auth?: unknown
 }
 
 /** §4.4.2：`add` / `remove` / `send` 的 `meta.target.did` **就是** `group_did`。 */
@@ -593,9 +601,9 @@ export function addE2eeMember(ctx: GroupControlContext): Record<string, unknown>
   const ref = groupStateRef(ctx.body.group_state_ref, groupDid, GROUP_E2EE_ADD)
   const cryptoGroupId = base64Url(ctx.body, 'crypto_group_id_b64u', 'request')
   const epoch = decimal(ctx.body, 'epoch')
-  base64Url(ctx.body, 'commit_b64u', 'request')
-  base64Url(ctx.body, 'welcome_b64u', 'request')
-  base64Url(ctx.body, 'ratchet_tree_b64u', 'request')
+  const commitB64u = base64Url(ctx.body, 'commit_b64u', 'request')
+  const welcomeB64u = base64Url(ctx.body, 'welcome_b64u', 'request')
+  const ratchetTreeB64u = base64Url(ctx.body, 'ratchet_tree_b64u', 'request')
 
   const keyPackage = ctx.body.group_key_package
   if (!isPlainObject(keyPackage)) {
@@ -672,6 +680,21 @@ export function addE2eeMember(ctx: GroupControlContext): Record<string, unknown>
     updatedAt: ctx.acceptedAt,
   })
 
+  // §12.3 L1447：一次 Add 投两样——Commit 给**加完之后**的每条 active leaf（含新 leaf），
+  // Welcome 只给新 leaf。取投影必须在这两次写之后：`leaves` 是"这次 Add 之后"的状态。
+  emitAddEnvelopes(ctx, {
+    groupDid,
+    leaves: ctx.storage.activeGroupLeaves(groupDid),
+    groupStateRef: ref,
+    cryptoGroupId,
+    epoch,
+    memberDid,
+    memberDeviceId,
+    commitB64u,
+    welcomeB64u,
+    ratchetTreeB64u,
+  })
+
   // §9.3.4 的成功响应。
   return {
     accepted: true,
@@ -720,7 +743,7 @@ export function removeE2eeMember(ctx: GroupControlContext): Record<string, unkno
   const cryptoGroupId = base64Url(ctx.body, 'crypto_group_id_b64u', 'request')
   const epoch = decimal(ctx.body, 'epoch')
   // §9.4.3 只要求 `commit_b64u` 是编码合法的 MLSMessage。内容对不对归接收方的 runtime。
-  base64Url(ctx.body, 'commit_b64u', 'request')
+  const commitB64u = base64Url(ctx.body, 'commit_b64u', 'request')
 
   // §9.4.3："The exact `(member_did, member_device_id)` leaf MUST exist in the current MLS
   // state"。terminal 的行**不算**——那台设备已经被移出去了，再移一次是无标的之箭。
@@ -742,6 +765,20 @@ export function removeE2eeMember(ctx: GroupControlContext): Record<string, unkno
     epoch,
     state: 'terminal',
     updatedAt: ctx.acceptedAt,
+  })
+
+  // §12.3 L1455：Commit 给每条**保留的** leaf，最终通知给被移除的那一条。取投影在 terminal
+  // 写之后——被移除的那条已不在 `activeGroupLeaves` 里，所以它只会收到最终通知，不再收到任何
+  // 新的应用信封（§12.6 L1516 那句 MUST NOT 的机械保证）。
+  emitRemoveEnvelopes(ctx, {
+    groupDid,
+    retainedLeaves: ctx.storage.activeGroupLeaves(groupDid),
+    subjectDid: memberDid,
+    subjectDeviceId: memberDeviceId,
+    groupStateRef: ref,
+    cryptoGroupId,
+    epoch,
+    commitB64u,
   })
 
   // §9.4.4 的成功响应。
@@ -920,6 +957,18 @@ export function sendE2eeMessage(ctx: GroupControlContext): Record<string, unknow
     acceptedAt: ctx.acceptedAt,
     payloadDigest: ctx.requestDigest,
     messageId,
+  })
+
+  // §12.5 L1491：每条 active leaf 一封 `group.incoming`，逐叶只变 target 与设备。取投影在这里
+  // （受理之后、`advanceGroupCounters` 之后）——`body` 里那两个序号就是这次受理推出来的值，
+  // 正是接收方要用来排队的坐标。
+  emitIncomingEnvelopes(ctx, {
+    groupDid,
+    leaves: ctx.storage.activeGroupLeaves(groupDid),
+    cipher,
+    receipt,
+    groupStateVersion: String(counters.groupStateVersion),
+    groupEventSeq: String(counters.groupEventSeq),
   })
 
   // §9.5.4 的成功响应。

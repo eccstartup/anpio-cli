@@ -36,7 +36,7 @@ import { loadConfig } from '../config'
 import { createHttpNonceStore } from '../federation/nonces'
 import { openObjectStore } from '../objects'
 import { openStorage } from '../storage/sqlite'
-import type { Storage } from '../storage/types'
+import type { Storage, StoredDeviceEnvelope } from '../storage/types'
 import { createDispatch } from './dispatch'
 import type { RpcHandler, RpcRequest } from '../http/server'
 import {
@@ -48,6 +48,7 @@ import {
   GROUP_E2EE_SEND,
 } from './groupControl'
 import { GROUP_E2EE_PROFILE } from './groupE2ee'
+import { GROUP_E2EE_NOTICE } from './groupEnvelopes'
 import { GROUP_ADD, GROUP_CREATE, GROUP_HANDLERS, GROUP_PROFILE, GROUP_SECURITY_PROFILE } from './groups'
 import { lookupMethod } from './methods'
 
@@ -891,5 +892,163 @@ describe('body validation runs before the device-addressing step', () => {
     )
     expect(outcome.json?.error?.code).toBe(1003)
     expect(outcome.json?.error?.message).toContain('commit_b64u')
+  })
+})
+
+// ---- §12：受理时就写进 Device Delivery Queue ------------------------------------
+
+/** 队列里的每一条，按 `(did, device, seq)`。`due` 那个参数取一个远未来的时刻，于是"队头已
+ *  到期"这条规则对每条队列都成立，读到的就是整条队列——测试要看的是**装了什么**，不是到期
+ *  与否（那件事由 `delivery/deviceQueue.test.ts` 与 `sqlite.test.ts` 管）。 */
+function queued(storage: Storage): StoredDeviceEnvelope[] {
+  return storage.dueDeviceEnvelopes('9999-12-31T00:00:00Z', 1000)
+}
+
+function parsed(row: StoredDeviceEnvelope | undefined): Record<string, any> {
+  if (row === undefined) throw new Error('no such envelope')
+  return JSON.parse(row.envelopeJson) as Record<string, any>
+}
+
+describe('the Device Delivery Queue is written with the accepted call (§12)', () => {
+  it('queues nothing for create', async () => {
+    // §9.2.1：初始成员是 owner 自己，没有 Commit 要投，也没有 Welcome。create 一个信封都不发。
+    const { h } = await groupWithState()
+    expect(queued(h.storage)).toEqual([])
+  })
+
+  it('queues a commit for every leaf plus a welcome for the joined device, on add', async () => {
+    // §12.3 L1447：Add 投两样——Commit 给**加完之后**的每条 active leaf（含新 leaf），Welcome
+    // 只给新 leaf（§12.4 且 MUST NOT 发给 sibling）。
+    const { h, groupDid } = await groupWithMember()
+    const rows = queued(h.storage).filter((r) => r.groupDid === groupDid)
+    // 队列按 `(did, device, seq)` 排，所以 member 那条队列排在 owner 前面（DID 的字面序）。
+    expect(rows.map((r) => `${r.recipientDeviceId}:${r.kind}`)).toEqual([
+      `${MEMBER_DEVICE}:commit`,
+      `${MEMBER_DEVICE}:welcome`,
+      `${OWNER_DEVICE}:commit`,
+    ])
+
+    const commit = parsed(rows[0])
+    expect(commit.method).toBe(GROUP_E2EE_NOTICE)
+    expect(commit.params.meta.profile).toBe(GROUP_E2EE_PROFILE)
+    // §12.2.2 L1426：notice 那一档写死 `transport-protected`，与群的策略无关。
+    expect(commit.params.meta.security_profile).toBe('transport-protected')
+    // §12.2.2 L1428：发起者是群自己。
+    expect(commit.params.meta.sender_did).toBe(groupDid)
+    expect(commit.params.meta.target).toEqual({ kind: 'agent', did: member.did })
+    expect(commit.params.meta.recipient_device_id).toBe(MEMBER_DEVICE)
+    // §12.2：通知不带 proof。附一个反而违规（§13.6 L1663）。
+    expect(commit.params.auth).toBeUndefined()
+    expect(commit.params.body).toMatchObject({
+      notice_type: 'commit-delivery',
+      group_did: groupDid,
+      crypto_group_id_b64u: CRYPTO_GROUP_ID,
+      epoch: '1',
+      subject_did: member.did,
+      subject_device_id: MEMBER_DEVICE,
+      subject_status: 'active',
+      commit_b64u: 'AAAA',
+    })
+
+    // 逐叶的那几份共用一个 `notice_id`（§7.6 L665），但各自去重时只看自己那条流。
+    expect(parsed(rows[2]).params.body.notice_id).toBe(commit.params.body.notice_id)
+    expect(parsed(rows[1]).params.body).toMatchObject({
+      notice_type: 'welcome-delivery',
+      notice_id: commit.params.body.notice_id,
+      welcome_b64u: 'AAAA',
+      ratchet_tree_b64u: 'AAAA',
+    })
+    // Welcome 里没有 `subject_status`——那一位是 Commit 的（§7.6 L673）。
+    expect(parsed(rows[1]).params.body.subject_status).toBeUndefined()
+  })
+
+  it('queues one group.incoming per current leaf on send, preserving the accepted fields', async () => {
+    // §12.5 L1491：逐叶一封独立的信封，携带**同一份** ordering fields / receipt / 密文，只有
+    // target 与 recipient_device_id 变。
+    const { h, groupDid } = await groupWithMember()
+    const before = queued(h.storage).length
+    const outcome = await h.call(await signed(GROUP_E2EE_SEND, sendMeta(groupDid), sendBody(groupDid)))
+    expect(outcome.json?.error).toBeUndefined()
+
+    const rows = queued(h.storage).filter((r) => r.kind === 'incoming')
+    expect(rows.map((r) => r.recipientDeviceId)).toEqual([MEMBER_DEVICE, OWNER_DEVICE])
+    expect(rows.length + before).toBe(queued(h.storage).length)
+
+    for (const row of rows) {
+      const envelope = parsed(row)
+      expect(envelope.method).toBe('group.incoming')
+      // §12.5 L1484：应用密文那一档是 `group-e2ee`。
+      expect(envelope.params.meta.security_profile).toBe('group-e2ee')
+      // §12.5 L1486/L1487：发送方那一对与三个被接受的字段原样保留。
+      expect(envelope.params.meta.sender_did).toBe(owner.did)
+      expect(envelope.params.meta.sender_device_id).toBe(OWNER_DEVICE)
+      expect(envelope.params.meta.message_id).toBe('msg-1')
+      expect(envelope.params.meta.operation_id).toBe('op-send-1')
+      expect(envelope.params.meta.content_type).toBe(GROUP_CIPHER_CONTENT_TYPE)
+      // §12.6 第 2 条：ordering fields、receipt、密文一字不改。响应的序号就是信封里的序号。
+      expect(envelope.params.body.group_state_version).toBe(outcome.json?.result?.group_state_version)
+      expect(envelope.params.body.group_event_seq).toBe(outcome.json?.result?.group_event_seq)
+      expect(envelope.params.body.group_receipt).toEqual(outcome.json?.result?.group_receipt)
+      expect(envelope.params.body.group_cipher_object).toEqual(sendBody(groupDid).group_cipher_object)
+    }
+    // 逐叶只变 target 那一处。
+    expect(parsed(rows[0]).params.meta.target.did).toBe(member.did)
+    expect(parsed(rows[1]).params.meta.target.did).toBe(owner.did)
+  })
+
+  it('preserves the submission origin proof and adds its origin context (§13.6)', async () => {
+    // §13.6 L1670：重建时把提交里的 origin proof 连同 `origin_context` 一起保留——接收方
+    // 靠它判"这份 proof 当初是为什么、什么时候做的"，而 proof 里的时间窗在投递时已经过期。
+    const { h, groupDid } = await groupWithMember()
+    await h.call(await signed(GROUP_E2EE_SEND, sendMeta(groupDid), sendBody(groupDid)))
+    const envelope = parsed(queued(h.storage).find((r) => r.kind === 'incoming'))
+
+    expect(envelope.params.auth.scheme).toBe('anp-rfc9421-origin-proof-v1')
+    // A.2：那份 proof 的三个字段一字不动地留着（`contentDigest` / `signatureInput` / `signature`）。
+    for (const field of ['contentDigest', 'signatureInput', 'signature']) {
+      expect(typeof envelope.params.auth.origin_proof[field]).toBe('string')
+    }
+    // §13.6 L1677：`created_at` 是**提交时**那个，不是投递时刻；信封自己那个是投递时刻。
+    expect(envelope.params.auth.origin_context.created_at).toBe(sendMeta(groupDid).created_at ?? undefined)
+    // §13.6 L1683 的黑名单字段一个都不在 extra_meta 里。
+    const extra = envelope.params.auth.origin_context.extra_meta ?? {}
+    for (const reserved of ['profile', 'security_profile', 'sender_did', 'target', 'message_id', 'created_at']) {
+      expect(extra).not.toHaveProperty(reserved)
+    }
+  })
+
+  it('queues the commits plus a last final notice on remove, and stops queueing for that leaf', async () => {
+    // §12.3 L1455：Commit 给每条保留的 leaf，最终通知给被移除的那一条；§6.1 要它压在最后。
+    const { h, groupDid } = await groupWithMember()
+    const outcome = await h.call(
+      await signed(GROUP_E2EE_REMOVE, groupMeta(groupDid, { operation_id: 'op-remove-1' }), removeBody(groupDid)),
+    )
+    expect(outcome.json?.error).toBeUndefined()
+
+    const memberRows = queued(h.storage)
+      .filter((r) => r.groupDid === groupDid && r.recipientDeviceId === MEMBER_DEVICE)
+      .map((r) => `${r.seq}:${r.kind}`)
+    // 队内次序就是入队次序：commit、welcome 之后是最终通知，`seq` 最大。
+    expect(memberRows).toEqual(['1:commit', '2:welcome', '3:final-notice'])
+    expect(queued(h.storage).filter((r) => r.groupDid === groupDid && r.recipientDeviceId === OWNER_DEVICE)).toHaveLength(2)
+
+    const removed = parsed(queued(h.storage).find((r) => r.kind === 'final-notice'))
+    expect(removed.params.body.subject_status).toBe('removed')
+    expect(removed.params.body.subject_device_id).toBe(MEMBER_DEVICE)
+    expect(removed.params.meta.target).toEqual({ kind: 'agent', did: member.did })
+    // 同一颗 Commit / 同一个坐标。
+    expect(removed.params.body.commit_b64u).toBe('AAAA')
+    expect(removed.params.body.epoch).toBe('2')
+
+    // §12.6：一条 leaf 被 Remove 之后 MUST NOT 再为它入队新的应用信封。这里 member 的 P4 成员
+    // 行还在、owner 的 leaf 也还在，所以这次 send 会成功——但它只给**还在投影里的**那条 leaf
+    // 入队，被移除的那台一个信封都收不到。
+    const before = queued(h.storage)
+    const resent = await h.call(
+      await signed(GROUP_E2EE_SEND, sendMeta(groupDid, { operation_id: 'op-send-2', message_id: 'msg-2' }), sendBody(groupDid)),
+    )
+    expect(resent.json?.error).toBeUndefined()
+    const added = queued(h.storage).slice(before.length)
+    expect(added.map((r) => `${r.recipientDeviceId}:${r.kind}`)).toEqual([`${OWNER_DEVICE}:incoming`])
   })
 })

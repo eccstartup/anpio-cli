@@ -1107,10 +1107,22 @@ class SqliteStorage implements Storage {
     // due, but a caller walking the result walks each device's queue in order — §6.1 lets a
     // `welcome` overtake the pending application envelopes, and that call needs to see them
     // in the order they are queued, not in the order they happened to come due.
+    //
+    // The `NOT EXISTS` is the head-of-line rule. Only a head is ever attempted, so only a head
+    // can be rescheduled into the future; a row is therefore deliverable only when nothing
+    // earlier in its queue is still waiting. Handing back the rows behind a stalled head would
+    // hand the caller a delivery it is forbidden to make (§12.6 requires a device's
+    // `group.incoming` in `group_event_seq` order), and one stalled device's backlog would
+    // fill `limit` on every pass and starve every other queue.
     const rows = this.stmt(
-      `SELECT * FROM device_envelopes WHERE next_attempt_at <= ?
-        ORDER BY recipient_did, recipient_device_id, seq LIMIT ?`,
-    ).all(now, limit) as Row[]
+      `SELECT * FROM device_envelopes d WHERE d.next_attempt_at <= ?
+        AND NOT EXISTS (SELECT 1 FROM device_envelopes e
+                         WHERE e.recipient_did = d.recipient_did
+                           AND e.recipient_device_id = d.recipient_device_id
+                           AND e.seq < d.seq
+                           AND e.next_attempt_at > ?)
+        ORDER BY d.recipient_did, d.recipient_device_id, d.seq LIMIT ?`,
+    ).all(now, now, limit) as Row[]
     return rows.map(toDeviceEnvelope)
   }
 

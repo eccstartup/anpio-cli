@@ -860,6 +860,28 @@ describe('the device delivery queue (P6, C13)', () => {
     ])
   })
 
+  it('withholds a queue whose head is still waiting, and its backlog with it', () => {
+    // §12.6 要一台设备的 `group.incoming` 按 `group_event_seq` 顺序投。只有队头会被尝试，
+    // 所以只有队头会被推后；队头一推后，它后面那些**已经到期**的行也一律不能出去——否则
+    // 一台卡住的设备会既违反顺序，又每轮把 limit 占满、饿死别的队列。
+    const store = open()
+    const head = store.enqueueDeviceEnvelope(envelope('dev-a', 'incoming', '2026-10-01T00:00:00Z'))
+    store.enqueueDeviceEnvelope(envelope('dev-a', 'incoming', '2026-10-01T00:00:01Z'))
+    store.enqueueDeviceEnvelope(envelope('dev-b', 'incoming', '2026-10-01T00:00:01Z'))
+
+    store.rescheduleDeviceEnvelope('did:web:alice.example', 'dev-a', head, 1, '2026-10-01T00:00:09Z', 'connection refused')
+    // dev-a#2 早就到期了，但它的队头还在等：整条 dev-a 队列这一轮什么都不出。
+    expect(store.dueDeviceEnvelopes('2026-10-01T00:00:05Z', 10).map((e) => `${e.recipientDeviceId}#${e.seq}`)).toEqual([
+      'dev-b#1',
+    ])
+    // 队头一到期，整条队列的前缀又一起出来了。
+    expect(store.dueDeviceEnvelopes('2026-10-01T00:00:09Z', 10).map((e) => `${e.recipientDeviceId}#${e.seq}`)).toEqual([
+      'dev-a#1',
+      'dev-a#2',
+      'dev-b#1',
+    ])
+  })
+
   it('reschedules with a reason, then drops a row that leaves the queue', () => {
     const store = open()
     const seq = store.enqueueDeviceEnvelope(envelope('dev-a'))

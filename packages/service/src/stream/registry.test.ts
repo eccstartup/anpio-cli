@@ -181,6 +181,63 @@ describe('routing', () => {
   })
 })
 
+describe('publishDevice (§12.6)', () => {
+  it('pushes to the named device alone, and says it was served', () => {
+    // P6 的信封在 `deliveries` 里没有行，所以它不走 `publish`：它没有序号可对，也没有回填可
+    // 对齐。收件设备由调用方指名，这里一个字节都不许给兄弟设备。
+    const registry = createSubscriberRegistry()
+    const phone = recorder()
+    const laptop = recorder()
+    registry.subscribe(phone, record().ownerDid, 'phone', 0).goLive(0)
+    registry.subscribe(laptop, record().ownerDid, 'laptop', 0).goLive(0)
+
+    expect(registry.publishDevice(record().ownerDid, 'phone', '{"a":1}')).toBe(true)
+    expect(phone.sent).toEqual(['{"a":1}'])
+    expect(laptop.sent).toEqual([])
+  })
+
+  it('says it was not served when nobody is watching that account', () => {
+    // `false` 是给调用方的重试信号：这条信封留在队里，下一轮再来。
+    const registry = createSubscriberRegistry()
+    expect(registry.publishDevice('did:web:example.com:nobody', 'phone', '{}')).toBe(false)
+  })
+
+  it('says it was not served for a connection that is not live yet', () => {
+    // 还在回填的连接没有"游标在哪"这个答案，而这一帧在投递序列里没有位置可放——所以不驻留，
+    // 让调用方重试，而不是把它塞进那个待发窗口。
+    const registry = createSubscriberRegistry()
+    const target = recorder()
+    registry.subscribe(target, record().ownerDid, 'phone', 0)
+    expect(registry.publishDevice(record().ownerDid, 'phone', '{}')).toBe(false)
+    expect(target.sent).toEqual([])
+  })
+
+  it('says it was not served for a connection that named no device', () => {
+    // 一条没说"我代表哪台设备"的连接不是任何设备的信箱，即使它的 owner 对上了。
+    const registry = createSubscriberRegistry()
+    const anonymous = recorder()
+    registry.subscribe(anonymous, record().ownerDid, '', 0).goLive(0)
+    expect(registry.publishDevice(record().ownerDid, 'phone', '{}')).toBe(false)
+    expect(anonymous.sent).toEqual([])
+  })
+
+  it('drops a device that stops draining, and only that device', () => {
+    const registry = createSubscriberRegistry()
+    const slow = recorder()
+    const other = recorder()
+    registry.subscribe(slow, record().ownerDid, 'phone', 0).goLive(0)
+    registry.subscribe(other, record().ownerDid, 'laptop', 0).goLive(0)
+    slow.queue = 8 * 1024 * 1024
+
+    // 帧已经写进 socket 了，所以这次仍算送达；断的是这台设备自己，下一次它就不在册了。
+    expect(registry.publishDevice(record().ownerDid, 'phone', '{}')).toBe(true)
+    expect(slow.closes).toHaveLength(1)
+    expect(registry.publishDevice(record().ownerDid, 'phone', '{}')).toBe(false)
+    expect(other.sent).toEqual([])
+    expect(registry.size()).toBe(1)
+  })
+})
+
 describe('a subscription that falls behind', () => {
   it('is dropped rather than skipped ahead, by frame count', () => {
     const registry = createSubscriberRegistry()
