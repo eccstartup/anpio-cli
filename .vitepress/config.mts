@@ -26,6 +26,7 @@ export default defineConfig({
     'docs/index.md': 'index.md',
     'README.md': 'overview.md',
     'TODO1.md': 'todo.md',
+    'TODO2.md': 'todo2.md',
   },
   cleanUrls: true,
   // 文档里到处是 `<upload_uri>`、`<digest>`、`<dir>` 这种**占位符**。开着 HTML 解析时
@@ -46,6 +47,7 @@ export default defineConfig({
         items: [
           { text: '总览', link: '/overview' },
           { text: '台账（还剩什么）', link: '/todo' },
+          { text: '台账 2（第二轮）', link: '/todo2' },
         ],
       },
       {

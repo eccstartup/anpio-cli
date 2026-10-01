@@ -2,6 +2,8 @@
 
 设计文档见 [message-service.md](docs/design/message-service.md)（九份都在 `docs/design/`）。本文件只记**还剩什么**，做完的划掉。
 
+P1–P6 做完后（`3e3747b`）的下一轮 —— 端到端实测暴露的问题，以及本文件里没划掉的部分 —— 见 [TODO2.md](TODO2.md)。
+
 ---
 
 ## A. `packages/core` —— 裁剪与新增
