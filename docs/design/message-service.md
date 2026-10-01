@@ -93,6 +93,27 @@
 HTTP 层用 `node:http` 自己写路由：整个服务只有**两个**端点
 （JSON-RPC 控制面 + 附件数据面），引框架的收益是负的。
 
+### 2.1 路由与 HTTP 状态码
+
+| 请求 | 应答 |
+|---|---|
+| `POST /anp-im/rpc` | `200`，体是 JSON-RPC 响应（**成功与失败都是 200**） |
+| `GET /anp-im/stream` | `101` 升级为 WebSocket |
+| `GET /.well-known/anp-message-service.json` | `200`，体是 §13 那个条目 |
+| `PUT <upload_uri>` | 数据面，附件对象字节（P7） |
+| 其余路径 | `404` |
+| 已知路径、方法不对 | `405` + `Allow` |
+
+**协议错误不换 HTTP 状态码**：`anp.*` 与 JSON-RPC 标准错误一律走 `200`，客户端按
+`error.data.anp_code` 分支。**规范没有规定 HTTP 状态码**（P1 全文未提，已 grep 核实），
+这条是**本仓库自己的选择**，理由是客户端那边：`core` 的 `postMessage` 走
+`fetchControlledJson`，它对非 2xx 直接抛 `message_send_failed`（`resolveDid.ts:860`）。
+把 `anp.did_superseded` 放进 4xx，调用方就再也拿不到那个 `anp_code`——
+而它正是 P1 §10.2 L695 用来分支的唯一依据。
+
+只有"连 JSON-RPC 对象都还不是"的传输层失败才用非 2xx：
+`413`（体超过 `AGENTX_MAX_BODY`）、`415`（`Content-Type` 不是 JSON）以及上表的 `404` / `405`。
+
 **存储接口化**：`Storage` 是一个 interface，`sqlite` 是 v1 唯一实现。
 Postgres 的事等真需要多实例时再说，现在不做抽象层之上的抽象。
 
@@ -247,7 +268,12 @@ KeyPackage 的 reserved / consumed 状态由本服务管。
 
 ## 6. 幂等
 
-**最小键**：`(sender_did, target.did, method, operation_id)`。
+**最小键**：`(sender_did, target_scope, method, operation_id)`（P1 §9.1 L628）。
+
+`target_scope` 由 Profile 定义（Direct 类通常是 `target.did`，Group 类是 `group_did`，
+§9.1 L635–637），设备定址的 E2EE Overlay 还要把每个设备 selector 并进去（§9.1 L639）。
+所以它不是一组固定列——**键由 `core` 的 `idempotencyKey()` 生成**，服务端只存这个字符串。
+两侧各算一遍就会出现"重试看起来像新消息"。
 
 规则：
 
@@ -269,11 +295,11 @@ KeyPackage 的 reserved / consumed 状态由本服务管。
 
 ```sql
 -- 幂等台账：先查这张表，再谈其他
+-- 键是 core `idempotencyKey()` 的字符串，不是列的分解——§9.1 的 scope 里含
+-- Profile 定义的 target_scope 与可变长的设备 selector 列表，拆成固定列就表达不了。
 CREATE TABLE idempotency (
-  sender_did TEXT NOT NULL, target_kind TEXT NOT NULL, target_did TEXT NOT NULL,
-  method TEXT NOT NULL, operation_id TEXT NOT NULL,
-  response_json TEXT NOT NULL, created_at TEXT NOT NULL,
-  PRIMARY KEY (sender_did, target_kind, target_did, method, operation_id)
+  key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL,
+  response_json TEXT NOT NULL, created_at TEXT NOT NULL
 );
 
 -- 私聊消息（明文 P3 与密文 P5 同一张表，靠 security_profile 区分）
@@ -285,6 +311,17 @@ CREATE TABLE messages (
   conversation_id TEXT, accepted_at TEXT NOT NULL
 );
 CREATE INDEX messages_target ON messages (target_did, accepted_at);
+
+-- 每个收件人一份的投递记录，带它在那个人自己序号里的位置。
+-- `delivery_cursor` 的游标是每 (owner, device) 单调递增的，而 `messages` 上没有任何
+-- 序号列——一条群消息是一个 `message_id` 投给 N 个成员，序号放不到消息行上。
+-- `sync.delta` 重放的是这张表，`inbox.get` 翻的也是它。
+CREATE TABLE deliveries (
+  owner_did TEXT NOT NULL, seq INTEGER NOT NULL, message_id TEXT NOT NULL,
+  method TEXT NOT NULL, params_json TEXT NOT NULL, accepted_at TEXT NOT NULL,
+  PRIMARY KEY (owner_did, seq)
+);
+CREATE INDEX deliveries_message ON deliveries (message_id);
 
 -- 取件扩展面用的游标（每 (owner_did[, device]) 一条单调递增序号）
 CREATE TABLE delivery_cursor (

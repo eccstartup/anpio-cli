@@ -71,7 +71,17 @@
 
 ## C. `packages/service` —— AgentXAgent
 
-- C1 `node:http` 骨架 + `Storage` interface + `node:sqlite` 实现
+- ~~C1 `node:http` 骨架 + `Storage` interface + `node:sqlite` 实现~~（2026-10-01。
+  `config.ts` 按 §14 逐项（含 `did:web` 推导，以及非 loopback 监听时拒绝凭空推 public URL）；
+  `storage/{schema,types,sqlite}.ts`；`http/server.ts` 只做路由与读体，分派留在 `handleRpc`
+  接缝后（C2 起），所以 `main.ts` 现在对每个合法请求回 `-32601`——是"还没做"，不是"做错了"。
+  48 个测试；E1 里 `include` 收回 `["src"]`、`--passWithNoTests` 一并撤掉。
+  三处结论进了设计文档：[message-service.md](docs/design/message-service.md) §2.1 新增
+  路由与状态码表（**规范不规定 HTTP 状态码**，一律 200 的理由是自家客户端对非 2xx 直接抛错）；
+  §7 改 `idempotency` 键（草案的五列 PK 装不下 §9.1 L639 要求的设备 selector，改为存 core
+  `idempotencyKey()` 的字符串）并补 `deliveries` 表。另：`tsup` 加
+  `removeNodeProtocol: false`——`node:sqlite` 没有裸名字，tsup 默认去前缀会把它变成
+  import 一个叫 `sqlite` 的第三方包）
 - C2 Envelope 校验（[message-service.md](docs/design/message-service.md) §3 那张表的每一条）
 - C3 Auth：`origin_proof` 验签 + `keyid` 归属 + `authentication` 授权
 - C4 幂等（事务内写消息 + 幂等记录），含 DID 取代时的精确重放
