@@ -10,7 +10,8 @@ dist/
 # attachment object store
 objects/
 
-# VitePress：构建产物 .vitepress/dist 已被上面的 dist/ 覆盖，缓存目录没有
-.vitepress/cache/
+# VitePress：构建产物 .vitepress/dist 已被上面的 dist/ 覆盖，缓存目录没有。
+# 站点在 vercel/ 下，所以要按任意层级匹配，不能钉在仓库根。
+**/.vitepress/cache/
 
 .DS_Store

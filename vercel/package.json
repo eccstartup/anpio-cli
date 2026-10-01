@@ -1,0 +1,21 @@
+{
+  "name": "@agentx/docs",
+  "version": "0.0.0",
+  "private": true,
+  "description": "AgentX documentation site: a bilingual VitePress site deployed to Vercel.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "docs:dev": "vitepress dev",
+    "docs:build": "vitepress build",
+    "docs:preview": "vitepress preview"
+  },
+  "devDependencies": {
+    "mermaid": "^11.6.0",
+    "vitepress": "^1.6.4",
+    "vitepress-plugin-mermaid": "^2.0.17"
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  }
+}

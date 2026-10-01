@@ -26,15 +26,14 @@
     "test:core": "npm run test --workspace @agentx/core",
     "test:cli": "npm run test --workspace @agentx/cli",
     "test:service": "npm run test --workspace @agentx/service",
-    "docs:dev": "vitepress dev",
-    "docs:build": "vitepress build",
-    "docs:preview": "vitepress preview"
+    "docs:dev": "npm --prefix vercel run docs:dev",
+    "docs:build": "npm --prefix vercel run docs:build",
+    "docs:preview": "npm --prefix vercel run docs:preview"
   },
   "devDependencies": {
     "@types/node": "^26.4.1",
     "tsup": "^8.0.0",
     "typescript": "^5.0.0",
-    "vitepress": "^1.6.4",
     "vitest": "^5.0.0"
   },
   "engines": {
