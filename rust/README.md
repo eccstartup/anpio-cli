@@ -137,7 +137,7 @@ cargo run --manifest-path rust/Cargo.toml -- discover http://127.0.0.1:8787
   `message/stream.rs` 是传输（地址推导 + WebSocket 拆成读写两条任务），`message/listen.rs`
   是状态机。游标在服务端按 `(owner_did, device_id)` 存，`stream.ack` 是唯一写入者；
   Ctrl-C 退出 0，掉线按 2s→30s 退避重连；`--once` 只补拉。
-- **`group create | info | members | join | leave | send | update-profile`** —— P4 `anp.group.base.v2`。
+- **`group create | info | members | join | leave | send | update-profile | set-remark`** —— P4 `anp.group.base.v2`。
   `src/group.rs` 放策略逻辑（§7.1 的推荐策略、`--policy` 的浅合并、封闭集合校验）。
   `update-profile --name` 改的是**群自己的名字** `group_profile.display_name`（§7.4），
   正文是 `group_profile_patch`（RFC 7386 合并，§8.7.2），要走 `permissions.update_profile`——
@@ -152,6 +152,16 @@ cargo run --manifest-path rust/Cargo.toml -- discover http://127.0.0.1:8787
   （协议里根本没有昵称，见 `me show | set` 那条）。所以对端主机不是 awiki 时，这个成员就
   退回只出 DID，末尾打一行 `note: N member(s) could not be named`——**不是失败**，
   可执行的那一半（DID）照样在。
+  **`set-remark` 是同一件事的另一半**（TODO6 §4.2）：`update-profile --name` 写的是**群自己的**
+  名字，存在群的主机上、对所有人一样；`set-remark <group_did> <名字>` 起的是**只有我看得见**的
+  那个，存进服务里另一张表（`x_agentx.group_remarks.v1`，`docs/design/message-service.md` §9.5），
+  `group info` 把它印在 `name:` 的下一行。
+  **两本书不合并**：通讯录是"`msg send --to` 能到谁"，键的另一头是一个 agent；并进一本书就会让
+  一个名字解析成群 DID，再让 `msg send --to <那个名字>` 把消息投进一个群读不了的邮箱。
+  表的键是 `group_did` 本身、不是 `subject`——群 DID 是本服务命名空间里的 `did:web:…:g:<id>`，
+  不含钥指纹、也不会轮换（`subject_of` 在它身上是恒等函数），这是它和通讯录表唯一的结构分歧。
+  `--clear` 是同一个动词的取反（对照 `contacts add --clear-remark`，不为清空另开一条子命令），
+  服务**不检查**这个群是否托管在本机——"记得一个联邦那头的群"恰恰是本地这本册子该管的事。
   **端到端要打本仓的 `packages/service`**：本机 awiki host 对 `group create` 回 HTTP 401，
   是它自己不许 public RPC 建群的策略（`group.remote_create_not_allowed`），
   详见 [TODO5.md](../TODO5.md) §6 Phase 1。

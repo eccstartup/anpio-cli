@@ -107,6 +107,14 @@ pub const CONTACTS_LIST: &str = "contacts.list";
 pub const CONTACTS_PUT: &str = "contacts.put";
 pub const CONTACTS_REMOVE: &str = "contacts.remove";
 
+/// TODO6 §4.2: the same address book's other half — the name this identity gives a *group*.
+/// A separate family with a separate Profile (§9.5), because a group is `group`-addressed
+/// and not something `msg send --to` can reach: folding the two books together would let a
+/// name resolve to a group DID and a message be sent to a mailbox no group can read.
+pub const GROUP_REMARKS_LIST: &str = "group_remarks.list";
+pub const GROUP_REMARKS_PUT: &str = "group_remarks.put";
+pub const GROUP_REMARKS_REMOVE: &str = "group_remarks.remove";
+
 /// The pick-up surface's Profile. P1 §6.2.2 makes `meta.profile` MUST and calls it "the
 /// single Profile this request is to be read under", so a read request has to name one —
 /// and no normative Profile interprets `inbox.get`. The `x_` prefix is the namespace P1
@@ -114,11 +122,12 @@ pub const CONTACTS_REMOVE: &str = "contacts.remove";
 /// service advertises as its specification conformance.
 ///
 /// One Profile per family, not one for all extensions: the service advertises them separately
-/// (`x_agentx.inbox.v1` and `x_agentx.contacts.v1` are two entries in
-/// `capabilities.extensionProfiles`), and a client that named the wrong one would be asking to
-/// be read under a Profile that does not define the method.
+/// (`x_agentx.inbox.v1`, `x_agentx.contacts.v1` and `x_agentx.group_remarks.v1` are three
+/// entries in `capabilities.extensionProfiles`), and a client that named the wrong one would
+/// be asking to be read under a Profile that does not define the method.
 pub const INBOX_PROFILE: &str = "x_agentx.inbox.v1";
 pub const CONTACTS_PROFILE: &str = "x_agentx.contacts.v1";
+pub const GROUP_REMARKS_PROFILE: &str = "x_agentx.group_remarks.v1";
 
 // ---- the outbound network policy ---------------------------------------------
 

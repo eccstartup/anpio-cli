@@ -157,6 +157,28 @@ fn adding_something_that_is_not_a_did_is_refused_before_any_identity() {
     );
 }
 
+/// `group set-remark` says nothing without a name or `--clear`, and the two are exclusive —
+/// so an empty name and a name-with-`--clear` are both refused by the parser, before any
+/// identity is opened. That is what makes them checkable here at all.
+#[test]
+fn a_group_remark_must_be_either_a_name_or_a_clear() {
+    let home = Home::new("group-remark-shape");
+    let bare = run(&home, &["group", "set-remark", "did:web:example.com:g:x"]);
+    assert_eq!(bare.status.code(), Some(2), "clap's usage-error exit code");
+
+    let both = run(
+        &home,
+        &["group", "set-remark", "did:web:example.com:g:x", "Team", "--clear"],
+    );
+    assert_eq!(both.status.code(), Some(2));
+
+    assert!(
+        files_under(&home.0).is_empty(),
+        "a refusal came after opening a store: {:?}",
+        files_under(&home.0)
+    );
+}
+
 /// The one command that is answerable with nothing set up at all.
 #[test]
 fn version_is_always_answerable() {

@@ -15,6 +15,7 @@ use agentx::contacts::{
     unknown_name_error, Contact, Lookup, RosterNames,
 };
 use agentx::group::{group_target, policy_of, service_target};
+use agentx::group_remarks::{book_from_json as group_remarks_from_json, GroupRemark};
 use agentx::group_receive::GroupReceiver;
 use agentx::group_e2ee::{
     add_body, create_body, get_key_package_body, publish_body, remove_body, send_body,
@@ -41,7 +42,8 @@ use agentx::message::{
     CORE_BINDING, DIRECT_PROFILE, DIRECT_SEND, DID_SUPERSEDED,
     GET_CAPABILITIES, GET_KEY_PACKAGE, GROUP_CREATE, GROUP_E2EE_ADD, GROUP_E2EE_CREATE,
     GROUP_E2EE_PROFILE, GROUP_E2EE_REMOVE, GROUP_E2EE_SEND, GROUP_GET_INFO, GROUP_JOIN,
-    GROUP_LEAVE, GROUP_PROFILE, GROUP_SEND, GROUP_UPDATE_PROFILE, INBOX_GET, INBOX_MARK_READ,
+    GROUP_LEAVE, GROUP_PROFILE, GROUP_REMARKS_LIST, GROUP_REMARKS_PROFILE, GROUP_REMARKS_PUT,
+    GROUP_REMARKS_REMOVE, GROUP_SEND, GROUP_UPDATE_PROFILE, INBOX_GET, INBOX_MARK_READ,
     INBOX_PROFILE, MESSAGE_GET_BATCH, PUBLISH_KEY_PACKAGE, TRANSPORT_PROTECTED,
 };
 use agentx::mls::{
@@ -759,6 +761,34 @@ enum GroupCommand {
         #[command(flatten)]
         own: OwnIdentity,
     },
+    /// Name a group, as you call it — or drop the name.
+    ///
+    /// Not the group's own name: that is `group_profile.display_name`, set by
+    /// `group update-profile`, and every member sees it. This is the opposite — the name only
+    /// you see, which the protocol has no place for and ought not, since it is your memory
+    /// rather than a fact about the group (TODO6 §4.2).
+    ///
+    /// It lives beside the address book, in the service's own store, partitioned by the
+    /// verified signer, so one identity's names are invisible to another's — and it is a
+    /// different book from the address book, because a contact is something `msg send --to`
+    /// can reach and a group is not.
+    ///
+    /// `group info` prints it back as `remark:`. `--clear` forgets it: a name is the only
+    /// thing this stores, so there is no row left behind to keep.
+    SetRemark {
+        #[arg(value_name = "GROUP_DID")]
+        group_did: String,
+        /// What to call the group.
+        #[arg(value_name = "REMARK", required_unless_present = "clear")]
+        remark: Option<String>,
+        /// Forget the name. The explicit form of the other half of this command.
+        #[arg(long, conflicts_with = "remark")]
+        clear: bool,
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        own: OwnIdentity,
+    },
     /// End-to-end encryption for groups (P6 `anp.group.e2ee.v2`).
     ///
     /// A subfamily rather than six more `group` verbs: P6 is a different Profile with its own
@@ -1127,6 +1157,13 @@ async fn main() -> anyhow::Result<()> {
                 json,
                 own,
             } => cmd_group_update_profile(&own, &group_did, &name, json, &allow_private).await,
+            GroupCommand::SetRemark {
+                group_did,
+                remark,
+                clear,
+                json,
+                own,
+            } => cmd_group_set_remark(&own, &group_did, remark, clear, json, &allow_private).await,
             GroupCommand::E2ee { command } => match command {
                 GroupE2eeCommand::Publish {
                     key_package_id,
@@ -3331,8 +3368,98 @@ async fn cmd_group_info(
         let (roster_names, unfetched) = member_names(own, &client, &result, names, allow_private).await?;
         report_roster(&result, &roster_names, unfetched)?;
     } else {
-        report_group_info(&result);
+        let remark = group_remark_for(own, &client, group_did, allow_private).await?;
+        report_group_info(&result, remark.as_deref());
     }
+    Ok(())
+}
+
+/// What I call this group, or `None` (TODO6 §4.2).
+///
+/// One read of my own book, and only on the way to the human rendering: `--json` stays the
+/// service's own answer, the same rule `group members` follows for its names. The lookup is
+/// by the group DID, which is the row's key — a group DID carries no key fingerprint, so
+/// unlike a peer there is no second spelling for it to drift to (§9.5).
+async fn group_remark_for(
+    own: &OwnIdentity,
+    client: &reqwest::Client,
+    group_did: &str,
+    allow_private: &[String],
+) -> anyhow::Result<Option<String>> {
+    // `group_remarks.list` is self-addressed, so this needs a channel to **my** service — the
+    // channel `cmd_group_info` already holds is addressed to the group.
+    let identity = Identity::load(&own.location()?)?;
+    let channel = open_channel(client, &identity, allow_private).await?;
+    let result = call_extension(
+        client,
+        &channel,
+        GROUP_REMARKS_LIST,
+        GROUP_REMARKS_PROFILE,
+        Map::new(),
+    )
+    .await?;
+    let book = group_remarks_from_json(&result)?;
+    Ok(book
+        .into_iter()
+        .find(|row| row.group_did == group_did)
+        .map(|row| row.remark))
+}
+
+/// Name a group, or drop the name (TODO6 §4.2).
+///
+/// Two wires, one command: a remark goes to `group_remarks.put`, `--clear` to
+/// `group_remarks.remove`. The row holds nothing but the name, so "forget it" is the whole
+/// of what removal can mean here — there is no entry left behind to keep, unlike
+/// `contacts remove`, which drops a peer the book might otherwise still recognise.
+async fn cmd_group_set_remark(
+    own: &OwnIdentity,
+    group_did: &str,
+    remark: Option<String>,
+    clear: bool,
+    json: bool,
+    allow_private: &[String],
+) -> anyhow::Result<()> {
+    let (client, channel) = own_channel(own, allow_private).await?;
+
+    if clear {
+        let mut body = Map::new();
+        body.insert("group_did".to_string(), json!(group_did));
+        let result =
+            call_extension(&client, &channel, GROUP_REMARKS_REMOVE, GROUP_REMARKS_PROFILE, body).await?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            return Ok(());
+        }
+        if result.get("removed").and_then(Value::as_bool) != Some(true) {
+            // Honest rather than silent: nothing was named, so there was nothing to forget.
+            println!("{group_did} had no remark");
+            return Ok(());
+        }
+        println!("forgot the remark for {group_did}");
+        return Ok(());
+    }
+
+    let Some(remark) = remark else {
+        // clap makes one of the two required, so this is unreachable through the parser; it
+        // exists so the function cannot quietly send a body the service would refuse.
+        anyhow::bail!("pass a remark, or --clear to forget one")
+    };
+    if remark.is_empty() {
+        anyhow::bail!("a remark cannot be empty; --clear is how one is dropped")
+    }
+
+    let mut body = Map::new();
+    body.insert("group_did".to_string(), json!(group_did));
+    body.insert("remark".to_string(), json!(remark));
+    let result = call_extension(&client, &channel, GROUP_REMARKS_PUT, GROUP_REMARKS_PROFILE, body).await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+    let stored = result.get("group_remark").map(GroupRemark::from_json).transpose()?;
+    let name = stored.map(|row| row.remark).unwrap_or(remark);
+    println!("{name}\t{group_did}");
     Ok(())
 }
 
@@ -4182,11 +4309,20 @@ fn report_group_created(result: &Value) -> anyhow::Result<()> {
 
 /// §8.2.3. `member_count` is a decimal string there and is printed as it arrived rather than
 /// parsed — it is the peer's number, and rounding it would be this CLI inventing a fact.
-fn report_group_info(result: &Value) {
+///
+/// `remark` is the one line here that did **not** come from the service's answer: it is what
+/// this identity calls the group (TODO6 §4.2), read from its own book and passed in. It is
+/// printed next to `name:` because the pair is the whole point — `name:` is the group's own
+/// name and every member sees it, `remark:` is mine alone, and a reader who confuses them
+/// would think the first had no local override.
+fn report_group_info(result: &Value, remark: Option<&str>) {
     field("group:", result.get("group_did"));
     field("state version:", result.get("group_state_version"));
     if let Some(profile) = result.get("group_profile").and_then(as_row) {
         field("name:", profile.get("display_name"));
+        if let Some(remark) = remark {
+            field("remark:", Some(&Value::String(remark.to_string())));
+        }
         field("description:", profile.get("description"));
         field("discoverability:", profile.get("discoverability"));
     }
