@@ -39,9 +39,13 @@ pin 为准**，源码阅读用 `git show origin/release/0929:rust/...`。
 ## 现在有什么
 
 store 根是 `AGENTXCLI_HOME`（缺省 `~/.agentx-cli`），一条身份由 `--agent` / `--profile`
-命名。`cargo test` 全绿（78 个单测）。
+命名——两个都可以不写：`--agent` > `$AGENTXCLI_AGENT` > 当前 agent（`agent use` 选的）>
+`default`，`--profile` > `$AGENTXCLI_PROFILE` > `default`。`cargo test` 全绿（95 个单测）。
 
 - **`did create | show | register`** —— 身份存储 + DID 文档。
+- **`agent show | use | list`** —— 本机现在是谁（当前 agent 存在 store 根的一个文件里，
+  所以是整机范围而不是单进程）。`use` 允许点名一个还没存身份的 agent——先选 agent、
+  再造它的钥，正是一个新 agent 出生的顺序——但会说出来。
 - **`discover <endpoint>`** —— `anp.get_capabilities` 是唯一不需要 auth 的方法（P1 §8.2），
   所以它不需要身份，也就成了最省的"端点活着吗、说的是这个协议吗"检查。端点只给主机时
   自动补 `/anp-im/rpc`。
@@ -95,5 +99,5 @@ cargo run --manifest-path rust/Cargo.toml --example phase0_key_package -- /tmp/a
 
 ## 还没有
 
-身份这块的换钥 / 换设备 / `update_document`；`group e2ee` 的收包路径
-（`process_welcome_v2` / `process_commit_v2`，靠 `msg listen` 投递驱动）。顺序见 TODO5 §6 的 Phase 3。
+`did` 剩下的三条（`resolve` / `update` / `restore`）、`anp` 一族（`show` / `login` / `sign`）、
+`version`，以及身份这块的换钥 / 换设备 / `update_document`。顺序见 TODO5 §6 的 Phase 3。

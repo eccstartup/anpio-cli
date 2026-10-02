@@ -95,8 +95,8 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 **每条带一个状态签**（2026-10-02）：`[已落]` / `[部分]` / `[未动]`。
 
 1. **[部分]** **CLI 参数 / 帮助 / 渲染**（~1600 行）：1193 行的命令表 + 渲染层。机械，但量在那儿。
-   已落骨架与 `did`（3 条）/`msg`（6 条）/`group`（6 条 + `e2ee` 3 条）/`discover` 的面；
-   `anp` / `agent` / `version` 未动。
+   已落骨架与 `did`（3 条）/`msg`（6 条）/`group`（6 条 + `e2ee` 3 条）/`agent`（3 条）/`discover` 的面；
+   `anp` / `version` 未动。
 2. **[部分]** **身份存储**（~1200 行）：含 **Ethereum keystore V3**（scrypt + aes-128-ctr + keccak256）与
    **EIP-1193 web3 钱包路径**——`--wallet web3` 是 CLI 的一等路径。
    已落的是**自定格式**那一半（§0.1 第 1 条把两个客户端分开了），keystore V3 / web3 未动。
@@ -509,6 +509,22 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 - **未做**：身份这块还剩 "换钥/换设备/`update_document`"。
 - 先落 **`msg`** 一族（含 `msg listen` 常驻契约），因为它是 §4 消息库的入口。
   → [x] ~~已落~~
+- **`agent` 一族已落（2026-10-02）**（`show` / `use` / `list`）。它不只是三条命令：它给
+  `--agent` / `--profile` 换了一条**解析链**——`--agent` > `$AGENTXCLI_AGENT` > 当前 agent >
+  `default`——所以之前**每个**旗标都钉死在字面量 `default` 的日子结束了，一份 store 里放多个
+  agent 不再需要每条命令都手打 `--agent`。三处值得记：
+  （a）**当前 agent 在旗标与环境变量之下**。`agent use` 写的是一台机器上的"我现在是谁"，
+  而 `--agent` / `$AGENTXCLI_AGENT` 是**一次调用**说的，脚本点名了 agent 就不该被 store 里
+  躺着的一个选择改道。它在**默认值之上**——TS 那条链的最后一步是"从别的工具的环境变量里猜"
+  （marker detection），本客户端没有那套 marker，而**猜**是唯一可能悄悄选错身份的一步，所以这条
+  链止于 `default`。
+  （b）**`did create` 故意不走这条链**：它命名的是一个**新的**身份，当前选中谁不该决定第二个
+  身份写在哪。它的 `--agent` 仍然回落到 handle，与从前一样。
+  （c）**两个名字都在入口处验成单个路径段**（`assert_segment`）：agent id 与 profile 名都会变成
+  目录名，而 `.` / `..` 是能过字符集检查的，所以边界在这里拦，不留给 `join()` 去踩。
+  `agent use` 接受一个还没存身份的 id（先选 agent、再造它的钥，正是一个新 agent 出生的顺序），
+  但会**说出来**；`agent list` 也把这种选择打出来。`Identity::load` 的"没有身份"那条错误现在
+  会点出 `agent list` / `agent use`，因为回答它的正是这两条。
 - **与 TS `connectx` 并存**，`CONNECTX_HOME` 的处理见 §8-F。
 
 **Phase 2 —— 消息库**（还没动）
@@ -528,7 +544,7 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 - [ ] 身份：换钥 / 换设备 / `update_document`
 - [ ] `did` 剩下的三条：`resolve` / `update` / `restore`
 - [ ] `anp` 一族：`show` / `login` / `sign`
-- [ ] `agent` 一族：`show` / `use` / `list`
+- [x] ~~`agent` 一族：`show` / `use` / `list`~~（2026-10-02；含 `--agent` 的解析链，见 §6）
 - [ ] `version`
 
 **Phase 4 —— 覆盖与收束**（还没动）
