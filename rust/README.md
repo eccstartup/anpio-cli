@@ -197,6 +197,68 @@ cargo run --manifest-path rust/Cargo.toml -- discover http://127.0.0.1:8787
 cargo run --manifest-path rust/Cargo.toml --example phase0_key_package -- /tmp/agentx-spike
 ```
 
+### 约定（每条命令都适用）
+
+上面那些是**为什么**；从这里往下是**怎么用**：先一次说清所有命令共有的东西，再逐族列旗标
+与默认值。`agentx-cli <族> --help` / `agentx-cli <族> <子命令> --help` 打印同一份东西。
+
+| 旗标 | 作用 |
+| --- | --- |
+| `--allow-private-host <host>` | 把一个**不以 loopback 拼法出现**的本地主机当成"本机"。`localhost` / `127.0.0.1` / `::1` 已经算本机，不需要它；它管的是"是本机但没这么拼"（一个 LAN 地址、一个往里解析的名字）。放行之后**同时**允许私网地址与明文 `http`（ANP-02 的 TLS 要求针对真部署，本机开发服务器是它存在的理由）。 |
+| `--json` | stdout 变成机读：多数命令一个 JSON 对象，`msg listen` 是每行一个（[realtime.md](../docs/design/realtime.md)）。状态、进度与错误**始终**走 stderr，所以 `> file` 拿到的是纯结果。 |
+
+**身份怎么选。** `--agent` > `$AGENTXCLI_AGENT` > 当前 agent（`agent use` 选的）> `default`；
+`--profile` > `$AGENTXCLI_PROFILE` > `default`。**`did create` 是唯一不走这条链的**：它造的是
+**新的**身份，"谁当前被选中"不该决定第二份身份写在哪，所以缺省用 `--handle`。
+
+**退出码。** 0 成功、1 失败，只有 `did resolve` 例外——它按**答案**而不是按成败给码：
+**2** 这份文档已不是当前（链走过了，或是退役声明），**3** 更新链没验过，**0** 当前；
+取不到文档是普通失败，给 1。
+
+**失败长什么样。** stderr 上一行 `Error: <稳定码>: <人话>`，退出 1。稳定码与 TS 客户端的
+`ConnectxError.code` **同一套拼写**（`message_invalid` / `message_send_failed` /
+`unsupported_extension` / `did_resolve_blocked` / `message_service_not_found` …），
+所以脚本按它分支，不必解析人话。
+
+### `did` 与 `agent`
+
+| 命令 | 位置参数 | 旗标（默认值） |
+| --- | --- | --- |
+| `did create` | — | `--host <URL>`（必填）、`--handle <NAME>`（必填）、`--agent`（缺省=handle）、`--profile`（`default`） |
+| `did show` | — | `--agent`、`--profile`、`--json` |
+| `did list` | — | `--json` |
+| `did register` | — | `--agent`、`--profile` |
+| `did publish` | — | `--agent`、`--profile`、`--json` |
+| `did update` | — | `--target <URI>` 与 `--resume` **二选一**（都给、都不给都拒）、`--json` |
+| `did resolve` | `<DID>` | `--chain`、`--json` |
+| `did restore` | — | —（调用即以 1 退出） |
+| `agent show` | — | `--json` |
+| `agent use` | `<ID>` | `--json` |
+| `agent list` | — | `--json` |
+
+失败时说什么（挑不显然的，其余都是 `Error: <码>: <人话>` 那一句）：
+
+- **`did publish` 没有可用 token**：退出 1，并把回程路写出来：
+
+  ```text
+  no usable access token for <host> — run `agentx-cli did register --agent <agent>` or `agentx-cli anp login --target …`
+  ```
+
+  token 就在 `session.json` 里（`did create` / `did register` / `anp login` 都会写它）；
+  删掉这个文件，等于"register 这一步从没发生过"。
+- **`did create` 注册失败**（handle 已被占、主机不通…）：退出 1，并且**明说身份已经落盘**——
+  `the identity was saved, but publishing it failed: …` 加一行 `retry with: agentx-cli did
+  register --agent <agent>`。所以本地那半是好的：目录在、DID 不在，`did list` 如实写
+  `not registered`（那个命令存在的理由就是这个状态），补一次 `did register` 即可。
+- **`did update` 的两种拒绝**：`--resume` 与 `--target` 一起给 → `--resume settles an update
+  that was already attempted, so it takes no --target`；两个都不给 → `missing --target: …`。
+  另有一条更重的：本地**已经暂存了一个后继钥**时再要投一次新的，会被拒而不是覆盖——
+  那次投递的结果不知道，暂存的那个可能是 DID 已经搬过去的那把钥的**唯一**副本。
+- **`did restore`**：一律退出 1，并且说清**什么都没读、什么都没恢复**。`anp` 没有恢复路径，
+  更新链只往前推（ANP-03 §2.5.3）——这是"明说的拒绝"，不是缺实现。
+- **`did resolve <did>` 不带 `--chain`，而文档已被取代**：照常打印文档，然后**退出 2**，
+  并提示 `--chain`。取代的文档是**证据**，不是错误。
+
 ## 还没有
 
 Phase 2 的消息库（`messages.db`，TODO5 §4）；以及 Phase 4 的覆盖与收束——本仓的
