@@ -2,7 +2,8 @@
 
 [TODO5.md](../TODO5.md) 落地的那个客户端。**与服务端分开**：`packages/service` 继续是 TS 的
 ANPMessageService，`packages/cli` 是旧的 TS 客户端（冻结，见 TODO5 §0.1 第 5 条），
-这一份是新的。**它也有自己的 store 根**，不碰 `CONNECTX_HOME`（TODO5 §0.1 第 1 条）。
+这一份是新的。**它也有自己的 store 根**（`AGENTXCLI_HOME`，缺省 `~/.agentx-cli`），
+不碰 TS 客户端的 `~/.connectx/`（TODO5 §0.1 第 1 条）。
 
 ## 为什么在这里、为什么是 Rust
 

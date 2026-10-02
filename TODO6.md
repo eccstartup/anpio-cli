@@ -99,9 +99,14 @@
       skill 改讲 `agentx-cli` 之后就对错了账本；现在在
       `rust/crates/agentx-cli/tests/cli_surface.rs` 里**跑真二进制**校验每条逐字调用与旗标。
       `help.test.ts` 只留三条门禁；`docs/design/cli.md` 记了这次搬运。
-- [ ] `docs/design/cli.md` §8 的存储布局：现在是 `~/.connectx/` + `key.json`（keystore V3），
+- [x] **`docs/design/cli.md` §8 的存储布局**：现在是 `~/.connectx/` + `key.json`（keystore V3），
       与 Rust 的 `~/.agentx-cli/<agent>/<profile>/{identity.json,session.json}` **不同**。
       要么写两段，要么写一段并把差异点名。
+      —— 2026-10-02 完成（`d565369`）：**一段名字、差异点名**。冻结的 `connectx` 那棵树保留，
+      旁边摆上 `agentx-cli` 的（`identity.json` / `session.json` / `successor.json` / `mls/` +
+      `current-agent`），并点出两处**实质**差异：私钥在 `identity.json` 里（PEM、0600）而不是
+      单独的加密 V3 keystore（口令那套旗标在 Rust 侧不存在）；暂存后继钥叫 `successor.json`。
+      `mls/` 只有 Rust 侧有（P6）。
 - [x] ~~**`did publish` 与 `me` 还没有任何用户文档。**~~ 它们不在 `cli.md` §3 的命令面里
       （那节列的是 `connectx`），也不在文档站上。文档要跟上。
       —— 2026-10-02 完成：`rust/README.md` 的 `did`/`me` 条（`b24f14d` 起）已逐条写清
@@ -117,8 +122,12 @@
       的 `group` 条里。**§4 的"群的本地备注"也已落地**（service 侧 `cf4b7dd`… 之后的
       `5f979c0`，CLI 侧 `c2059f6`），文档同批：`docs/design/message-service.md` §9.1/§9.5/§13
       + `rust/README.md` 的 `group` 条。§4 只剩"我在群里的昵称"一条，已裁定**以后做**。
-- [ ] `TODO5.md` §6 里那些"端到端跑过"的记录**是历史，不是说明**。参考页要能独立站住，
+- [x] ~~`TODO5.md` §6 里那些"端到端跑过"的记录**是历史，不是说明**。~~ 参考页要能独立站住，
       不能要求读者先去读一份 TODO。
+      —— 2026-10-02 完成：参考层（`rust/README.md` 的 `### 约定` 往下 + 文档站两页）**不引任何
+      TODO**，逐条表与"失败时说什么"引的都是真跑出来的输出，能独立读；上面那层"为什么"散文仍
+      指 TODO5 §6，那是**刻意的**——它讲的是来历与取舍，不是使用说明。顺带把开头那句
+      `CONNECTX_HOME` 改成实际的环境变量名 `AGENTXCLI_HOME`。
 
 ---
 
