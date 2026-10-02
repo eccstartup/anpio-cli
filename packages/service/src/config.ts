@@ -30,6 +30,11 @@ const DEFAULT_DB = './agentx.db'
 const DEFAULT_PREKEY_BURST = 60
 const DEFAULT_PREKEY_PER_MINUTE = 60
 
+/** P6 §12.6 的两条有界保留闸门的缺省：与 `deviceQueue.ts` 原先内联的值一致——8 次尝试、
+ *  24 小时在队时长。§12.6 只要求上限是"显式、由部署声明"的，数值是本实现声明的。 */
+const DEFAULT_DEVICE_QUEUE_MAX_ATTEMPTS = 8
+const DEFAULT_DEVICE_QUEUE_MAX_AGE_MS = 24 * 60 * 60_000
+
 export interface ListenAddress {
   host: string
   port: number
@@ -49,6 +54,20 @@ export interface DidResolution {
   /** 本地联调才设的一对豁免：这些主机免掉"解析到私有地址"与"必须走 https"两道闸。 */
   allowPrivateHosts?: string[]
   allowInsecureTransport?: string[]
+}
+
+/**
+ * P6 §12.6 的两条**有界保留**闸门（[e2ee-group.md](design/e2ee-group.md) §6.2）。
+ *
+ * 规范只要求上限是"显式、由部署声明"的，没有给数值，所以两个都能配。它们**只**管
+ * `device_envelopes` 那条设备队列：P4 outbox 的那两条（`delivery/worker.ts`）是另一张表、
+ * 另一套数值，不在这里。
+ */
+export interface DeviceQueue {
+  /** 单条设备信封最多尝试几次，到顶丢弃。 */
+  maxAttempts: number
+  /** 单条设备信封最多在队里待多久（毫秒），超龄在投递前扫掉。 */
+  maxAgeMs: number
 }
 
 export interface Config {
@@ -91,6 +110,8 @@ export interface Config {
    * 取：发布是偶发的（一天几次），领取是每个对端建链一次。见 `rpc/rateLimit.ts` 的文件头。
    */
   prekeyRate: { burst: number; perMinute: number }
+  /** P6 §12.6 的两条有界保留闸门，做成部署档位。 */
+  deviceQueue: DeviceQueue
 }
 
 /** `host:port`, with the host allowed to be an IPv6 literal in brackets. The port is
@@ -255,6 +276,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     prekeyRate: {
       burst: parsePositive(env.AGENTX_PREKEY_BURST, 'AGENTX_PREKEY_BURST', DEFAULT_PREKEY_BURST),
       perMinute: parsePositive(env.AGENTX_PREKEY_PER_MINUTE, 'AGENTX_PREKEY_PER_MINUTE', DEFAULT_PREKEY_PER_MINUTE),
+    },
+    deviceQueue: {
+      maxAttempts: parsePositive(
+        env.AGENTX_DEVICE_QUEUE_MAX_ATTEMPTS,
+        'AGENTX_DEVICE_QUEUE_MAX_ATTEMPTS',
+        DEFAULT_DEVICE_QUEUE_MAX_ATTEMPTS,
+      ),
+      maxAgeMs: parsePositive(
+        env.AGENTX_DEVICE_QUEUE_MAX_AGE_MS,
+        'AGENTX_DEVICE_QUEUE_MAX_AGE_MS',
+        DEFAULT_DEVICE_QUEUE_MAX_AGE_MS,
+      ),
     },
   }
   if (env.AGENTX_KEY_FILE !== undefined && env.AGENTX_KEY_FILE !== '') {

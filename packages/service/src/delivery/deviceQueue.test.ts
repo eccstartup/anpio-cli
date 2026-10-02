@@ -387,6 +387,55 @@ describe('retention is bounded (§12.6)', () => {
     expect(h.logs.some((line) => line.includes('retention bound'))).toBe(true)
   })
 
+  it('takes both bounds from Config when no worker option overrides them (A5)', async () => {
+    // 有界保留是部署档位：不传 maxAttempts / maxQueueAgeMs 时，worker 取 config.deviceQueue。
+    const build = (env: NodeJS.ProcessEnv, locateOptions: LocateOptions): { storage: Storage; logs: string[]; worker: ReturnType<typeof createDeviceQueueWorker>; at: (ms: number) => void } => {
+      const storage = openStorage({ path: ':memory:' })
+      const logs: string[] = []
+      let clock = NOW.getTime()
+      const worker = createDeviceQueueWorker({
+        config: loadConfig(env),
+        storage,
+        registry: createSubscriberRegistry(),
+        locator: locatorOf([PEER]),
+        locateOptions,
+        log: (line) => logs.push(line),
+        now: () => new Date(clock),
+        baseBackoffMs: 1000,
+        maxBackoffMs: 60_000,
+        random: () => 0,
+      })
+      return { storage, logs, worker, at: (ms) => { clock = ms } }
+    }
+
+    const attempts = build({ AGENTX_DEVICE_QUEUE_MAX_ATTEMPTS: '2' }, policy(async () => new Response('', { status: 503 })))
+    seedLeaf(attempts.storage, ALICE, ALICE_DEVICE)
+    attempts.storage.enqueueDeviceEnvelope({
+      recipientDid: ALICE, recipientDeviceId: ALICE_DEVICE, groupDid: GROUP, kind: 'incoming',
+      envelopeJson: envelope(ALICE_DEVICE), attempts: 0, nextAttemptAt: NOW.toISOString(), enqueuedAt: NOW.toISOString(),
+    })
+    await attempts.worker.runOnce()
+    attempts.at(NOW.getTime() + 60_000)
+    await attempts.worker.runOnce()
+    expect(queued(attempts.storage)).toEqual([])
+    expect(attempts.logs.some((line) => line.includes('dropped') && line.includes('2 attempts'))).toBe(true)
+
+    let delivered = false
+    const age = build({ AGENTX_DEVICE_QUEUE_MAX_AGE_MS: '1000' }, policy(async () => {
+      delivered = true
+      return new Response('', { status: 200 })
+    }))
+    seedLeaf(age.storage, ALICE, ALICE_DEVICE)
+    age.storage.enqueueDeviceEnvelope({
+      recipientDid: ALICE, recipientDeviceId: ALICE_DEVICE, groupDid: GROUP, kind: 'incoming',
+      envelopeJson: envelope(ALICE_DEVICE), attempts: 0, nextAttemptAt: NOW.toISOString(), enqueuedAt: new Date(NOW.getTime() - 60_000).toISOString(),
+    })
+    await age.worker.runOnce()
+    expect(delivered).toBe(false)
+    expect(queued(age.storage)).toEqual([])
+    expect(age.logs.some((line) => line.includes('retention bound'))).toBe(true)
+  })
+
   it('unblocks the queue behind a discarded head', async () => {
     // 丢弃 MUST NOT 卡住后面的投递：队头超龄被扫掉之后，下一条立刻成为队头并出去。
     const posted: string[] = []

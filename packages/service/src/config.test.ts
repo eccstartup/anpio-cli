@@ -117,6 +117,23 @@ describe('AGENTX_MAX_BODY', () => {
   })
 })
 
+describe('AGENTX_DEVICE_QUEUE_*', () => {
+  it('defaults the two retention gates to 8 attempts and 24h', () => {
+    expect(loadConfig({}).deviceQueue).toEqual({ maxAttempts: 8, maxAgeMs: 24 * 60 * 60_000 })
+  })
+
+  it('takes deployment values', () => {
+    const config = loadConfig({ AGENTX_DEVICE_QUEUE_MAX_ATTEMPTS: '3', AGENTX_DEVICE_QUEUE_MAX_AGE_MS: '60000' })
+    expect(config.deviceQueue).toEqual({ maxAttempts: 3, maxAgeMs: 60_000 })
+  })
+
+  it('treats an empty value as unset and rejects a non-positive integer', () => {
+    expect(loadConfig({ AGENTX_DEVICE_QUEUE_MAX_ATTEMPTS: '' }).deviceQueue.maxAttempts).toBe(8)
+    expect(() => loadConfig({ AGENTX_DEVICE_QUEUE_MAX_ATTEMPTS: '0' })).toThrow(/positive integer/)
+    expect(() => loadConfig({ AGENTX_DEVICE_QUEUE_MAX_AGE_MS: '-1' })).toThrow(/positive integer/)
+  })
+})
+
 describe('optional paths', () => {
   it('are set only when non-empty', () => {
     const set = loadConfig({

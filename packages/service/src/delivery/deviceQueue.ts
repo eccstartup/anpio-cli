@@ -21,7 +21,8 @@
 //      很廉价，每个 tick 重推换"设备一上线就收到"，真正的收尾交给下面那条在队时长闸门。
 //   4. **有界保留**。§12.6 逐字要求保留上限是"显式、由部署声明"的。两条闸门：单条尝试次数
 //      （与 P4 同形，管 HTTP 那头）与单条在队时长（管本地这头也在内的整条队列）。任一触发就
-//      丢弃并记一笔——丢弃是**有意的放弃**，不是成功。
+//      丢弃并记一笔——丢弃是**有意的放弃**，不是成功。两个数值是**部署档位**，来自 Config
+//      （`AGENTX_DEVICE_QUEUE_MAX_ATTEMPTS` / `..._MAX_AGE_MS`，见 `config.ts`），缺省 8 次 / 24 小时。
 //
 // ## 那三条 MUST NOT
 //
@@ -45,14 +46,9 @@ import type { SubscriberRegistry } from '../stream/registry'
 
 /** 一轮最多处理多少条待发。 */
 const DEFAULT_BATCH_SIZE = 20
-/** 同一条最多尝试几次，到顶丢弃。与 P4 的 outbox 同形，同一条理由（P3 §8.4 L477 交给本地策略）。 */
-const DEFAULT_MAX_ATTEMPTS = 8
 const DEFAULT_BASE_BACKOFF_MS = 5_000
 const DEFAULT_MAX_BACKOFF_MS = 5 * 60_000
 const DEFAULT_INTERVAL_MS = 1_000
-/** 一条信封最多在队里待多久。§12.6 要有界的、部署声明的保留上限；一天是本实现声明的值，
- *  不是规范的值。超龄的行在**投递前**扫掉，所以一台卡住的设备不会把自己的队列永久冻住。 */
-const DEFAULT_MAX_QUEUE_AGE_MS = 24 * 60 * 60_000
 
 /** 最终通知在 §12.6 里有专门待遇，所以它是个有名字的取值，不写成裸字符串。 */
 const FINAL_NOTICE = 'final-notice'
@@ -101,11 +97,12 @@ export function createDeviceQueueWorker(options: DeviceQueueOptions): DeviceQueu
   const log = options.log ?? ((line: string): void => void process.stderr.write(`${line}\n`))
   const now = options.now ?? ((): Date => new Date())
   const batchSize = options.batchSize ?? DEFAULT_BATCH_SIZE
-  const maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS
+  // 两条有界保留闸门来自 Config（A5）：数值是部署档位，worker 选项只是让测试能钉住它们。
+  const maxAttempts = options.maxAttempts ?? config.deviceQueue.maxAttempts
   const baseBackoffMs = options.baseBackoffMs ?? DEFAULT_BASE_BACKOFF_MS
   const maxBackoffMs = options.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS
   const intervalMs = options.intervalMs ?? DEFAULT_INTERVAL_MS
-  const maxQueueAgeMs = options.maxQueueAgeMs ?? DEFAULT_MAX_QUEUE_AGE_MS
+  const maxQueueAgeMs = options.maxQueueAgeMs ?? config.deviceQueue.maxAgeMs
   const random = options.random ?? Math.random
 
   /** 第 `attempts` 次失败之后的等待时长（`attempts` 从 1 起）。与 P4 同一条算法与同一条
