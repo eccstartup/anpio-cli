@@ -1,10 +1,10 @@
-//! The command surface, pinned (TODO6 §5.3).
+//! The command surface, pinned (TODO6 §5.3, §7).
 //!
-//! The 143 unit tests all live on the library side — identity storage, JCS hashing, the
+//! The unit tests all live on the library side — identity storage, JCS hashing, the
 //! session cache, policy, envelopes. **The command face itself has almost none**, so a
-//! family can be renamed or dropped and nothing goes red. This file is that missing pin,
-//! and it runs the real binary rather than calling into the library, because what is
-//! being pinned is the argument surface a caller types.
+//! family or a subcommand can be renamed or dropped and nothing goes red. This file is that
+//! missing pin, and it runs the real binary rather than calling into the library, because
+//! what is being pinned is the argument surface a caller types.
 //!
 //! Everything here is answerable **without a service and without a DID host**: a
 //! `--help`, a DID-shaped argument that short-circuits before any store is opened, and
@@ -69,28 +69,95 @@ fn files_under(dir: &Path) -> Vec<PathBuf> {
     found
 }
 
-/// Every family the CLI has answers `--help`.
+/// Every page the CLI has, spelled out — the frozen command surface (TODO6 §7).
 ///
-/// This is the pin itself: drop or rename a family and this goes red, which is the only
-/// thing in the suite that would notice. The list is spelled out rather than derived
-/// from the parser, because a list derived from the parser agrees with the parser by
-/// construction and would pin nothing.
+/// This list is the pin itself. It is written by hand rather than derived from the parser
+/// because a list derived from the parser agrees with the parser by construction and would
+/// pin nothing: the point is that **dropping or renaming a command is a deliberate act**,
+/// which here means editing this list. A family with no subcommands (`discover`, `version`)
+/// appears once, as itself.
+///
+/// Flags are deliberately **not** pinned. They grow with the protocol, and copying every one
+/// of them in here would make each addition a two-file change while catching nothing beyond
+/// "some flag was renamed" — the reference tables in `rust/README.md` are where flags are
+/// documented, and `--help` is what is authoritative.
+const FROZEN_SURFACE: &[&[&str]] = &[
+    &["discover"],
+    &["did"],
+    &["agent"],
+    &["msg"],
+    &["group"],
+    &["anp"],
+    &["contacts"],
+    &["me"],
+    &["version"],
+    &["did", "create"],
+    &["did", "show"],
+    &["did", "list"],
+    &["did", "register"],
+    &["did", "publish"],
+    &["did", "update"],
+    &["did", "resolve"],
+    &["did", "restore"],
+    &["agent", "show"],
+    &["agent", "use"],
+    &["agent", "list"],
+    &["msg", "send"],
+    &["msg", "caps"],
+    &["msg", "inbox"],
+    &["msg", "show"],
+    &["msg", "read"],
+    &["msg", "listen"],
+    &["group", "create"],
+    &["group", "info"],
+    &["group", "members"],
+    &["group", "join"],
+    &["group", "leave"],
+    &["group", "send"],
+    &["group", "update-profile"],
+    &["group", "set-remark"],
+    &["group", "e2ee", "publish"],
+    &["group", "e2ee", "get-key-package"],
+    &["group", "e2ee", "create"],
+    &["group", "e2ee", "add"],
+    &["group", "e2ee", "remove"],
+    &["group", "e2ee", "send"],
+    &["anp", "show"],
+    &["anp", "sign"],
+    &["anp", "login"],
+    &["contacts", "list"],
+    &["contacts", "add"],
+    &["contacts", "set-remark"],
+    &["contacts", "remove"],
+    &["contacts", "resolve"],
+    &["me", "show"],
+    &["me", "set"],
+];
+
+/// Every page in [`FROZEN_SURFACE`] answers `--help`.
+///
+/// The failure this catches is a rename or a removal: nothing else in the suite would notice
+/// one, because the parser and the help renderer are the same source of truth. A red here
+/// says "the surface moved", and the fix is to decide whether it should have — and then to
+/// edit the list, which is the deliberate act the pin exists to force.
 #[test]
-fn every_family_answers_help() {
-    let home = Home::new("families");
-    for family in [
-        "discover", "did", "agent", "msg", "group", "anp", "contacts", "me", "version",
-    ] {
-        let out = run(&home, &[family, "--help"]);
+fn the_frozen_surface_answers_help() {
+    let home = Home::new("frozen-surface");
+    for page in FROZEN_SURFACE {
+        let mut argv: Vec<&str> = page.to_vec();
+        argv.push("--help");
+        let named = page.join(" ");
+
+        let out = run(&home, &argv);
+        let printed = format!("{}{}", text(&out.stdout), text(&out.stderr));
         assert!(
             out.status.success(),
-            "`{family} --help` exited {:?}:\n{}",
-            out.status.code(),
-            text(&out.stderr)
+            "`agentx-cli {named} --help` exited {:?} — the surface moved:\n{printed}",
+            out.status.code()
         );
         assert!(
-            text(&out.stdout).contains("Usage:"),
-            "`{family} --help` printed no usage"
+            printed.contains("Usage:"),
+            "`agentx-cli {named} --help` printed no usage:\n{printed}"
         );
     }
 }
