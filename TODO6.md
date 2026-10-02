@@ -283,7 +283,7 @@ ANP 的定址单位是 **DID**，`msg send --to` 只吃 DID。
 
 | 档 | 含义 | 今天 |
 | --- | --- | --- |
-| **一** | 单测全绿 | ✅ 150 个库侧 + 7 个命令面（`tests/cli_surface.rs`） |
+| **一** | 单测全绿 | ✅ 154 个库侧 + 8 个命令面（`tests/cli_surface.rs`） |
 | **二** | 一个人照文档能手工跑完一条链路 | ✅ `scripts/e2e.sh` 一条命令跑完（`4245d9e`），不再是只有散文的配方 |
 | **三** | **一条命令**跑完全链路，并且 CI 每次 push 都跑 | ✅ `e2e` 这个 job（`e9d14dc`）：`./scripts/e2e.sh`，GitHub 上三个 job 全绿，`e2e` 从头到尾约 70 秒 |
 
@@ -392,13 +392,15 @@ msg * / group * / group e2ee *  ──►  packages/service（本仓，:8787 之
       全是**不需要 DID host** 的那一半——`did publish` 三个分支仍要等 §5.2 的裁定。
       —— 进度二：**要 DID host 的那一半落进了 `scripts/e2e.sh`**（`4245d9e` 起，此后每块
       新命令面都跟着加）：`did create|show|publish`（含 no-op / 改一笔 / 无 token 三个分支）、
-      `me set|show`（含空参拒绝）、`msg send`、`contacts add|resolve`、`group create|info|
-      members|set-remark`、**`group join|leave|update-profile|send`**（2026-10-02 补，此前
-      这四条只有"写过"没有"跑过"）、`group e2ee publish|create|get-key-package|add|send|
-      remove`（2026-10-02 补全，`f6e284c`）——P6 的四条控制方法此前只有手工跑过，现在脚本
-      里也跑，其中"柜子是空的"那条是**以拒绝为预期**的负结果（5000 `key_package_not_found`）。
-      脚本一并记下了 KeyPackage 的**一次性**语义：`get_key_package` 在挑的同时就占住它
-      （§8.2.4 L767 的 MAY），所以"读一枚来断言"与"让 `add` 拿走一枚"是两次消耗。
+      `me set|show`（含空参拒绝）、`msg send`、`msg listen --once`（`80dff85`，
+      投递与读取是两件事）、`msg send --to <名字>` 与其拒绝（同一次）、`contacts add|resolve`、
+      `group create|info|members|set-remark`、**`group join|leave|update-profile|send`**
+      （2026-10-02 补，此前这四条只有"写过"没有"跑过"）、`group e2ee publish|create|
+      get-key-package|add|send|remove`（2026-10-02 补全，`f6e284c`）——P6 的四条控制方法
+      此前只有手工跑过，现在脚本里也跑，其中"柜子是空的"那条是**以拒绝为预期**的负结果
+      （5000 `key_package_not_found`）。脚本一并记下了 KeyPackage 的**一次性**语义：
+      `get_key_package` 在挑的同时就占住它（§8.2.4 L767 的 MAY），所以"读一枚来断言"与
+      "让 `add` 拿走一枚"是两次消耗。
       **还差**：`did update` 与它的 `--resume`、`anp login` 的 401 挑战那条路。这几条各自要
       一台愿意配合的主机或第二个设备，不是能顺手塞进去的。
 - [x] ~~**负结果的测试值得单列。** 这个客户端的正确行为里有好几条"对端不支持时应该怎样"~~
@@ -487,10 +489,26 @@ cargo run --manifest-path rust/Cargo.toml -- me set --agent e2ealice
 - [ ] **本地消息库 `messages.db`**：表结构、游标、与 `mls/` 的分工。（TODO5 §4、§6 Phase 2）
 - [ ] **命令面定稿**：六族 24 条 + `did publish` / `me` + §3、§4 新增的，一起冻结形状。
       （TODO5 §6 Phase 4）
-- [ ] **TS CLI 冻结在某个版本**：`packages/cli` 标冻结，写明从哪个版本起不再加功能。
-      （TODO5 §8-I）
-- [ ] **`packages/e2e` 的既有覆盖**：它现在只测 TS 客户端，是**保持不变**还是**跟着迁移**，
-      要有一条明确的结论。§5.2 只讨论了新客户端的入口，没管这半边。
+- [x] ~~**TS CLI 冻结在某个版本**~~ —— **2026-10-02 结论：没有"某个版本"可钉，因为
+      `@agentx/cli` 从没发布过**（`npm view @agentx/cli` → 404，仓库里没有 tag，
+      `packages/cli/package.json` 停在 `0.0.0`）。所以冻结点就是**这次裁定这个提交**，
+      而"哪个版本起不再加功能"这句话在这里是空的——不存在一个用户手里的旧版本需要被
+      按版本说明。冻结的实际射程按用户 2026-10-02 的原话（「ts的cli暂时不要动，也不加功能」）
+      是**暂时全停**：不加功能，也不为它改代码。写在 `docs/design/cli.md` 的抬头——
+      它是冻结这件事本身的出处，不在 `package.json` 里造一个没有语义的字段。
+- [x] ~~**`packages/e2e` 的既有覆盖**~~ —— **2026-10-02 结论：保持不动，但它现在该被
+      当成"服务侧的跨域 e2e"，不是"客户端的 e2e"。** 量出来的事实：它 `import` 的是
+      `packages/cli/src/commands/*` **源码**（不是 `@agentx/cli` 这个包、也不是二进制），
+      所以它**只能**测 `connectx`——Rust 客户端一旦接棒，它作为客户端 e2e 就失效了。
+      但 2 个文件 4 条用例里，只有 `directSend` 那两条是重复的（`scripts/e2e.sh` 现在用
+      **真二进制**跑同一条路，更好）；另外两条独一份：
+      `groupFederation` 是**两台真服务 + 真中继**跨域 `group.send`（本仓别处没有），
+      `msg listen` 那两条是**真 WebSocket**——脚本现在只补上了**回填**那半
+      （`msg listen --once`，`80dff85`），"连着的时候推过来"那半仍只有这里有。
+      所以删掉它的代价不是"少两条旧用例"，是**跨域中继失去唯一的端到端覆盖**。
+      迁移的判据留下：等中继那半有了别处的覆盖（或 Rust 侧也起两台服务）再谈搬，
+      而 `directSend` 那两条**不要照搬**——同一条路脚本已经跑得更真。今天实跑：2 文件
+      4 条全绿，6.4 秒。
 - [x] ~~**换设备**~~ —— **结论：对端没有这条路**，不是缺口。
       本机 awiki host 对改设备清单回 `device_enrollment_or_removal_not_supported` /
       `device_key_or_root_change_not_supported`，`replace_did` 回 `not_supported`，
