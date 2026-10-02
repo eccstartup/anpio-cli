@@ -375,6 +375,31 @@ connectx anp login --wallet web3 --provider <module> --address 0x… --chain-id 
 `msg` 族**不新增存储**——它不缓存在途消息。要本地留痕就 `--json` 重定向到文件，
 CLI 不替调用方决定。
 
+### 在动的那个是另一套布局（2026-10-02，TODO6 §2.2）
+
+上面那棵是**冻结的 `connectx`** 的。`agentx-cli` 的 store 根是自己的
+（`$AGENTXCLI_HOME`，缺省 `~/.agentx-cli`，**不碰 `~/.connectx/`**），结构也不同：
+
+```
+~/.agentx-cli/
+  <agent>/<profile>/
+    identity.json       # 私钥 PEM + DID 文档都在这一份里（没有单独的 key.json，也没有 V3 封装）
+    session.json        # 同上：明文 0600，host:port 为键
+    successor.json      # did update 暂存的继任钥；只在投递结果不明时留下
+    mls/                # group e2ee 的设备半边：local_state.sqlite（P6 §13）
+  current-agent         # 同上，agent use 写的
+```
+
+两处**实质**差异，不只是名字：
+
+1. **keystore 的形态**。`connectx` 分 `identity.json` + `key.json`（静态加密的 V3 keystore），
+   `agentx-cli` 把私钥 PEM 直接放进 `identity.json`，靠文件权限（0600）而不是口令保护。
+   口令那套旗标（`--password-file` / `--password-stdin`）在 `agentx-cli` 里**不存在**。
+2. **暂存的后继钥叫 `successor.json`**，语义一样（提交一次更新的中间态，是那把钥的唯一副本），
+   名字不同。P6 的设备状态多出 `mls/` 一个目录，`connectx` 没有——它不做 P6。
+
+`msg` 族在这两套里都不新增存储；`messages.db`（TODO5 §4）尚未落地，落地时是 `mls/` 的兄弟目录。
+
 ## 9. 与 core 的边界
 
 CLI **只** import `packages/core` 的公开面（`core/index.ts` 的具名导出）。
