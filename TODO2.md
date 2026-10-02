@@ -59,13 +59,27 @@ KeyPackage 的 `did_wba_binding` Object Proof 由设备自签，验证侧从**�
   文档。** 选项：(i) 我方迁就 SDK 改成 `group.base.v1`（与规范字面不符）；(ii) 推 SDK 侧让
   v2 基础 profile 可发布。**建议 (ii)**——(i) 是让实现去迁就一个上游的临时限制。
 
-- **A3 `group_did_updates` 的暂停/串行编排没做。**
-  P6 §11.10.3 那张表与访问器都在，但**今天没有写入者**：编排本该由 P4 的 `member-did-updated`
-  事件触发，而本服务的 P4（C9）没有接受这种事件。现在 `paused` 是**从投影现算**的
-  （`packages/service/src/rpc/groupControl.ts:432`）：投影里有 active leaf
-  而它的 DID 已不是 P4 active 成员就暂停。判的是同一件可观测事实，只是触发源不同。
-  选项：现在补 C9 那条事件 + 接到 `send` 前面，或维持现算。**建议维持现算**（等价、少一张有
-  状态要维护的表），但要你确认这与 §11.10.3 的编排语义是同一个东西。
+- **A3 对端身份状态的同步（换设备、换 DID、DID 服务器已更新而我们没同步）。**
+  用户 2026-10-02 裁定：**换 DID 与绑定新设备都必须支持**——新绑的设备能收群消息，被取代的
+  旧 DID 不能再收；并点名要想清楚"DID Server 更新了但 ANPMessageService 没同步"这一档。
+  另裁定：同步走**定时刷新**，但要低负载。
+  分三段，A3a 已落地：
+
+  - ~~**A3a 一份共享的 DID 文档缓存 + 可配 TTL。**~~
+    （2026-10-02 落地，`8d3bdef`：受理、投递、出站共用 `config.didResolution.documentStore`，
+    `AGENTX_DID_CACHE_TTL_MS` 默认 5 分钟。不配它，一次投递会把同一份文档抓两遍——`discovery.ts`
+    找入口与 `devices.ts` 读清单各调一次 `resolveDidDocument`。它同时就是"对端身份变化的发现
+    时延上界"：ANP 不为文档变化提供推送（P2 §5.5 规则 8），窗口封不到零，只能封成一个部署
+    能声明的数。缓存不放松判定——core 不写、也不读出 `deactivated` / 带 `successorDid` 的文档。）
+  - **A3b 投递前复核设备资格。** `delivery/deviceQueue.ts:132` 的 `deliverable()` 只读自己那
+    两张投影表（`group_leaves` / `group_members`），**从不回看对方的当前文档**，所以一台被主人
+    从清单里删掉的设备会**继续收到群密文**；而 P6 §10.4 L1074 逐字要求 Host "MUST stop
+    authenticating and **delivering new service data to the revoked device**"。
+  - **A3c 换 DID。** 今天完全没有：`member_did` 在 `group_members` / `group_leaves` 的**主键**
+    里，成员的 DID 改不了（只能删一行加一行）；P4 §8.12 的 `member-did-updated` 本服务的 P4
+    （C9）没有接受，`group_did_updates` 因此没有写入者。换 DID 的验证侧 core 已经写好
+    （`packages/core/src/did/chain.ts` 走完转移链并给出四档保证），服务端缺的是调用它、按保证
+    档位决定接受，再按 P6 §10.5 编排（暂停 → 逐设备 add 新 DID → 逐设备 remove 旧 DID → 恢复）。
 
 - **A4 同 DID 的 Remove 分支 v1 不做，回 5003。**
   理由写在 `packages/service/src/rpc/groupControl.ts:52`：该分支的前置是
