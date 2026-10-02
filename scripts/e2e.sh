@@ -392,14 +392,60 @@ else
 fi
 
 # ---- P6 ----------------------------------------------------------------------
+#
+# 这四条控制方法此前只有"手工跑过"没有"脚本跑过"（TODO6 §5.3 第二条记的缺口）。
+#
+# `e2ee add` 加的是**成员的设备**，所以 bob 得先在群里——他在上面退过了，这里让他重新加入，
+# 那正是这个群 `open-join` 策略允许的事。
+#
+# 一条 KeyPackage 是**一次性的**：`get_key_package` 在挑的同时就把它占住（§8.2.4 L767 的
+# MAY，服务确实这么做），所以"读一枚来断言"与"让 add 拿走一枚"是两次消耗，bob 要发布两枚。
 
-section "group e2ee — the device side of P6"
+section "group e2ee publish — each device publishes its own key package"
+run_quiet "$CLI" group join --agent bob "$GROUP_DID"
+run_quiet "$CLI" did show --agent bob --json
+BOB_DEVICE="$(field device_id)"
+
 run "$CLI" group e2ee publish --agent alice
 expect_status "e2ee publish succeeds" 0
 expect "  and names the key package it stored" "key package:"
+
+# 负结果：柜子里没有可发的，正确的答复是**拒绝**（5000 `key_package_not_found`），
+# 不是一个空的成功。§8.2.4 L763 把它与"某一枚已被用过"（5012）分开，因为调用方该做的事不同。
+section "an empty cabinet is a refusal, not an empty answer"
+run "$CLI" group e2ee get-key-package --agent alice --target-did "$BOB_DID" --target-device "$BOB_DEVICE"
+expect_status "get-key-package with nothing published exits 1" 1
+expect "  and names the peer code" "key_package_not_found"
+
+run "$CLI" group e2ee publish --agent bob
+expect_status "the second device publishes its own key package" 0
+run "$CLI" group e2ee publish --agent bob
+expect_status "and a second one, because a package is single-use" 0
+
+section "group e2ee create — the group starts encrypted at epoch 0"
 run "$CLI" group e2ee create --agent alice "$GROUP_DID"
 expect_status "e2ee create succeeds" 0
 expect "  and starts the group at epoch 0" "epoch:               0"
+
+section "group e2ee get-key-package — reading a peer device's published package"
+run "$CLI" group e2ee get-key-package --agent alice --target-did "$BOB_DID" --target-device "$BOB_DEVICE"
+expect_status "get-key-package succeeds" 0
+expect "  and names the peer it read from" "$BOB_DID"
+expect "  and prints the package it holds" "key package:"
+
+section "group e2ee add / send / remove — one device's life inside the encrypted group"
+run "$CLI" group e2ee add --agent alice "$GROUP_DID" --member-did "$BOB_DID" --member-device "$BOB_DEVICE"
+expect_status "e2ee add succeeds" 0
+expect "  and reports the member it added" "$BOB_DID"
+expect "  and advances the group to epoch 1" "epoch:               1"
+
+run "$CLI" group e2ee send --agent alice "$GROUP_DID" --text "encrypted hello"
+expect_status "e2ee send is accepted" 0
+expect "  and acks the group it encrypted for" "$GROUP_DID"
+
+run "$CLI" group e2ee remove --agent alice "$GROUP_DID" --member-did "$BOB_DID" --member-device "$BOB_DEVICE"
+expect_status "e2ee remove succeeds" 0
+expect "  and advances the group to epoch 2" "epoch:               2"
 
 # ---- 可选：对真 awiki 主机来一遍 ----------------------------------------------
 
