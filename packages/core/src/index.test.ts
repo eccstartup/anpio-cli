@@ -181,8 +181,12 @@ const ADVANCED = [
   // multibase 公钥前缀
   'encodeMultibaseEd25519',
   'encodeMultibaseSecp256k1',
+  // Ed25519 私钥 → 公钥
+  'ed25519PublicKey',
   // secp256k1 公钥的 JWK 表示（ANP 附录 A A.3 / A.4：`k1_` 的绑定密钥以 `publicKeyJwk` 发布）
   'secp256k1PublicKeyToJwk',
+  // DID 文档的骨架（验证方法 + `authentication` / `assertionMethod`）
+  'buildBaseDidDocument',
   // RFC 9421 签名构造与解析
   'ANP_COMPONENTS',
   'parseSignatureInput',

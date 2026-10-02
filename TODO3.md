@@ -89,6 +89,28 @@ private_key, created_at)`，`private_key` 是 hex 的 32 字节种子——与 `
 自签文档是"这把钥确实属于这个群"的唯一声明；以及一个带证明的文档在 `strict` 档的部署
 下也照样成立。**不是**为了让解析通过——写成那样会让下一个人以为去掉签名就会解析失败。
 
+**落地（2026-10-02）。** core 侧只动了两处导出：新增 `crypto/ed25519.ts` 的
+`ed25519PublicKey`（32 字节种子的长度检查留在这一层，因为它读的是数据库列 / keystore /
+文件这类输入边界；Rust 那条路不需要，这里是 TS），以及把已有的 `buildBaseDidDocument` 公开
+——它本来就把同一个 `keyid` 写进 `authentication` **和** `assertionMethod`，所以"两处授权"
+是构造出来的而不是配出来的。两个名字都进 `@agentx/core/advanced`，`index.test.ts` 的钉死清单
+同步。服务侧新增 `rpc/groupDidDocument.ts`：`groupDidKeyId()`（fragment 一处定义，因为文档里
+的声明与证明里的引用必须是同一个值）、`groupServiceEntry()`（`well-known.ts` 那条原样搬过来
+只换 `id`）、`buildGroupDidDocument()`（`parsePrivateKey` → `ed25519PublicKey` →
+`encodeMultibaseEd25519` → `buildBaseDidDocument` → `signDidDocumentProofSync`）、以及
+`groupDidDocument(storage, config, groupDid)`。
+
+测试 `rpc/groupDidDocument.test.ts` 用**两条独立的验证路径**，各钉一句话：附录 B 的
+`verifyObjectProofDetailed(doc, doc)`（把文档自己当 issuer 文档——不是取巧，`group_receipt.proof`
+将来走的正是同一条路：同一个 Profile、同一个签名底）验的是"签名与 `assertionMethod` 授权"，
+`verifyDidDocument(doc, groupDid)` 验的是"它能被解析成这个 DID 的文档"——后者对 `did:web` 跳过
+证明，所以测试里**特意把 `proof` 删掉再解一次**，把"签名不是为了解析通过"写成可执行的断言而不
+只是注释。服务条目的 `serviceEndpoint` 断言读 `RPC_PATH` 而不是抄字符串——抄一次就多一个会漂的
+常量。
+
+文档：groups.md §2 那段"v1 不发布"改写成"由本服务自己发布"（并写清发布的是**群**文档、
+本服务自己的身份文档仍由 awiki 托管，§C3），新增 §2.2 记形状与三条"缺一不可"。
+
 ### A3 托管路由：`GET /g/<id>/did.json`
 
 与 `didToUrl` 对这条 DID 的映射严丝合缝（[resolveDid.ts:520](packages/core/src/crypto/resolveDid.ts:520)

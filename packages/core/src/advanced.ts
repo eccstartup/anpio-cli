@@ -10,11 +10,17 @@ export { utf8, utf8From, sha256, bytesToBase64, base64ToBytes } from './crypto/e
 export { base58btcDecode, base58btcEncode } from './crypto/base58'
 // multibase 公钥前缀
 export { encodeMultibaseEd25519, encodeMultibaseSecp256k1 } from './crypto/multicodec'
+// Ed25519 私钥 → 公钥（持有私钥的调用方自己推导公钥；SDK 自己的身份是在建号那一步一并导出的）
+export { ed25519PublicKey } from './crypto/ed25519'
 // secp256k1 公钥的 JWK 表示（ANP 附录 A A.3 / A.4：`k1_` 的绑定密钥以 `publicKeyJwk` 发布）
 export { secp256k1PublicKeyToJwk } from './crypto/multicodec'
 export type { Secp256k1PublicKeyJwk } from './crypto/multicodec'
 // DID 文档里绑定密钥的表示（写入侧是严格的和类型：Ed25519 走 `Multikey`，secp256k1 走 JWK）
 export type { DidPublicKey } from './crypto/didDocument'
+// DID 文档的骨架（验证方法 + `authentication` / `assertionMethod`）。SDK 自己的身份走
+// `createWebIdentity` / `loadOrCreateDevIdentity`；自己持有私钥、要分步造文档的调用方
+// （本服务的群文档）从这里起步，`proof` 由它自己用 `signDidDocumentProofSync` 补上。
+export { buildBaseDidDocument } from './crypto/didDocument'
 // RFC 9421 签名构造与解析
 export {
   ANP_COMPONENTS,
