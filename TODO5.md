@@ -95,7 +95,8 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 **每条带一个状态签**（2026-10-02）：`[已落]` / `[部分]` / `[未动]`。
 
 1. **[部分]** **CLI 参数 / 帮助 / 渲染**（~1600 行）：1193 行的命令表 + 渲染层。机械，但量在那儿。
-   已落骨架与 `did`（3 条）/`msg`（6 条）/`group`（6 条 + `e2ee` 3 条）/`agent`（3 条）/`discover` 的面；
+   已落骨架与 `did`（5 条：`create` / `show` / `register` / `resolve` / `restore`；`update` 未动）/
+   `msg`（6 条）/`group`（6 条 + `e2ee` 3 条）/`agent`（3 条）/`discover` 的面；
    `anp` / `version` 未动。
 2. **[部分]** **身份存储**（~1200 行）：含 **Ethereum keystore V3**（scrypt + aes-128-ctr + keccak256）与
    **EIP-1193 web3 钱包路径**——`--wallet web3` 是 CLI 的一等路径。
@@ -207,7 +208,8 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 | 家族 | 命令 | 状态 |
 | --- | --- | --- |
 | `did` | `create` / `show` / `register` | ~~做完~~（对 awiki host 真跑通） |
-| `did` | `resolve` / `update` / `restore` | 还没 |
+| `did` | `resolve` / `restore` | ~~做完~~（`resolve` 带 `--chain`；`restore` 是**明说的拒绝**，见 §6） |
+| `did` | `update` | 还没（写的那半，见 §6） |
 | — | `discover` | ~~做完~~ |
 | `msg` | `send` / `caps` / `inbox` / `show` / `read` | ~~做完~~（`send` 真阳性；`inbox` 一族对 awiki 为负是**正确**结果） |
 | `msg` | `listen` | ~~做完~~（realtime.md 那条常驻契约） |
@@ -219,7 +221,7 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 | `group e2ee` | `send` | ~~做完~~（对真服务跑通；群寻址，收件进设备队列，只推 `group_event_seq`） |
 | `group e2ee` | 收包路径（`process_notice_v2` / `decrypt_received_v2`） | ~~做完~~（`msg listen` 投递驱动，对真服务跑通 commit/welcome/final-notice 与 `group.incoming`） |
 | `anp` | `show` / `login` / `sign` | 还没 |
-| `agent` | `show` / `use` / `list` | 还没 |
+| `agent` | `show` / `use` / `list` | ~~做完~~（含 `--agent` 的解析链） |
 | — | `version` | 还没 |
 | 身份 | 换钥 / 换设备 / `update_document` | 还没 |
 | 库侧 | 信封 / 那一跳 HTTP / SSRF 逐跳 / 身份存储 / MLS store | ~~做完~~ |
@@ -525,6 +527,26 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
   `agent use` 接受一个还没存身份的 id（先选 agent、再造它的钥，正是一个新 agent 出生的顺序），
   但会**说出来**；`agent list` 也把这种选择打出来。`Identity::load` 的"没有身份"那条错误现在
   会点出 `agent list` / `agent use`，因为回答它的正是这两条。
+- **`did resolve` / `did restore` 已落（2026-10-02）**。四点：
+  （a）**更新链的走法不自己写。** `anp::authentication::did_transition::resolve_current_did`
+  本来就是那件事的权威实现（逐跳验、拒环、拒冲突后继、算 assurance），重写一遍等于把那唯一
+  权威的东西分叉。crate 不占的是**传输**：它的 `DidDocumentFetcher` 是**同步**的，而本客户端的
+  取文档是异步的（走同一套 SSRF 策略与 content-type 检查）。所以 `identity/chain.rs` 只是那层
+  适配器：`spawn_blocking` 里自建一个 current-thread runtime，让同步 fetcher 自己把 future
+  驱动完（`block_in_place` 是同一个活的更重的锤子）。
+  （b）**这个适配器必须重编码 `proofValue`，这是本轮真正的新发现。** 走链的每一步都要**验**
+  落脚的文档，而 crate 1.0.5 对 base58 `eddsa-jcs-2022` 走的是折 `@context` 的那条分支——
+  正是 §8-J 第三个坑记的那条假否定。直接把手里的原始字节递进去，本客户端**自己刚签出来的
+  文档**都会以 `did_chain_broken: invalid_proof` 收场（实测如此，且用 §6 上面那层重编码能
+  验过）。所以 fetcher 递的是 `document_in_crate_form` 的结果，**存下来显示的仍是主机发的
+  原始字节**——两个用途，两种形式，不混。
+  （c）**退出码是三种结论，不是三种错误。** `0` 当前；`2` 已被取代（**结论**，cli.md §7）；
+  `3` 链验不过（`did_chain_broken`）。`ChainError` 把 `Unavailable`（取不到，普通失败，`1`）
+  与 `Broken`（走完了，验不过，`3`）分成两臂，靠 crate 唯一的提示点——`NetworkError`——分辨，
+  而不是回头去解析错误字符串。取不到文档与"链断了"在类型上就是两件事。
+  （d）**`did restore` 是明说的拒绝，不是缺口。** `anp` 没有恢复路径：更新链把钥往前推，
+  推不回来。所以它 `exit 1` 并说清楚"什么都没读、什么都没恢复"；有这个子命令本身也是为了让
+  这个缺口是**确定**的，而不是一句像打错字的 `Unknown subcommand`。
 - **与 TS `connectx` 并存**，`CONNECTX_HOME` 的处理见 §8-F。
 
 **Phase 2 —— 消息库**（还没动）
@@ -542,7 +564,9 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 - [x] ~~`group e2ee send`~~（2026-10-02）
 - [x] ~~`group e2ee` 收包路径：`process_notice_v2` / `decrypt_received_v2`~~（2026-10-02；靠 `msg listen` 投递驱动）
 - [ ] 身份：换钥 / 换设备 / `update_document`
-- [ ] `did` 剩下的三条：`resolve` / `update` / `restore`
+- [x] ~~`did resolve` / `did restore`~~（2026-10-02；`resolve` 的文档面 + `--chain` 走完更新链，
+  `restore` 是明说的拒绝。见 §6）
+- [ ] `did update`（写的那半：`--target` / `--resume`，与本机钥的生命周期一起）
 - [ ] `anp` 一族：`show` / `login` / `sign`
 - [x] ~~`agent` 一族：`show` / `use` / `list`~~（2026-10-02；含 `--agent` 的解析链，见 §6）
 - [ ] `version`
@@ -570,7 +594,8 @@ Phase 1 到此收口：`msg listen` 与 `group` 一族都已落地（见 §6）�
 `create` / `add` / `remove` / `send`）已落并对真服务跑通
 （见 §6），收包路径（`process_notice_v2` / `decrypt_received_v2`，由 `msg listen` 投递驱动）
 也已落并对真服务跑通，然后是剩下的身份工作（换钥 / 换设备 / `update_document`）与
-`did` / `anp` / `agent` 三族。
+`did` / `anp` 三族。`agent` 一族与 `did resolve` / `did restore` 已落（2026-10-02，见 §6）；
+`did` 只剩写的那半 `update`，`anp` 一族与 `version` 未动。
 
 ---
 

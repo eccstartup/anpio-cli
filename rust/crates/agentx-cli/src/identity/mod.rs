@@ -5,10 +5,14 @@
 //! mints a document in memory, and everything after that — where it is kept, how it is
 //! published, which device it names — is the application's (TODO5 §2, §6 Phase 1).
 
+mod chain;
 mod did;
 mod host;
 mod store;
 
+pub use chain::{
+    describe_status, document_is_superseded, resolve_chain, snake_case_name, ChainError, ChainResolution,
+};
 pub use did::{create_identity, CreateIdentityInput};
 pub use host::{fetch_host_service, register_identity, HostService};
 pub use store::{

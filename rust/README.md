@@ -22,7 +22,7 @@ rust/
     src/group.rs                 # P4 `anp.group.base.v2` 的策略与 target
     src/mls.rs                   # P6 的设备半边：MLS store 与它造出来的对象
     src/group_e2ee.rs            # P6 的线上半边：请求体的形状
-    src/identity/                # 身份库（store / did 文档 / host 注册）
+    src/identity/                # 身份库（store / did 文档 / host 注册 / 更新链）
     src/message/                 # 信封装配 + 那一跳 HTTP + 发现 + 流
     examples/phase0_key_package.rs
 ```
@@ -40,9 +40,15 @@ pin 为准**，源码阅读用 `git show origin/release/0929:rust/...`。
 
 store 根是 `AGENTXCLI_HOME`（缺省 `~/.agentx-cli`），一条身份由 `--agent` / `--profile`
 命名——两个都可以不写：`--agent` > `$AGENTXCLI_AGENT` > 当前 agent（`agent use` 选的）>
-`default`，`--profile` > `$AGENTXCLI_PROFILE` > `default`。`cargo test` 全绿（95 个单测）。
+`default`，`--profile` > `$AGENTXCLI_PROFILE` > `default`。`cargo test` 全绿（103 个单测）。
 
 - **`did create | show | register`** —— 身份存储 + DID 文档。
+- **`did resolve | restore`** —— `resolve` 是解析面：不给 `--chain` 就取那一份文档
+  （`document_is_superseded` 时退出 2，并提示 `--chain`），给 `--chain` 就按 crate 的
+  `resolve_current_did` 走完更新链，把"当前的是哪个 DID、中间每一跳的 assurance"打出来
+  （`identity/chain.rs` 只是那条同步 fetcher 与本客户端异步取文档之间的适配器）。
+  `restore` 是**明说的拒绝**：`anp` 没有恢复路径，更新链把钥往前推、推不回来，所以它
+  退出 1 并说清"什么都没读、什么都没恢复"。
 - **`agent show | use | list`** —— 本机现在是谁（当前 agent 存在 store 根的一个文件里，
   所以是整机范围而不是单进程）。`use` 允许点名一个还没存身份的 agent——先选 agent、
   再造它的钥，正是一个新 agent 出生的顺序——但会说出来。
@@ -99,5 +105,5 @@ cargo run --manifest-path rust/Cargo.toml --example phase0_key_package -- /tmp/a
 
 ## 还没有
 
-`did` 剩下的三条（`resolve` / `update` / `restore`）、`anp` 一族（`show` / `login` / `sign`）、
-`version`，以及身份这块的换钥 / 换设备 / `update_document`。顺序见 TODO5 §6 的 Phase 3。
+`did` 剩下的写那半（`update`）、`anp` 一族（`show` / `login` / `sign`）、`version`，
+以及身份这块的换钥 / 换设备 / `update_document`。顺序见 TODO5 §6 的 Phase 3。

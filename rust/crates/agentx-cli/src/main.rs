@@ -16,12 +16,12 @@ use agentx::group_e2ee::{
     add_body, create_body, get_key_package_body, publish_body, remove_body, send_body,
 };
 use agentx::identity::{
-    create_identity, current_agent_path, fetch_host_service, list_identities, read_current_agent,
-    register_identity, resolve_agent_id, resolve_agent_id_with_source, select_current_agent, CreateIdentityInput,
-    Identity, IdentityLocation,
+    create_identity, current_agent_path, describe_status, document_is_superseded, fetch_host_service, list_identities,
+    read_current_agent, register_identity, resolve_agent_id, resolve_agent_id_with_source, resolve_chain,
+    select_current_agent, snake_case_name, ChainError, ChainResolution, CreateIdentityInput, Identity, IdentityLocation,
 };
 use agentx::message::{
-    build_message_request, call, call_device, call_extension, call_group, device_of, did_host,
+    build_message_request, call, call_device, call_extension, call_group, device_of, did_host, did_to_url,
     discover, document_in_crate_form, group_e2ee_security_profile, http_client, now_rfc3339,
     open_channel, open_channel_for, parse_capabilities, payload_of, policy_for, post_message,
     resolve_did_document, rejection, run_listen, uuid_v4, view_for, websocket_connect, AnpMeta,
@@ -152,6 +152,28 @@ enum DidCommand {
         #[arg(long)]
         profile: Option<String>,
     },
+    /// Resolution: read what any DID publishes, and walk its update links.
+    ///
+    /// Exit codes are scoped to this subcommand (cli.md §7): `0` the DID is current, `2`
+    /// it is superseded (a **conclusion**, not a failure), `3` the update chain does not
+    /// verify, `1` anything else.
+    Resolve {
+        /// The DID to resolve. Not necessarily this store's own.
+        did: String,
+        /// Follow the update links to the DID that is current, and say how strongly each
+        /// hop was proven. Only `did:wba` DIDs with an `e1_` fingerprint carry them.
+        #[arg(long)]
+        chain: bool,
+        /// Print the resolution as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Reserved: recovery of a DID whose key is lost.
+    ///
+    /// `anp` has no recovery path — the update chain moves a key forward, it cannot bring
+    /// one back — so this refuses rather than pretending. It exists so the gap is a
+    /// definite answer instead of an "Unknown subcommand".
+    Restore,
 }
 
 /// The store's CURRENT agent — the id a command acts as when neither `--agent` nor
@@ -615,6 +637,8 @@ async fn main() -> anyhow::Result<()> {
                 json,
             } => cmd_did_show(agent.as_deref(), profile.as_deref(), json),
             DidCommand::Register { agent, profile } => cmd_did_register(agent.as_deref(), profile.as_deref()).await,
+            DidCommand::Resolve { did, chain, json } => cmd_did_resolve(&did, chain, json, &allow_private).await,
+            DidCommand::Restore => cmd_did_restore(),
         },
         Command::Agent { command } => match command {
             AgentCommand::Show { json } => cmd_agent_show(json),
@@ -1003,8 +1027,134 @@ async fn cmd_did_register(agent: Option<&str>, profile: Option<&str>) -> anyhow:
     Ok(())
 }
 
-// ---- agent show / use / list ----------------------------------------------------
+/// Exit with a code, after flushing what was printed.
+///
+/// `std::process::exit` runs no destructors, and a **piped** stdout is block-buffered (a
+/// terminal's is line-buffered) — so without the flush a `did resolve --json | jq …` would
+/// lose its output on exactly the paths that use this. Only `did resolve`'s two
+/// "conclusion" codes need it; every other command keeps the ordinary 0/1 (cli.md §7).
+fn exit_with(code: i32) -> ! {
+    use std::io::Write as _;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    std::process::exit(code)
+}
 
+/// `did resolve <did> [--chain] [--json]`.
+///
+/// The DID need not be this store's own: this is the only way to look at what anyone
+/// publishes. Exit codes ride on the ANSWER, not on success (`docs/design/cli.md` §7):
+/// `2` means the DID is superseded — a conclusion — and `3` that the chain does not verify.
+async fn cmd_did_resolve(
+    did: &str,
+    chain: bool,
+    json: bool,
+    allow_private: &[String],
+) -> anyhow::Result<()> {
+    let policy = policy_for(&[did_host(did)?], allow_private);
+    let client = http_client()?;
+
+    if chain {
+        match resolve_chain(&client, did, &policy).await {
+            Ok(resolution) => {
+                print_chain(&resolution, json)?;
+                if resolution.is_superseded() {
+                    exit_with(2)
+                }
+                Ok(())
+            }
+            // A verdict on the chain, which is what exit 3 is for — distinct from
+            // "could not fetch", which is an ordinary failure.
+            Err(ChainError::Broken(err)) => {
+                eprintln!("agentx-cli: did_chain_broken: {}: {}", snake_case_name(&err.kind), err.message);
+                exit_with(3)
+            }
+            Err(ChainError::Unavailable(err)) => Err(err),
+        }
+    } else {
+        let document = resolve_did_document(&client, did, &policy).await?;
+        // Resolving DOES serve a superseded document on purpose — it is evidence, and the
+        // document-level call has no successor to offer. Saying so is this command's job.
+        let superseded = document_is_superseded(&document);
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "did": did,
+                    "docUrl": did_to_url(did)?.as_str(),
+                    "superseded": superseded,
+                    "document": document,
+                }))?
+            );
+        } else {
+            println!("did:      {did}");
+            println!("superseded: {}", if superseded { "yes" } else { "no" });
+            if superseded {
+                println!(
+                    "          the document is not current — pass --chain to follow the link to \
+                     the DID that is"
+                );
+            }
+            println!();
+            println!("{}", serde_json::to_string_pretty(&document)?);
+        }
+        if superseded {
+            exit_with(2)
+        }
+        Ok(())
+    }
+}
+
+fn print_chain(resolution: &ChainResolution, json: bool) -> anyhow::Result<()> {
+    let result = &resolution.result;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "result": result,
+                "docUrl": resolution.doc_url,
+                "documents": resolution.documents,
+            }))?
+        );
+        return Ok(());
+    }
+    println!("did:        {}", result.requested_did);
+    println!("currentDid: {}", result.current_did);
+    println!("status:     {}", describe_status(result));
+    // No hops means there was no chain to weigh, and the crate says exactly that with
+    // `None`. Naming the crate's own absence beats inventing a word for it: what *was*
+    // verified is the document the DID resolves to, which is what `status` reports.
+    println!(
+        "assurance:  {}",
+        result
+            .assurance
+            .map(|assurance| snake_case_name(&assurance))
+            .unwrap_or_else(|| "none (no hops)".to_string())
+    );
+    println!("docUrl:     {}", resolution.doc_url);
+    println!("hops:       {}", result.hops.len());
+    for (index, hop) in result.hops.iter().enumerate() {
+        println!("  [{}] {} → {}", index + 1, hop.predecessor_did, hop.successor_did);
+        println!("      assurance={}", snake_case_name(&hop.assurance));
+    }
+    Ok(())
+}
+
+/// `did restore` — reserved, and it says so.
+///
+/// The SDK has no recovery path: the update chain moves a key forward and cannot bring one
+/// back, so a DID whose key is gone has no protocol-level restoration. Exiting non-zero
+/// with this message is the honest answer, and having the subcommand at all means the gap
+/// is a definite one rather than an "Unknown subcommand" that reads like a typo.
+fn cmd_did_restore() -> anyhow::Result<()> {
+    anyhow::bail!(
+        "did restore is not implemented: nothing was read and nothing was restored. \
+         `anp` defines no recovery path — the update chain moves a key forward, it cannot \
+         bring one back."
+    )
+}
+
+// ---- agent show / use / list ----------------------------------------------------
 /// `agentx-cli agent show` — which agent is in force, and which step said so.
 ///
 /// Reported through `resolve_agent_id_with_source` rather than by re-walking the chain
