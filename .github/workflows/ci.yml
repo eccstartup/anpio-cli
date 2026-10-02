@@ -49,3 +49,37 @@ jobs:
       # that would catch "each half works, the two together do not".
       - name: Test
         run: npm test
+
+  # The Rust client (`rust/`) is a separate artifact from the TS packages above and
+  # had no gate at all: `cargo test` and `cargo clippy` were run by hand, on one
+  # machine. `cargo fmt --check` is deliberately absent — the workspace has no
+  # `rustfmt.toml` and its formatting is hand-written, so the check would fail on
+  # `examples/phase0_key_package.rs` today; a gate that is red for a reason nobody
+  # intends to fix is a gate everyone learns to ignore.
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The toolchain is whatever `rust/Cargo.toml`'s edition needs; the runner image
+      # ships rustup, so pinning only the components keeps this from drifting.
+      - name: Toolchain
+        run: rustup component add clippy
+
+      - name: Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rust/Cargo.lock') }}
+
+      - name: Test
+        run: cargo test --manifest-path rust/Cargo.toml --all-targets
+
+      # `-D warnings` so a new warning fails the build. Without it, the one warning
+      # that existed (`needless_question_mark`) would have been the first of many:
+      # a baseline warning is a reason to tolerate the next one.
+      - name: Clippy
+        run: cargo clippy --manifest-path rust/Cargo.toml --all-targets -- -D warnings

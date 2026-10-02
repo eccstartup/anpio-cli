@@ -10,8 +10,8 @@ use crate::error::{AgentxError, Result};
 
 /// A client that does not follow redirects. A 3xx is an error rather than a hop.
 pub fn http_client() -> Result<reqwest::Client> {
-    Ok(reqwest::Client::builder()
+    reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .map_err(|err| AgentxError::MessageSendFailed(format!("building the HTTP client: {err}")))?)
+        .map_err(|err| AgentxError::MessageSendFailed(format!("building the HTTP client: {err}")))
 }
