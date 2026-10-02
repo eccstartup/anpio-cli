@@ -285,8 +285,30 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
   `proofValue` 重编码成 base64url 再问一次**（选中 crate 不折 `@context` 的那条分支）。
   **不重写验签器**（本模块的底线），只换编码；两种分支哈希的输入完全相同，公钥指纹那关也照过。
   与 §8-J 生成侧的重编码**互为镜像**。
-- **未做**：`msg listen`（唯一的常驻契约，[realtime.md](docs/design/realtime.md)）、`group`；
-  身份这块还剩"换钥/换设备/`update_document`"。
+- **`msg listen` 已落（2026-10-02）**，唯一那条常驻契约（[realtime.md](docs/design/realtime.md)）。
+  `message/stream.rs` 是传输（`/anp-im/rpc` → `/anp-im/stream` 的地址推导、帧、WebSocket 拆成
+  一条写任务一条读任务），`message/listen.rs` 是状态机（`stream.hello` 校验 `server_did` →
+  `stream.auth` → `sync.delta` 补拉 → live → `stream.ack`），也是命令面唯一一条长跑的命令。
+  **两处与 TS 参考实现不同，都是照规范补的**：（a）致命的握手失败**先打一行 `state: error`
+  再退 1**（realtime.md §7.1/§7.2 要求，`listen.ts` 漏了这一步）；（b）中断用
+  `tokio::sync::watch` 走到状态机的每一次等待上，所以退避睡眠（base 2s / max 30s / ±20%）
+  不会把 Ctrl-C 拖到 30 秒。**游标不在本地**：它在服务端按 `(owner_did, device_id)` 存着，
+  `stream.ack` 是唯一的写入者，`--ack` 顺带发 `inbox.mark_read`。
+- **`group` 一族已落（2026-10-02）**：`create | info | members | join | leave | send`
+  （P4 `anp.group.base.v2`）。`src/group.rs` 放协议逻辑——§7.1 的推荐策略原文、
+  `--policy` 在它之上的**浅合并**、以及 §7.1 那几个封闭集合（`admission_mode`、
+  permissions "包含且仅包含"：多一个键与少一个键同等拒绝，都在开身份之前）。
+  `channel.rs` 加 `call_group`（target 是参数：`group.create` 打**服务**、其余打**群**，
+  这个差别在签名对象里，是签出来的不是路由出来的）与 `open_channel_for`（解析一个
+  **不是签名者自己**的 DID）。
+- **对 awiki 跑 `group` 是预期为负的一条**，和 `msg inbox` 同理：`group create` 回
+  HTTP 401。原因是 awiki 自己的策略——`hosted_group_create` 对**任何 public RPC 调用方**
+  抛 `group.remote_create_not_allowed`（它的 `messaging/groups/service.py`），群创建只留在
+  它本地的 bearer 面上，而本 CLI 不持 bearer（cli.md §5）。另外记一笔：awiki 把这类拒绝
+  放在 **4xx** 里（`Unauthorized` → 401 + JSON-RPC 体），本 CLI 与 TS `connectx` 都只收 2xx，
+  于是两边的体都被丢掉、只剩一句 HTTP 状态——与 message-service.md §2.1 定的"拒绝走 2xx"
+  一致，**不要为此改客户端**。要端到端跑 `group`，目标是本仓的 `packages/service`，不是 awiki。
+- **未做**：身份这块还剩"换钥/换设备/`update_document`"；`group e2ee`（B2）在 Phase 3。
 - 先落 **`msg`** 一族（含 `msg listen` 常驻契约），因为它是 §4 消息库的入口。
 - **与 TS `connectx` 并存**，`CONNECTX_HOME` 的处理见 §8-F。
 
@@ -315,7 +337,8 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 
 **本轮不再有挂起的裁定。** 身份存储 + DID 文档发布（含挂 awiki host）已跑通（§6 Phase 1）；
 `msg` 一族的五个命令也跑通了（`send` / `caps` / `inbox` / `show` / `read`，见 §6）。
-下一步是 **`msg listen`**（[realtime.md](docs/design/realtime.md) 那条常驻契约）与 **`group`**。
+Phase 1 到此收口：`msg listen` 与 `group` 一族都已落地（见 §6），剩下的身份工作
+（换钥 / 换设备 / `update_document`）与 `group e2ee` 按 §6 的 Phase 3 顺序走。
 
 ---
 

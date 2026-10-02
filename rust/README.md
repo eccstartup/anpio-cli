@@ -19,7 +19,9 @@ rust/
     src/lib.rs                   # 库 `agentx` —— 协议与状态都在这
     src/main.rs                  # bin `agentx-cli` —— 命令面（薄壳）
     src/error.rs
-    src/message/                 # 信封装配 + 那一跳 HTTP
+    src/group.rs                 # P4 `anp.group.base.v2` 的策略与 target
+    src/identity/                # 身份库（store / did 文档 / host 注册）
+    src/message/                 # 信封装配 + 那一跳 HTTP + 发现 + 流
     examples/phase0_key_package.rs
 ```
 
@@ -34,18 +36,32 @@ pin 为准**，源码阅读用 `git show origin/release/0929:rust/...`。
 
 ## 现在有什么
 
-- **`src/message/`** —— Phase 0 查出 crate **不做**的那一段（它停在"签好名的请求对象"，
-  见 TODO5 §6）：出站信封装配（`envelope.rs`，移植 `core/message/envelope.ts`）与那一跳 HTTP
-  （`rpc.rs`，移植 `core/message/rpc.ts`）。13 个单测，`cargo test` 全绿。
-  **已知缺口**：`rpc.rs` 还没移植 `resolveDid.ts` 的 SSRF 逐跳策略，函数注释里有标注。
-- **`agentx-cli discover <endpoint>`** —— 唯一一条能跑的命令。`anp.get_capabilities` 是唯一
-  不需要 auth 的方法（P1 §8.2），所以它**不需要身份**，也就成了最省的"这端点活着吗"检查。
-  端点只给主机时自动补 `/anp-im/rpc`。
+store 根是 `AGENTXCLI_HOME`（缺省 `~/.agentx-cli`），一条身份由 `--agent` / `--profile`
+命名。`cargo test` 全绿（63 个单测）。
+
+- **`did create | show | register`** —— 身份存储 + DID 文档。
+- **`discover <endpoint>`** —— `anp.get_capabilities` 是唯一不需要 auth 的方法（P1 §8.2），
+  所以它不需要身份，也就成了最省的"端点活着吗、说的是这个协议吗"检查。端点只给主机时
+  自动补 `/anp-im/rpc`。
 
 ```bash
 cargo run --manifest-path rust/Cargo.toml -- discover http://127.0.0.1:8787
 ```
 
+- **`msg send | caps | inbox | show | read`** —— `src/message/channel.rs` 是 `channel.ts`
+  的移植（`Sender` / `Endpoint` / `Channel`、`call` / `call_extension` / `call_group`）。
+  `msg send` 两个本机身份**双向** `direct.send` 跑通（两边都回 `accepted: true`）；
+  `inbox` / `show` / `read` 是 `x_agentx.inbox.v1` 扩展面，仅实现规范的对端回 `-32601`
+  是**正确的负结果**（cli.md §5），不是缺陷。
+- **`msg listen`** —— 唯一那条常驻契约（[realtime.md](../docs/design/realtime.md)）。
+  `message/stream.rs` 是传输（地址推导 + WebSocket 拆成读写两条任务），`message/listen.rs`
+  是状态机。游标在服务端按 `(owner_did, device_id)` 存，`stream.ack` 是唯一写入者；
+  Ctrl-C 退出 0，掉线按 2s→30s 退避重连；`--once` 只补拉。
+- **`group create | info | members | join | leave | send`** —— P4 `anp.group.base.v2`。
+  `src/group.rs` 放策略逻辑（§7.1 的推荐策略、`--policy` 的浅合并、封闭集合校验）。
+  **端到端要打本仓的 `packages/service`**：本机 awiki host 对 `group create` 回 HTTP 401，
+  是它自己不许 public RPC 建群的策略（`group.remote_create_not_allowed`），
+  详见 [TODO5.md](../TODO5.md) §6 Phase 1。
 - **`examples/phase0_key_package.rs`** —— Phase 0 的 spike，仍可复跑（它是怎么验证 crate
   能驱动 P6 设备半边的记录，结论在 TODO5 §6）：
 
@@ -55,5 +71,5 @@ cargo run --manifest-path rust/Cargo.toml --example phase0_key_package -- /tmp/a
 
 ## 还没有
 
-身份存储、`msg` 一族（含 `msg listen`）、`x_agentx` 扩展面、`group`（含 `group e2ee`）。
-顺序见 TODO5 §6。
+身份这块的换钥 / 换设备 / `update_document`，以及 `group e2ee`（B2）。
+顺序见 TODO5 §6 的 Phase 3。
