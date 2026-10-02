@@ -103,6 +103,20 @@ function webSocket(url: string): WebSocketLike {
   return new Ctor(url)
 }
 
+/** Wait until the client's own `open` has fired.
+ *
+ *  **The server's `opened` is not a substitute.** That one fires when the connection is
+ *  built on the server, which can be a poll or two before the client has processed the 101
+ *  — and a `send()` from a socket still in CONNECTING throws
+ *  `InvalidStateError: Sent before connected`. Waiting on the server side only is how this
+ *  test flakes under load. */
+async function clientOpen(socket: WebSocketLike): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    socket.addEventListener('open', () => resolve())
+    socket.addEventListener('error', (event) => reject(new Error(`client websocket errored: ${String(event)}`)))
+  })
+}
+
 // ---- a raw client, for the frames a conforming one will not send -----------------
 
 interface RawClient {
@@ -264,6 +278,7 @@ describe('text frames', () => {
     socket.addEventListener('message', (event) => {
       seen.push(String((event as { data: unknown }).data))
     })
+    await clientOpen(socket)
     await until(() => h.opened.length === 1)
 
     socket.send('{"jsonrpc":"2.0","method":"stream.auth"}')
@@ -323,6 +338,7 @@ describe('text frames', () => {
     socket.addEventListener('message', (event) => {
       seen.push(String((event as { data: unknown }).data))
     })
+    await clientOpen(socket)
     await until(() => h.opened.length === 1)
 
     const payload = JSON.stringify({ text: 'x'.repeat(70_000) })
