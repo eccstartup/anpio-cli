@@ -40,7 +40,7 @@ pin 为准**，源码阅读用 `git show origin/release/0929:rust/...`。
 
 store 根是 `AGENTXCLI_HOME`（缺省 `~/.agentx-cli`），一条身份由 `--agent` / `--profile`
 命名——两个都可以不写：`--agent` > `$AGENTXCLI_AGENT` > 当前 agent（`agent use` 选的）>
-`default`，`--profile` > `$AGENTXCLI_PROFILE` > `default`。`cargo test` 全绿（132 个单测）。
+`default`，`--profile` > `$AGENTXCLI_PROFILE` > `default`。`cargo test` 全绿（143 个单测）。
 
 - **`did create | show | list | register`** —— 身份存储 + DID 文档。
   `list` 与 `agent list` 不是一回事：后者答"现在是谁"（选择），前者答"这里有哪些 DID"（身份），
@@ -108,9 +108,28 @@ cargo run --manifest-path rust/Cargo.toml -- discover http://127.0.0.1:8787
 
 - **`msg send | caps | inbox | show | read`** —— `src/message/channel.rs` 是 `channel.ts`
   的移植（`Sender` / `Endpoint` / `Channel`、`call` / `call_extension` / `call_group`）。
+  `msg send --to` 收 **DID 或通讯录里的名字**：DID 形状的参数（`looks_like_a_did` 是语法
+  测试，不是方法白名单）直接进发现，其余当名字查通讯录（见下面 `contacts` 那条），
+  两个名字指向同一人时**退出 1 并列出候选**，不随便挑一个。
   `msg send` 两个本机身份**双向** `direct.send` 跑通（两边都回 `accepted: true`）；
   `inbox` / `show` / `read` 是 `x_agentx.inbox.v1` 扩展面，仅实现规范的对端回 `-32601`
   是**正确的负结果**（cli.md §5），不是缺陷。
+- **`contacts list | add | set-remark | remove | resolve`** —— 名字 ↔ DID 那一层（TODO6 §3）。
+  表不在本地文件里，在**本仓 `packages/service` 的库**里（`x_agentx.contacts.v1`），
+  按**请求的已验证签名者** `owner_did` 分行，所以一个身份的备注对另一个身份天然不可见，
+  不需要文件权限来保证。行按 **`subject`** 存、不按 `did`——`did update` 会把 DID 挪走
+  （它内嵌钥指纹），备注挂 `did` 上就会在换钥时静默消失，这正是 `anp show` 非要把
+  subject / did 摊开成一对的原因。
+  `resolve` 是**给 Agent 用的那条**：名字进、DID 出，`--json` 给机读；DID 形状的参数
+  直接原样返回（`source: "argument"`，不连网、不读 store）。
+  `set-remark` 与 `remove` 的 `<name>` 收**名字或 DID**，解名字的路子和 `msg send --to`
+  是同一条（所以重名在这里也照样拒，不会改错人）。
+  `add` 的 `--remark` 缺席时**保留原有备注**（清空要显式 `--clear-remark`），因为线上
+  缺字段就是清空，而 `contacts add <did>` 本意常是"确认这个人已在册"。
+  `add` 收非 DID 的输入会**在开身份之前**就拒掉：`subject_of` 是全函数，否则
+  `contacts add Alice --remark Alice` 会落一行键是字面量 `Alice`、永远发不出去的记录。
+  没有 nickname / 头像字段：那是对方自己的说法、存在**对方**的主机上，存到这儿就是一份
+  没有失效机制的缓存。判定逻辑是 `src/contacts.rs` 里对 book 的**纯函数**（11 个单测）。
 - **`msg listen`** —— 唯一那条常驻契约（[realtime.md](../docs/design/realtime.md)）。
   `message/stream.rs` 是传输（地址推导 + WebSocket 拆成读写两条任务），`message/listen.rs`
   是状态机。游标在服务端按 `(owner_did, device_id)` 存，`stream.ack` 是唯一写入者；

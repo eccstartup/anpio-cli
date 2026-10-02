@@ -683,6 +683,13 @@ message.get_batch
 扩展方法在线上必须给出一个能解释它的 Profile 值，而这个值不可能是任何一个规范 Profile
 （那才是对客户端撒谎）。取值就是**扩展自己的标识符**，`x_` 前缀正是 P1 §12 给扩展留的命名空间。
 
+**这个扩展面今天有**三**个 Profile**：取件面 `x_agentx.inbox.v1`（本节所写）、
+订阅握手 `x_agentx.stream.v1`（§9.3 末段与 [realtime.md](realtime.md) §4）、
+通讯录 `x_agentx.contacts.v1`（§9.4）。**按方法**取 Profile，不是一个面一个——
+P1 §6.2.2 那句"唯一解释"要求 Profile 能把这条方法解释清楚，一个 Profile 罩住互不相干
+的几组方法就做不到这一点。三条共用的形状（`meta.profile`、目标建模、`origin_proof`、
+不进 `profiles[]`）在本节写一次，§9.4 与 [realtime.md](realtime.md) 只写各自不同的那部分。
+
 于是同一条扩展方法在线上长这样：
 
 ```
@@ -814,6 +821,84 @@ read_at            # 未读为 null
 P5 的 **Mailbox** 不是这条路。Mailbox 是范围为 `(recipient_did, recipient_device_id)` 的
 **不透明密文队列**，不持有 Ratchet 状态，**不是群/私聊历史**。
 E2EE 会话里的取件走 Mailbox，明文历史走 `inbox.get`。两者别混。
+
+### 9.4 通讯录扩展面：`x_agentx.contacts.v1`
+
+**这是第三个扩展 Profile**（前两个是取件的 `x_agentx.inbox.v1` 与订阅握手的
+`x_agentx.stream.v1`），它答的是一个取件面不管的问题：**"这个名字对我来说是谁"**。
+ANP 按 DID 寻址，而人（以及转述人话的 agent）手里拿的是名字——"给 Alice 捎个话"
+里的人名，线上无人可达。名字到 DID 的这一层规范没有定义，也不该定义：
+它是**调用者自己的记忆**，不是任何一份 DID 文档里的事实。
+
+**为什么它落在服务端，而不是客户端的一个文件。** 备注是"我**给**他起的名字"，
+而"我"在服务端已经有一个确定答案了——就是这条请求的 **已验证签名者**。
+所以行由 `owner_did`（`meta.sender_did`）分行：一个身份的备注对另一个身份
+**天然不可见**，这是结构上的，不靠文件权限；本地也不必再存第二份并与服务端保持同步。
+（对比 TODO6 §3.3 最初的设想——`<store root>/contacts.json`——那份东西的可见性是靠
+`0600` 得到的，而"整机一张"与"每个 agent 一张"的粒度之争在服务端取值下根本不会出现：
+粒度是**身份**。）
+
+**键是 `subject`，不是 `did`。** 「备注」「昵称」「subject」是三个不同的东西：
+备注是**我**给他起的（本地/本服务的记忆），昵称是他**自己**起的（在他自己的主机上），
+`subject` 是**协议**给的稳定主体（在 DID 文档里，且就是为了"换钥不换人"才存在）。
+`did update` 会把 DID 挪走（它内嵌了钥指纹），所以一条备注若挂在 `did` 上，
+就会在对方换钥的瞬间**静默消失**，而用户看到的是"通讯录里怎么少了一个人"。
+`subject` 去掉指纹、留下"还是同一个人"的那一段，正是为这件事存在的。
+**`subject` 由服务端从 `did` 推导，调用方不能给**——让调用方给，就是把键的定义
+分给了每一个客户端。`did` 因此是**列**不是键：它随换钥更新，行不动。
+
+```ts
+subjectOf(did)     // did:wba → 去掉变化的那一段（钥指纹），其余原样返回
+```
+
+`subjectOf` 对不是 `did:wba` 的输入**原样返回**（它是全函数），所以
+`contacts.put` 收一个非 DID 的字符串会成功存下一行——**"是不是 DID"由调用方在参数处挡住**，
+服务端不替它判（服务端只保证键稳定，不保证键可达）。`agentx-cli contacts add` 因此在
+开身份之前就先拒掉非 DID 输入。
+
+**目标建模与 §9.1 同规。** `meta.target = {kind: "agent", did: <owner_did>}`，
+与 `meta.sender_did` 同值；`meta.target.did` **MUST** 等于 `meta.sender_did`，否则回
+**1014 `anp.invalid_target_binding`**。这里没有"改别人的通讯录"这种操作，
+把它做成显式校验而不是"反正也写不进去"。`meta.profile = "x_agentx.contacts.v1"`，
+认证走 `origin_proof`（§9.2），同样**不得**出现在 `profiles[]` 里（§9.1 末段、§13）。
+
+| 方法 | `body` | 结果 |
+|---|---|---|
+| `contacts.list` | `{}` | `{contacts: [{subject, did, remark, created_at, updated_at}]}` |
+| `contacts.put` | `{did, remark?}` | `{contact: {...}, created: bool}` |
+| `contacts.remove` | `{subject}` | `{subject, removed: bool}` |
+
+`contacts.list` 按 `(owner_did)` 取全部行，按 `subject` 排序，`remark` 缺失时报
+**JSON `null`**——"没有备注"与"这个服务不返回备注"不能长得一样。
+
+**`contacts.list` 没有"按名字查一条"的变体，是刻意的。** 判定重名要能列出**候选**，
+而候选只有拿到全表才列得出来；把名单留在客户端，"两个 Alice 就拒、并把两个都列出来"
+这条规则就只有一处实现（[cli.md](cli.md) §5 的负结果纪律同理）。`contacts` 一族是
+"整本取回、本地判定"，不是"服务端搜索"。
+
+`contacts.put` **是幂等的 upsert**，键是 `subjectOf(did)`：已有行则更新，
+`created: false`，且 **`created_at` 保持不变**（它是"这一行什么时候进来的"，
+不是"最后一次被摸是什么时候"——后者是 `updated_at`，每次写都刷新）。
+
+`remark` **缺席即清空**——线上没有"三态"，
+所以"保留原备注"是**客户端**的语义（`agentx-cli` 用缺席＝保留、`--clear-remark`＝清空），
+服务端只认"给了就写、没给就没有"。这一处不对称是**故意的**：服务端做最简单的
+那件事，把"缺字段算不算一次修改"这个判断留给唯一知道用户意图的那一层。
+
+`contacts.remove` 的线上参数是 **`subject`**，不是 `did`——键就是 `subject`，
+让调用方拿 `did` 来删，服务端就得再算一次 `subjectOf`，而"算键"这件事只有一处是对的
+（服务端）。回 `removed: false` 而**不是报错**：删一个已经不在的人是一次成功的删除，
+不是一个错误。要按名字删是**客户端**的事——它先 `contacts.list` 把名字解成 `subject`。
+
+**不做的事记在这里**：没有 `contacts.get_profile` 之类的跨域拉取。昵称与头像在
+**对方自己的**主机上（`get_me`），把它们拷进来就是一份**没有失效机制**的缓存——
+对方改了昵称，本地这份不会知道。`contacts` 只答"这个 DID 对我来说是谁"，
+不答"他自己说自己是谁"，后一个问题属于对方的主机。
+
+**也记一条没做的**：`contacts.put` 收的是 `did`，服务端**不校验它是活的**（不解析、
+不发现）。通讯录可以录一个此刻解析不了的 DID——"我认识这个人"和"这个人此刻在线"
+是两件事，把它们绑起来会让"对方主机挂了"变成"我不能给他加备注"。可达性由
+`msg send` 那一刻的发现去答。
 
 ## 10. 联邦（P8）
 
@@ -950,14 +1035,16 @@ Profile 与安全模式——把 `inbox.*` / `sync.*` / 订阅流塞进去，就
 （一个只实现规范的服务会被误认为支持它们）。扩展能力另走一处，
 由 `GET /.well-known/anp-message-service.json` 的一个 `x_agentx` 块自报，
 并在订阅握手的 `stream.hello` 里再报一次（见 [realtime.md](realtime.md) §9）。
-块里放的是 `x_` 命名空间下的东西（§9.1 与 [realtime.md](realtime.md) §9 那两个
+块里放的是 `x_` 命名空间下的东西（§9.1、§9.4 与 [realtime.md](realtime.md) §9 那三个
 Profile 名），以及分属它们的方法：
 
 ```json
 {
   "x_agentx": {
-    "profiles": ["x_agentx.inbox.v1", "x_agentx.stream.v1"],
-    "methods": ["inbox.get", "inbox.mark_read", "message.get_batch", "stream.ack", "stream.auth", "sync.delta"]
+    "profiles": ["x_agentx.contacts.v1", "x_agentx.inbox.v1", "x_agentx.stream.v1"],
+    "methods": ["contacts.list", "contacts.put", "contacts.remove",
+                "inbox.get", "inbox.mark_read", "message.get_batch",
+                "stream.ack", "stream.auth", "sync.delta"]
   }
 }
 ```
