@@ -394,10 +394,13 @@ msg * / group * / group e2ee *  ──►  packages/service（本仓，:8787 之
       新命令面都跟着加）：`did create|show|publish`（含 no-op / 改一笔 / 无 token 三个分支）、
       `me set|show`（含空参拒绝）、`msg send`、`contacts add|resolve`、`group create|info|
       members|set-remark`、**`group join|leave|update-profile|send`**（2026-10-02 补，此前
-      这四条只有"写过"没有"跑过"）、`group e2ee publish|create`。**还差**：`group e2ee`
-      的 `get-key-package` / `add` / `remove` / `send` 四条（手工跑过，脚本里没有）、
-      `did update` 与它的 `--resume`、`anp login` 的 401 挑战那条路。这几条各自要一台
-      愿意配合的主机或第二个设备，不是能顺手塞进去的。
+      这四条只有"写过"没有"跑过"）、`group e2ee publish|create|get-key-package|add|send|
+      remove`（2026-10-02 补全，`f6e284c`）——P6 的四条控制方法此前只有手工跑过，现在脚本
+      里也跑，其中"柜子是空的"那条是**以拒绝为预期**的负结果（5000 `key_package_not_found`）。
+      脚本一并记下了 KeyPackage 的**一次性**语义：`get_key_package` 在挑的同时就占住它
+      （§8.2.4 L767 的 MAY），所以"读一枚来断言"与"让 `add` 拿走一枚"是两次消耗。
+      **还差**：`did update` 与它的 `--resume`、`anp login` 的 401 挑战那条路。这几条各自要
+      一台愿意配合的主机或第二个设备，不是能顺手塞进去的。
 - [x] ~~**负结果的测试值得单列。** 这个客户端的正确行为里有好几条"对端不支持时应该怎样"~~
       （`msg inbox` 一族对 awiki 回 `-32601` 是**正确**结果，`cli.md` §5）。
       这类断言最容易在重构里被悄悄改成"跳过"，要有测试咬住。
