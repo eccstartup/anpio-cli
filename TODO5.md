@@ -230,7 +230,7 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 | 身份 | 换钥 / `update_document` | ~~做完~~（换钥是 `did update`；`update_document` 是 `did publish`，见 §6） |
 | 身份 | 换设备 | ~~不做~~（本机 awiki host 对它回 `device_key_or_root_change_not_supported` / `device_enrollment_or_removal_not_supported`，`replace_did` 直接 `not_supported`——不是没做，是对端没有这条路，见 §6） |
 | 库侧 | 信封 / 那一跳 HTTP / SSRF 逐跳 / 身份存储 / MLS store | ~~做完~~ |
-| 库侧 | 消息库 `messages.db`（§4、Phase 2） | **设计已定 + 写入侧落地**（TODO6 §7，`a5727d4` 设计 → [client-messages.md](docs/design/client-messages.md)，`a04cc5e`/`5c3d5d8` 实现）；**读侧没动** |
+| 库侧 | 消息库 `messages.db`（§4、Phase 2） | **设计已定 + 写入侧落地**（TODO6 §7，`a5727d4` 设计 → [client-messages.md](docs/design/client-messages.md)，`a04cc5e`/`5c3d5d8` 实现）；**读侧待重画交互（2026-10-03 裁定：读 = 本地、远程 = fetch，先放着）** |
 | 收束 | Phase 4：`packages/e2e` 覆盖新客户端 / 命令面定稿 / TS CLI 冻结 | 还没 |
 
 **Phase 0 —— 先证那条缝（spike，不进仓库）** —— [x] ~~已做完（2026-10-02）~~
@@ -667,7 +667,7 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
   别把它当成待办——按 §1 的判据，一条没有对端的命令行不是缺口，是噪音。
 - **与 TS `connectx` 并存**，`CONNECTX_HOME` 的处理见 §8-F。
 
-**Phase 2 —— 消息库**（设计已定；写入侧落地，读侧没动）
+**Phase 2 —— 消息库**（设计已定；写入侧落地；读侧待重画交互 —— 读 = 本地、远程 = fetch，2026-10-03 裁定，先放着）
 - [x] ~~`messages.db`（§4）+ 本地游标 + 与 `mls/` 的分工；read 状态与对账规则落定。~~
       —— **2026-10-02（`a5727d4`）**：落在 [docs/design/client-messages.md](docs/design/client-messages.md)
       （TODO6 §7）。方向按 §0.1 第 2、3 条执行；两处补充是这一步才看出来的：
@@ -682,7 +682,14 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
       `group_state_version` 取刚造出来的密文自己的 `group_state_ref`——和接收侧读的是同一个字段。
       `scripts/e2e.sh` 直接读那个文件断言：两边各有一行，且 bob 的 `applied_seq` 等于它落的那行的
       `service_seq`（§2.1 的先后，在能观测的地方被咬住）。
-- [ ] 读侧待裁定：`msg inbox` 变本地优先 / 新增 `msg history` / 加 `--local`（那份文档 §8）。
+- [ ] 读侧要**重新设计交互**，不是在现有命令上加个旗标。用户 2026-10-03 的原话：
+      「读聊天记录就是读本地，远程是 fetch，把交互重新设计，先放着，记下来」——
+      所以方向是**读 = 本地**（`msg inbox` 那一族的语义从"服务端有什么"变成"我有什么"），
+      而**从服务端取**成为一条显式的 `fetch`（语义是"把服务端还有的搬进本地库"，
+      是一次**写**、不是一次读）。这条与下面那条（服务端 ack / 保留 / 补拉）是同一块的两面。
+      **先放着**：今天不动。三条候选（`msg inbox` 本地优先 / 新增 `msg history` / `--local`）
+      在 [client-messages.md](docs/design/client-messages.md) §8 记着，但真动时按"读 = 本地、
+      取 = fetch"重画命令面，不是从这三条里挑一条。
 - [ ] 这一步**触及服务端**（ack / 保留 / 补拉），与"把服务做好"合并做。
 
 **Phase 3 —— 逐族补齐**（每族一次提交）
