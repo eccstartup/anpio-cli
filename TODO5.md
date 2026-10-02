@@ -217,7 +217,7 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 | `group e2ee` | `add` | ~~做完~~（对真服务跑通；群寻址，commit/welcome 进设备队列） |
 | `group e2ee` | `remove` | ~~做完~~（对真服务跑通；群寻址，目标 leaf 转 terminal） |
 | `group e2ee` | `send` | ~~做完~~（对真服务跑通；群寻址，收件进设备队列，只推 `group_event_seq`） |
-| `group e2ee` | 收包路径（`process_welcome_v2` / `process_commit_v2`） | 还没（靠 `msg listen` 投递驱动） |
+| `group e2ee` | 收包路径（`process_notice_v2` / `decrypt_received_v2`） | ~~做完~~（`msg listen` 投递驱动，对真服务跑通 commit/welcome/final-notice 与 `group.incoming`） |
 | `anp` | `show` / `login` / `sign` | 还没 |
 | `agent` | `show` / `use` / `list` | 还没 |
 | — | `version` | 还没 |
@@ -416,8 +416,8 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
   而是往**设备队列**（`device_envelopes`）排：源成员拿到一条 `commit`，新成员拿到 `commit`
   再一条 `welcome`（§12.5/§12.6）。已核对本仓服务确实这样排（`emitAddEnvelopes` →
   `enqueueDeviceEnvelope`，两张表分开）——所以那两张 envelope 在 `deliveries` 里查不到
-  **是对的**，它们等的正是还没写的 `process_welcome_v2` / `process_commit_v2`（由 `msg listen`
-  投递驱动，见「未做」）。
+  **是对的**，它们等的正是 `process_notice_v2` / `decrypt_received_v2`（由 `msg listen`
+  投递驱动）。→ [x] ~~已落（2026-10-02）~~，见 §6 与「收包路径」那一节。
 - **`group e2ee remove` 已落并对真服务跑通（2026-10-02）**，四条控制方法里的第三条（§9.4）。
   它是 `add` 的镜像，但**只开一条 channel**，值得记的就三处：
   （a）**目标 leaf 是点名的，没有包可取**。`add` 的成员那一对来自 KeyPackage，`remove` 的
@@ -461,7 +461,41 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
   端到端（carol 对 e2e3 群发两次，一次 `--text` 一次 `--body`）：都回 `accepted: true`，
   epoch 2、**P4 的 `group_state_version` 停在 2**（§14.1：进排序链的只有 `send`），
   `group_event_seq` 从 2 推到 3、4；设备队列里 carol（群里唯一 `active` 的 leaf）各多一条
-  `incoming`——那正是还没写的收包路径要取的东西。
+  `incoming`——那正是收包路径（`group_receive.rs`）要取的东西，已落。
+- **`group e2ee` 收包路径已落并对真服务跑通（2026-10-02）**，收到的正是 §12 那两类推送。
+  它与 `msg listen` 的关系值得写清：`msg listen` 只管**传输与游标**（连接、重连、
+  `deliveries` 推进），**不知道任何 MLS**；`group_receive.rs` 是插进去的一层，
+  拿到帧才知道该不该管。四处值得记：
+  （a）**这两类帧不进 `deliveries`，所以绝不能推游标**（§12.6 没有 ack，服务写完 WS 就删行，
+  是 at-least-once）。派发因此插在投递过滤**之前**并 `continue`——为一个既不占号、
+  又可能重发的帧推游标，等于替本机认领了一条从没被投递过的消息，下次重连就会跳过那一号。
+  测试把这个计数钉住了：紧随其后的 P4 `group.incoming` 拿到的是 `head + 1`，
+  只有在前面那两帧一个号都没占的前提下才可能。
+  （b）**`group.incoming` 这个名字与 P4 共用**，§12.5 是唯一的分野——e2ee 那一臂读的是
+  `security_profile = group-e2ee`。所以接收方只在这个 profile 下认领它，其余回 `Ok(None)`，
+  P4 的那条照旧走普通投递。**认领过的帧若出错，就当终局**，不再落到 `decode_message`——
+  否则一条已经进过 e2ee 路的帧会被画成"服务可见的投递"，那是它从来不是的东西。
+  （c）**通知要的是全体成员的文档**，不是发送方一人的：一条 Welcome 要验整片 leaf。
+  这些文档取自 P4 的名单而不是本地 MLS 状态——首次 Welcome 时本地根本还没有这个群。
+  它们**故意不缓存**：文档是"这台设备现在拿哪把钥签名"的权威，缓存旧了会表现为验签失败，
+  那看起来像对方坏了，而不是像自己的缓存旧了。**通道**反而缓存，因为那是路由、不是密钥材料。
+  （d）**先到的那条 Commit 会报 `group_not_found: no local MLS group binding found`，
+  这是对的，不是 bug**：一台从没见过该群的设备无法把 Commit 应用到它上面，Welcome 才是建群
+  的那一条。它作为一条状态行报出、会话继续，而不是终结一次「马上就对了」的运行。
+- **跑通这条路上顺带修了服务端两个 bug**（都真发生了，不是预防性改动，各一次提交）：
+  （a）**一次 Add 的 commit 与 welcome 共用一个 `meta.operation_id`**（Remove 的保留 leaf 提交与
+  final-notice 同理）。`notice_id` 不在乎这个——§7.6 L665 明说一次密码学结果的各片 leaf MAY 共用——
+  但 `anp` 的 `process_notice_v2` 用 `p6-v2-notice:{meta.operation_id}` 做回执键，存的是
+  `{meta, notice, recipient_did, recipient_device_id}` 的摘要，同键不同内容直接回
+  `group.e2ee.commit_invalid: notice operation_id was replayed with different content`。
+  被加入的那台设备**两条都收**（§12.4 welcome 只发给它，commit 发给包括它在内的每一片 leaf），
+  同收件人、不同内容、一个键——基于 crate 的接收方解不出第二条。改法是逐信封各造一个 id。
+  （b）**客户端断开会把服务进程带走**。`ws.ts` 的 `finish()` 在退出时把 socket 的 `data`/`close`
+  **连同 `error`** 监听都摘了；前两个是收尾，第三个是致命的——`finish` 在连接结束时都要跑，
+  而拆掉 socket 恰恰会招来下一个事件：对面消失后 RST 晚一拍才被读到，Node 在 socket 上以
+  `error` 抛出，**没有监听者的 `error` 事件按设计就是致命的**。序列于是变成
+  "客户端突然断开" → "服务退出"。连续三次打断 `msg listen` 复现了它；去掉那一行即可
+  （`finish` 本来就靠 `closed` 幂等，多留一个监听者什么都不改）。
 - **第四个坑：crate 内部验文档那条路没有 `document_is_bound` 的那层回退。** §6 上面记的
   `@context` 折入问题不只在**解析**侧：`generate_key_package_v2` 会拿调用方递进来的
   issuer 文档再跑一次 `validate_did_document_binding`（`rust/src/proof/object_proof.rs`），
@@ -472,9 +506,7 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
   `document_in_crate_form`（要的是"递给 crate 的那份"），`mls.rs` 用后者。**只换编码，
   不重写验签器**，与解析侧同一条底线。这也解释了为什么 §8-J 生成侧与解析侧会互为镜像：
   同一个 crate 的签与验在 base58 这条分支上就不自洽。
-- **未做**：`group e2ee` 的收包路径
-  （`process_welcome_v2` / `process_commit_v2`，靠 `msg listen` 投递驱动）；身份这块还剩
-  "换钥/换设备/`update_document`"。
+- **未做**：身份这块还剩 "换钥/换设备/`update_document`"。
 - 先落 **`msg`** 一族（含 `msg listen` 常驻契约），因为它是 §4 消息库的入口。
   → [x] ~~已落~~
 - **与 TS `connectx` 并存**，`CONNECTX_HOME` 的处理见 §8-F。
@@ -492,7 +524,7 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 - [x] ~~`group e2ee add`~~（2026-10-02）
 - [x] ~~`group e2ee remove`~~（2026-10-02）
 - [x] ~~`group e2ee send`~~（2026-10-02）
-- [ ] `group e2ee` 收包路径：`process_welcome_v2` / `process_commit_v2`（靠 `msg listen` 投递驱动）
+- [x] ~~`group e2ee` 收包路径：`process_notice_v2` / `decrypt_received_v2`~~（2026-10-02；靠 `msg listen` 投递驱动）
 - [ ] 身份：换钥 / 换设备 / `update_document`
 - [ ] `did` 剩下的三条：`resolve` / `update` / `restore`
 - [ ] `anp` 一族：`show` / `login` / `sign`
@@ -520,8 +552,9 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 Phase 1 到此收口：`msg listen` 与 `group` 一族都已落地（见 §6）。Phase 3 已开工：
 `group e2ee` 的六条方法（两条服务作用域的 `publish` / `get-key-package`，四条控制方法
 `create` / `add` / `remove` / `send`）已落并对真服务跑通
-（见 §6），接着是收包路径（`process_welcome_v2` / `process_commit_v2`），然后是剩下的身份工作
-（换钥 / 换设备 / `update_document`）与 `did` / `anp` / `agent` 三族。
+（见 §6），收包路径（`process_notice_v2` / `decrypt_received_v2`，由 `msg listen` 投递驱动）
+也已落并对真服务跑通，然后是剩下的身份工作（换钥 / 换设备 / `update_document`）与
+`did` / `anp` / `agent` 三族。
 
 ---
 
