@@ -690,7 +690,10 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
       **先放着**：今天不动。三条候选（`msg inbox` 本地优先 / 新增 `msg history` / `--local`）
       在 [client-messages.md](docs/design/client-messages.md) §8 记着，但真动时按"读 = 本地、
       取 = fetch"重画命令面，不是从这三条里挑一条。
+      —— **2026-10-03：这一条连同下面那条，一起挪进了 [TODO7.md](TODO7.md)**（§2 读侧重画、
+      §3 服务端那半、§4 两份真相对账）。这里留个指针，别再在两处各说各的。
 - [ ] 这一步**触及服务端**（ack / 保留 / 补拉），与"把服务做好"合并做。
+      —— **2026-10-03：挪进 [TODO7.md](TODO7.md) §3。**
 
 **Phase 3 —— 逐族补齐**（每族一次提交）
 `group`（含 `group e2ee`，即 B2 的目标）→ `did` → `anp`（login/sign）→ `agent`。
