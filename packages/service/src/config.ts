@@ -13,7 +13,7 @@
 // unbounded; the allowlist is exact at every setting.
 
 import { dirname, join } from 'node:path'
-import { ConnectxError } from '@agentx/core'
+import { ConnectxError, createDidDocumentStore, type DidDocumentStore } from '@agentx/core'
 
 /** 1 MiB, §14. Attachments travel on the data plane and never through this limit. */
 const DEFAULT_MAX_BODY = 1024 * 1024
@@ -35,6 +35,11 @@ const DEFAULT_PREKEY_PER_MINUTE = 60
 const DEFAULT_DEVICE_QUEUE_MAX_ATTEMPTS = 8
 const DEFAULT_DEVICE_QUEUE_MAX_AGE_MS = 24 * 60 * 60_000
 
+/** 一份 DID 文档最多被缓存多久。core 的 `DEFAULT_CACHE_TTL_MS` 就是这个值，这里显式写出来
+ *  是因为它在本服务里不只是"省一次抓取"——它是**对端身份变化的发现时延上界**（见
+ *  {@link DidResolution.documentStore}）。 */
+const DEFAULT_DID_CACHE_TTL_MS = 300_000
+
 export interface ListenAddress {
   host: string
   port: number
@@ -54,6 +59,22 @@ export interface DidResolution {
   /** 本地联调才设的一对豁免：这些主机免掉"解析到私有地址"与"必须走 https"两道闸。 */
   allowPrivateHosts?: string[]
   allowInsecureTransport?: string[]
+  /**
+   * 解析出来的文档留在这里，进程内共享一份。
+   *
+   * 不配它，每一次解析（受理一条外来调用、投递前找入口、跨域出站）都是一次真抓取——同一
+   * 个 DID 在一次投递里会被抓两遍，而它是**对端身份的实时投影**，改动的唯一发现方式就是再
+   * 抓一次。配上它之后每个 DID 每个 {@link cacheTtlMs} 窗口最多抓一次，负载有了上界。
+   *
+   * 它解决的是"多久看一次"，不解决"看到了算不算"：`cacheTtlMs` 是**发现时延的上界**，
+   * 而"这台设备还算不算数"仍要在用的时候按当次拿到的文档判（`rpc/eligibility.ts` 没有缓存）。
+   * 真正危险的那一侧——旧的结论还被当成有效——由 core 的两条规则关住：标了 `deactivated`
+   * 或带 `successorDid` 的文档**不写进缓存**，缓存里那份**变了之后也不再被读出**
+   * （`resolveDid.ts` 的 `isSuperseded`）。
+   */
+  documentStore: DidDocumentStore
+  /** 一份缓存的文档最多被沿用多久，毫秒。见 {@link documentStore}。 */
+  cacheTtlMs: number
 }
 
 /**
@@ -162,6 +183,11 @@ function parseDidResolution(env: NodeJS.ProcessEnv): DidResolution {
   const devHosts = parseHosts(env.AGENTX_DID_DEV_HOSTS)
   const resolution: DidResolution = {
     allowedHosts: [...new Set([...parseHosts(env.AGENTX_ALLOWED_DID_HOSTS), ...devHosts])],
+    // 一份进程内共享的缓存。放在这里而不是各个调用点各自 new 一个：受理、投递、出站三条路
+    // 各自持有一份就等于三份互不知情的缓存，同一个 DID 会被抓三倍次数，而"多久看一次"这件
+    // 事也没法再配成一个数。
+    documentStore: createDidDocumentStore(),
+    cacheTtlMs: parsePositive(env.AGENTX_DID_CACHE_TTL_MS, 'AGENTX_DID_CACHE_TTL_MS', DEFAULT_DID_CACHE_TTL_MS),
   }
   if (devHosts.length > 0) {
     resolution.allowPrivateHosts = devHosts

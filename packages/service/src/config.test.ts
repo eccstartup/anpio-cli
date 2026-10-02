@@ -212,3 +212,32 @@ describe('AGENTX_ALLOWED_DID_HOSTS / AGENTX_DID_DEV_HOSTS', () => {
     expect(config.didResolution.allowedHosts).toEqual(['localhost'])
   })
 })
+
+describe('AGENTX_DID_CACHE_TTL_MS / the shared document store (A3)', () => {
+  it('carries one store and the core default TTL when nothing is configured', () => {
+    const config = loadConfig({})
+    expect(typeof config.didResolution.documentStore.get).toBe('function')
+    expect(config.didResolution.cacheTtlMs).toBe(300_000)
+  })
+
+  it('gives each load its own store, so a test cannot leak a cached document into the next', () => {
+    // The alternative — a module-level singleton — would make every `loadConfig({})` in this
+    // suite share whatever the previous one resolved. It would also be invisible: a cached
+    // document answers exactly like a freshly fetched one.
+    expect(loadConfig({}).didResolution.documentStore).not.toBe(loadConfig({}).didResolution.documentStore)
+  })
+
+  it('takes the TTL from the environment, and treats an empty value as unset', () => {
+    expect(loadConfig({ AGENTX_DID_CACHE_TTL_MS: '60000' }).didResolution.cacheTtlMs).toBe(60_000)
+    expect(loadConfig({ AGENTX_DID_CACHE_TTL_MS: '' }).didResolution.cacheTtlMs).toBe(300_000)
+  })
+
+  it('refuses a TTL that is not a positive integer', () => {
+    // 0 would mean "never serve a cached document", which is a legitimate-sounding intent
+    // that this knob deliberately does not have: it would keep the store populated while
+    // making every resolution a fetch, i.e. the load of no cache with the staleness rules of
+    // one. Turning the cache off entirely is `documentStore`, not a TTL of zero.
+    expect(() => loadConfig({ AGENTX_DID_CACHE_TTL_MS: '0' })).toThrow(/positive integer/)
+    expect(() => loadConfig({ AGENTX_DID_CACHE_TTL_MS: '-1' })).toThrow(/positive integer/)
+  })
+})

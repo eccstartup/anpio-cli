@@ -959,6 +959,7 @@ AGENTX_MAX_BODY         请求体上限，默认 1 MiB（附件走数据面，�
 AGENTX_MAX_OBJECT_BYTES 单个附件对象上限，默认 64 MiB（数据面 PUT 时边收边判）
 AGENTX_ALLOWED_DID_HOSTS  允许出站解析 DID 文档的域，逗号/空白分隔，**默认空**
 AGENTX_DID_DEV_HOSTS      联调放宽：这些域可以解析私有地址、可以用 http
+AGENTX_DID_CACHE_TTL_MS   一份解析出来的 DID 文档最多沿用多久，默认 5 分钟（见下）
 AGENTX_PREKEY_BURST       两条 Key 方法每个调用方的突发额度，默认 60
 AGENTX_PREKEY_PER_MINUTE  同上，每分钟补充的令牌数（持续速率），默认 60
 AGENTX_DEVICE_QUEUE_MAX_ATTEMPTS  一条 P6 设备信封最多尝试几次，默认 8（§12.6 有界保留）
@@ -975,6 +976,13 @@ AGENTX_DEVICE_QUEUE_MAX_AGE_MS    一条 P6 设备信封最多在队里待多久
 所以跨域接收在默认配置下**跑不起来**，必须把对端域加进 `ALLOWED_DID_HOSTS`。
 关掉开关比放松白名单危险得多，所以这条不改，写清楚见
 [federation.md](federation.md) §2.5。
+
+**DID 文档缓存**（A3）：受理、投递、出站三条路共用**一份**进程内缓存，每个 DID 每个 TTL
+窗口最多抓一次——不配它，同一次投递里"找入口"与"看设备清单"会把同一份文档抓两遍。它同时
+是**对端身份变化的发现时延上界**：ANP 不为文档变化提供任何推送（P2 §5.5 规则 8），所以这个
+窗口不可能为零，只能由这个数封住。缓存里放的是**已验过、且当下仍是当前版本**的文档：标了
+`deactivated` 或带 `successorDid` 的文档不写进缓存，缓存里那份一旦变得不再是当前版本也不再
+被读出（core `resolveDid.ts` 的 `isSuperseded`）。
 
 ## 15. 实现顺序
 
