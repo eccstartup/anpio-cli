@@ -20,12 +20,14 @@ import {
   anpRejection,
   buildMessageNotification,
   ConnectxError,
+  parsePrivateKey,
   profileRejection,
   type AnpAuth,
   type AnpMeta,
   type AnpParams,
   type AnpRejection,
 } from '@agentx/core'
+import { signDidDocumentProofSync } from '@agentx/core/advanced'
 import type { DeliveryRecord, Storage } from '../storage/types'
 import { attachmentGrantsFor, insertAttachmentGrants, sha256b64u } from './attachments'
 import { isNonEmptyString, unknownField } from './body'
@@ -319,20 +321,30 @@ function operationIdOf(meta: AnpMeta): string {
   return id
 }
 
-/** §7.9 L500–504 的 `group_receipt`，`proof` 缺席的理由见 [groups.md](../docs/design/groups.md) §7。 */
-export function groupReceipt(input: {
-  receiptType: string
-  groupDid: string
-  stateVersion: number
-  eventSeq: number
-  subjectMethod: string
-  operationId: string
-  actorDid: string
-  acceptedAt: string
-  payloadDigest: string
-  messageId?: string
-}): Record<string, unknown> {
-  return {
+/** 签回执只需要群钥那一处存储。用结构子集而不是整个 `GroupContext`，是因为群 E2EE 那
+ *  一侧的上下文（`GroupControlContext`）在 `auth` 等字段上与它不同形，而这里要的从来只有
+ *  存储这一件。 */
+export interface ReceiptKeyStore {
+  storage: Storage
+}
+
+/** §7.9 L500–504 的 `group_receipt`，`proof` 由 {@link receiptProof} 附上。 */
+export function groupReceipt(
+  ctx: ReceiptKeyStore,
+  input: {
+    receiptType: string
+    groupDid: string
+    stateVersion: number
+    eventSeq: number
+    subjectMethod: string
+    operationId: string
+    actorDid: string
+    acceptedAt: string
+    payloadDigest: string
+    messageId?: string
+  },
+): Record<string, unknown> {
+  const receipt: Record<string, unknown> = {
     receipt_type: input.receiptType,
     group_did: input.groupDid,
     // §7.9 L506–507 与 §6.3 L249：两个都是**字符串**，不是数字。
@@ -344,6 +356,37 @@ export function groupReceipt(input: {
     actor_did: input.actorDid,
     accepted_at: input.acceptedAt,
     payload_digest: input.payloadDigest,
+  }
+  return receiptProof(ctx, input.groupDid, receipt, input.acceptedAt)
+}
+
+/**
+ * 回执的 `proof`（B1b-A5）。
+ *
+ * §7.9 L516：回执会离开 Host 所在域、被别的域依赖时 **MUST** 有 proof。本实现**一律签**
+ * ——回执只有一条生成路径，按来源域分成"签/不签"两种形状，等于给未来留一个"跨域回执漏签"
+ * 的坑，而签一次是对称的本地操作（同域多签一次没有第二个验证方，也就没有额外信任面）。
+ *
+ * **没有钥的群是唯一的例外，而它不是降级。** v11 之前建的群没有钥（A1 决定不补铸），
+ * 因而也没有可发布的群文档（A3 的路由对它们答 404），于是它**不可能跨域**——§7.9 那条 MUST
+ * 对它无从谈起。判据 `groupSigningKey` 在不在，是这个群**创建时**就定下的属性，不随请求
+ * 变，所以不会出现"同一种回执有时签有时不签"。
+ *
+ * `created` 取 `accepted_at` 而不是现实时钟：回执的每个字段都锚在这一次受理的时刻上，让
+ * proof 的时间指向别处只会让两份时间戳互相打架，测试也没法钉住。
+ */
+function receiptProof(
+  ctx: ReceiptKeyStore,
+  groupDid: string,
+  receipt: Record<string, unknown>,
+  acceptedAt: string,
+): Record<string, unknown> {
+  const key = ctx.storage.groupSigningKey(groupDid)
+  if (key === undefined) return receipt
+  const { privateKey } = parsePrivateKey(key.privateKeyHex, 'ed25519')
+  return {
+    ...receipt,
+    proof: signDidDocumentProofSync(receipt, groupDidKeyId(groupDid), privateKey, { created: acceptedAt }),
   }
 }
 
@@ -410,7 +453,7 @@ function announce(ctx: GroupContext, change: StateChange): void {
     ...(change.subjectDid !== undefined ? { subject_did: change.subjectDid } : {}),
     ...(change.previousSubjectDid !== undefined ? { previous_subject_did: change.previousSubjectDid } : {}),
     ...(change.membershipStatus !== undefined ? { membership_status: change.membershipStatus } : {}),
-    group_receipt: groupReceipt({
+    group_receipt: groupReceipt(ctx, {
       receiptType: RECEIPT_OPERATION,
       groupDid,
       stateVersion: change.stateVersion,
@@ -792,6 +835,18 @@ function newGroupId(): string {
  *  三处各写一遍 `':g:'` 的结果是改了一处、另外两处安静地按旧形状走。 */
 export const GROUP_DID_SEGMENT = 'g'
 
+/** 群文档里那个验证方法的 fragment。`didDocument.ts` / `signDidDocumentProof` 只看
+ *  `keyid`，对 fragment 的拼法没有规定；取 `key-1` 是因为它是 `did:web` 文档里最常见的
+ *  那一个，别的域的手写解析器大概率已经见过它。 */
+export const GROUP_KEY_FRAGMENT = 'key-1'
+
+/** 群的验证方法 id：文档里 `authentication` / `assertionMethod` 挂它，A5 的回执
+ *  `proof.verificationMethod` 也填它。**一处定义**——两处各写一遍就会出现"签的是 key-1、
+ *  文档里挂的是 key-2"那种验不过又不报错的状态。 */
+export function groupDidKeyId(groupDid: string): string {
+  return `${groupDid}#${GROUP_KEY_FRAGMENT}`
+}
+
 /** 由群 id 拼出 `group_did`。 */
 export function groupDidOf(serviceDid: string, groupId: string): string {
   return `${serviceDid}:${GROUP_DID_SEGMENT}:${groupId}`
@@ -867,7 +922,7 @@ function createGroup(ctx: GroupContext): Record<string, unknown> {
     creator_did: actor,
     group_profile: profile,
     group_policy: policy,
-    group_receipt: groupReceipt({
+    group_receipt: groupReceipt(ctx, {
       receiptType: RECEIPT_OPERATION,
       groupDid,
       stateVersion: 1,
@@ -1003,7 +1058,7 @@ function joinGroup(ctx: GroupContext): Record<string, unknown> {
     member_did: actor,
     membership_status: 'active',
     group_state_version: String(groupStateVersion),
-    group_receipt: groupReceipt({
+    group_receipt: groupReceipt(ctx, {
       receiptType: RECEIPT_OPERATION,
       groupDid: view.groupDid,
       stateVersion: groupStateVersion,
@@ -1053,7 +1108,7 @@ function addMember(ctx: GroupContext): Record<string, unknown> {
     member_did: memberDid,
     membership_status: 'active',
     group_state_version: String(groupStateVersion),
-    group_receipt: groupReceipt({
+    group_receipt: groupReceipt(ctx, {
       receiptType: RECEIPT_OPERATION,
       groupDid: view.groupDid,
       stateVersion: groupStateVersion,
@@ -1107,7 +1162,7 @@ function removeMember(ctx: GroupContext): Record<string, unknown> {
     member_did: memberDid,
     membership_status: 'removed',
     group_state_version: String(groupStateVersion),
-    group_receipt: groupReceipt({
+    group_receipt: groupReceipt(ctx, {
       receiptType: RECEIPT_OPERATION,
       groupDid: view.groupDid,
       stateVersion: groupStateVersion,
@@ -1151,7 +1206,7 @@ function leaveGroup(ctx: GroupContext): Record<string, unknown> {
     group_did: view.groupDid,
     leaver_did: actor,
     group_state_version: String(groupStateVersion),
-    group_receipt: groupReceipt({
+    group_receipt: groupReceipt(ctx, {
       receiptType: RECEIPT_OPERATION,
       groupDid: view.groupDid,
       stateVersion: groupStateVersion,
@@ -1188,7 +1243,7 @@ function updateProfile(ctx: GroupContext): Record<string, unknown> {
     group_did: view.groupDid,
     group_state_version: String(groupStateVersion),
     group_profile: merged,
-    group_receipt: groupReceipt({
+    group_receipt: groupReceipt(ctx, {
       receiptType: RECEIPT_OPERATION,
       groupDid: view.groupDid,
       stateVersion: groupStateVersion,
@@ -1228,7 +1283,7 @@ function updatePolicy(ctx: GroupContext): Record<string, unknown> {
     group_did: view.groupDid,
     group_state_version: String(groupStateVersion),
     group_policy: merged,
-    group_receipt: groupReceipt({
+    group_receipt: groupReceipt(ctx, {
       receiptType: RECEIPT_OPERATION,
       groupDid: view.groupDid,
       stateVersion: groupStateVersion,
@@ -1304,7 +1359,7 @@ function sendToGroup(ctx: GroupContext): Record<string, unknown> {
     }),
   )
 
-  const receipt = groupReceipt({
+  const receipt = groupReceipt(ctx, {
     receiptType: RECEIPT_MESSAGE,
     groupDid: view.groupDid,
     stateVersion: groupStateVersion,

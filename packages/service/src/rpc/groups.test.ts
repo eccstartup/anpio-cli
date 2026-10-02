@@ -4,9 +4,11 @@
 // 两个通知的发起者分别是谁、拒绝回哪个码——而信封、认证、幂等各有自己的测试。
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import type { AnpMeta, AnpRejection } from '@agentx/core'
+import { verifyObjectProofDetailed, type AnpMeta, type AnpRejection } from '@agentx/core'
+import { loadConfig } from '../config'
 import { openStorage } from '../storage/sqlite'
 import type { DeliveryRecord, Storage } from '../storage/types'
+import { groupDidDocument } from './groupDidDocument'
 import {
   GROUP_ADD,
   GROUP_CREATE,
@@ -22,6 +24,7 @@ import {
   GROUP_STATE_CHANGED,
   GROUP_UPDATE_POLICY,
   GROUP_UPDATE_PROFILE,
+  groupDidKeyId,
   validateAddBody,
   validateCreateBody,
   validateJoinBody,
@@ -167,8 +170,17 @@ describe('group.create (P4 §8.1)', () => {
       accepted_at: AT,
       payload_digest: DIGEST,
     })
-    // 回执**没有** `proof`（groups.md §7）：同域 v1 没有第二个验证方。
-    expect(result.group_receipt).not.toHaveProperty('proof')
+    // 回执**带** `proof`（groups.md §7，B1b-A5 起一律签）：`assertionMethod` 授权的那个
+    // keyid，`created` 取 `accepted_at` 而不是现实时钟。验证本身在下面那个 describe 里。
+    expect(result.group_receipt).toMatchObject({
+      proof: {
+        type: 'DataIntegrityProof',
+        cryptosuite: 'eddsa-jcs-2022',
+        proofPurpose: 'assertionMethod',
+        verificationMethod: groupDidKeyId(groupDid),
+        created: AT,
+      },
+    })
   })
 
   it('mints the group its own Ed25519 key, in the same transaction as the group row', () => {
@@ -236,6 +248,117 @@ describe('group.create (P4 §8.1)', () => {
     expect(validateCreateBody({ group_policy: OPEN_POLICY, name: 'x' })?.code).toBe(1003)
     // 每个条目都得有 `member_did`（§8.1.2 L629）。
     expect(validateCreateBody({ group_policy: OPEN_POLICY, initial_members: [{}] })?.code).toBe(1003)
+  })
+})
+
+// B1b-A5 —— 回执的证明。
+//
+// 证明里的每一样都指向"这次受理"：`payload_digest` 是请求的 SRO 摘要、两个序号是排序位置、
+// `verificationMethod` 是群文档里被 `assertionMethod` 授权的那个 keyid。
+//
+// 验证走 `verifyObjectProofDetailed(receipt, groupDid, groupDocument)`——与
+// `groupDidDocument.test.ts` 里验那份文档本身的是**同一条路**（附录 B 的九步）。这里比那边
+// 多钉一层：回执的 `verificationMethod` 必须真的被**那份群文档**授权，否则一句"某把钥签了
+// 个东西"就冒充了群对这次受理的确认。
+describe('the group_receipt proof (B1b-A5)', () => {
+  /** 群文档就是本服务发布给别的域的那一份（A2/A3）。这里只拿它当"授权清单"用，所以
+   *  `serviceEntry` 取自哪份配置都行。 */
+  function documentOf(groupDid: string): Record<string, unknown> {
+    const document = groupDidDocument(storage, loadConfig({}), groupDid)
+    if (document === undefined) throw new Error(`no document for ${groupDid}`)
+    return document
+  }
+
+  function verify(receipt: Record<string, unknown>, groupDid: string) {
+    return verifyObjectProofDetailed({
+      document: receipt,
+      issuerDid: groupDid,
+      issuerDocument: documentOf(groupDid),
+    })
+  }
+
+  function receiptOf(result: Record<string, unknown>): Record<string, unknown> {
+    const receipt = result.group_receipt
+    if (typeof receipt !== 'object' || receipt === null) throw new Error('no group_receipt')
+    return receipt as Record<string, unknown>
+  }
+
+  it('signs the receipt of every mutating method, against the published document', () => {
+    const groupDid = mintGroup(OPEN_POLICY, { initial_members: [{ member_did: BOB }] })
+    const receipts = [
+      receiptOf(invoke(GROUP_UPDATE_PROFILE, {
+        actor: ALICE,
+        target: groupDid,
+        body: { group_profile_patch: { name: 'weeklies' } },
+        operationId: 'op-2',
+      })),
+      // 消息那条是另一个 receipt_type（`group-message-accepted`），也是另一个构造点。
+      receiptOf(invoke(GROUP_SEND, {
+        actor: BOB,
+        target: groupDid,
+        body: { text: 'hello' },
+        operationId: 'op-3',
+        messageId: 'm-1',
+        contentType: 'text/plain',
+      })),
+    ]
+
+    for (const receipt of receipts) {
+      const verdict = verify(receipt, groupDid)
+      expect(verdict.ok).toBe(true)
+      if (verdict.ok) expect(verdict.verificationMethod).toBe(groupDidKeyId(groupDid))
+    }
+  })
+
+  it('fails verification as soon as any field of the receipt is edited', () => {
+    // 摘要签的就是整份回执，所以改一个序号就够了——这正是"回执不可伪造"的全部内容。
+    const groupDid = mintGroup()
+    const receipt = receiptOf(invoke(GROUP_UPDATE_PROFILE, {
+      actor: ALICE,
+      target: groupDid,
+      body: { group_profile_patch: { name: 'weeklies' } },
+      operationId: 'op-2',
+    }))
+
+    const tampered = { ...receipt, group_event_seq: '99' }
+    expect(verify(tampered, groupDid).ok).toBe(false)
+    // 证明本身也不能搬——换个群文档就对不上了（keyid 与钥都不是那一份里的）。
+    expect(verify(receipt, mintGroup()).ok).toBe(false)
+  })
+
+  it('leaves a group that has no signing key unsigned, because it cannot be cross-domain', () => {
+    // v11 之前建的群没有钥（A1 决定不补铸），因此也没有可发布的群文档（A3 对它们答 404），
+    // 于是 §7.9 那条"跨域回执 MUST 有 proof"对它无从谈起。这是**创建时**就定下的属性，
+    // 不随请求变，所以不会出现"同一种回执有时签有时不签"。
+    const legacy = `${SERVICE}:g:legacy`
+    storage.insertGroup({
+      groupDid: legacy,
+      hostServiceDid: SERVICE,
+      groupStateVersion: 1,
+      groupEventSeq: 1,
+      groupProfileJson: JSON.stringify({ discoverability: 'private' }),
+      groupPolicyJson: JSON.stringify(OPEN_POLICY),
+      createdAt: AT,
+      creatorDid: ALICE,
+    })
+    storage.upsertGroupMember({
+      groupDid: legacy,
+      memberDid: ALICE,
+      role: 'owner',
+      membershipStatus: 'active',
+      stateVersion: 1,
+      joinedAt: AT,
+    })
+
+    const result = invoke(GROUP_UPDATE_PROFILE, {
+      actor: ALICE,
+      target: legacy,
+      body: { group_profile_patch: { name: 'weeklies' } },
+      operationId: 'op-2',
+    })
+    expect(receiptOf(result)).not.toHaveProperty('proof')
+    // 而它确实没有文档可发布：A3 的路由此刻答 404。
+    expect(groupDidDocument(storage, loadConfig({}), legacy)).toBeUndefined()
   })
 })
 

@@ -605,7 +605,6 @@ Host 无法区分"第一次进群"与"重新加入"（§10.3 L1066 的触发条�
 - **任何 P6 历史拉取 / 已读回执 / 设备同步方法**（§12.6 L1523）。
 - **自动 owner MLS 恢复**：§11.12 L1402 要求 fail closed，Host **MUST NOT** 下发
   当前或历史 epoch secret。
-- **`group_receipt.proof`**：同 C9 的结论（[groups.md](groups.md) §7），v1 不签。
 
 ## 13. 挡住 v1 的
 

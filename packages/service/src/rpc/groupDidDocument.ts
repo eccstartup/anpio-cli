@@ -15,6 +15,10 @@
 //    **MUST** 声明 `serviceDid`。条目取自 `well-known.ts` 的同一份清单，只有 `id` 换成
 //    群的（服务条目住在被描述的那个 DID 的文档里）。
 // 3. **一份自签的文档证明。** 见下面 `buildGroupDidDocument` 的注释。
+//
+// 验证方法的 fragment 与 `group_did` 一起定义在 `groups.ts`（`groupDidKeyId`）：A5 签回执
+// 时同一个 id 要进 `proof.verificationMethod`，而那个方向不能反过来从这里取——见 import
+// 处那段说明。
 
 import { parsePrivateKey } from '@agentx/core'
 import {
@@ -26,19 +30,10 @@ import {
 import type { Config } from '../config'
 import type { Storage } from '../storage/types'
 import { buildServiceEntry, type ServiceEntry } from '../well-known'
-
-/** The verification method's fragment. `didDocument.ts` / `signDidDocumentProof` 只看
- *  `keyid`，对 fragment 的拼法没有规定；取 `key-1` 是因为它是 `did:web` 文档里最常见的
- *  那一个，别的域的手写解析器大概率已经见过它。 */
-export const GROUP_KEY_FRAGMENT = 'key-1'
-
-/** 群的验证方法要不要进 `authentication` / `assertionMethod`，由这个 id 决定；A5 签回执时
- *  填进 `proof.verificationMethod` 的也是它。**一处定义**，因为它同时是文档里的声明和证明
- *  里的引用，两处各写一遍就会出现"签的是 key-1、文档里挂的是 key-2"那种验不过又不报错的
- *  状态。 */
-export function groupDidKeyId(groupDid: string): string {
-  return `${groupDid}#${GROUP_KEY_FRAGMENT}`
-}
+// `keyid` 与 `group_did` 是同一个形状的两半，两者一起定义在 `groups.ts`。**不能在这里定义**
+// ——`well-known.ts` 经 `capabilities.ts` → `methods.ts` 绕回 `groups.ts`，而 `groups.ts` 现在
+// 要 `groupDidKeyId`，在这里再定义就成一个环（症状是 `methods.ts` 里读到还没初始化的常量）。
+import { groupDidKeyId } from './groups'
 
 /** 群文档里的服务条目：`well-known.ts` 那条原样搬过来，只换 `id`。
  *

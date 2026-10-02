@@ -19,13 +19,8 @@ import { loadConfig, type Config } from '../config'
 import { RPC_PATH } from '../http/server'
 import { openStorage } from '../storage/sqlite'
 import type { Storage } from '../storage/types'
-import {
-  GROUP_KEY_FRAGMENT,
-  buildGroupDidDocument,
-  groupDidDocument,
-  groupDidKeyId,
-  groupServiceEntry,
-} from './groupDidDocument'
+import { GROUP_KEY_FRAGMENT, groupDidKeyId } from './groups'
+import { buildGroupDidDocument, groupDidDocument, groupServiceEntry } from './groupDidDocument'
 
 const SERVICE = 'did:web:agentx.example'
 const PUBLIC_URL = 'https://agentx.example'

@@ -192,6 +192,33 @@ A1/A2 之后两件都有了，所以这一步不是新功能，是把已经写�
 形状，等于给未来留一个"跨域回执漏签"的坑，而签一次是对称的本地操作。同域多签一次没有
 第二个验证方，也就没有额外信任面。
 
+**落地（2026-10-02）。** 签名落在 `groups.ts` 的 `groupReceipt()` 里——它本来就是回执唯一的
+构造点（13 处调用，群 E2EE 那条在 `groupControl.ts`），所以"漏签"这件事在类型上就发生不了：
+调用点全部改成传 `ctx`，函数内部自己取钥、自己附 `proof`。为此给 `groupReceipt` 的上下文
+一个**结构子集** `ReceiptKeyStore = { storage }`：群 E2EE 那侧的 `GroupControlContext` 与
+`GroupContext` 在 `auth` 等字段上不同形，而这里要的从来只有存储这一件。
+
+`proof.created` 取 `accepted_at` 而不是现实时钟：回执的每个字段都锚在这一次受理的时刻上，
+让两份时间戳互相打架没有好处，测试也没法钉住。
+
+**两处被这一步撞出来的东西**：`groupDidKeyId` 原本定义在 `groupDidDocument.ts`，而
+`groups.ts` 一 import 它就成了环——`groups` → `groupDidDocument` → `well-known` →
+`capabilities` → `methods` → `groups`，症状是 `methods.ts` 读到还没初始化的常量
+（7 条 A2 测试当场红）。所以它（连同 `GROUP_KEY_FRAGMENT`）挪进 `groups.ts`，与
+`groupDidOf` 并排；`groupDidDocument.ts` 反过来 import 它，那个方向不构成环（A2 的测试
+改从 `groups.ts` 取这两个名字）。
+
+**没有钥的群（v11 之前建的）是唯一的例外**：它的回执不带 `proof`。这不是降级——没有钥就
+没有可发布的群文档（A3 对它们答 404），因而它**不可能跨域**，§7.9 那条 MUST 对它无从谈起；
+而钥在不在是**创建时**定下的属性，所以不会出现"同一种回执有时签有时不签"。
+
+测试：`groups.test.ts` 新增 3 条（每个改状态的方法都签且验得过、改一个字段就验不过、无钥的
+群不签且没有文档），原来那条 `not.toHaveProperty('proof')` 改成钉 `proof` 的五个字段。
+服务 649 → 652。
+
+文档：groups.md §7 整段重写（"v1 不签"是欠账，两件前提 A1/A2 都做出来了），
+e2ee-group.md §12 那条同源的"v1 不签"删掉——它列的是"不做的事"，而这件事做了。
+
 ### A6 文档更正
 
 随 A1–A4 变成事实错误的句子：README §"两处服务"、groups.md §2、message-service.md §13、

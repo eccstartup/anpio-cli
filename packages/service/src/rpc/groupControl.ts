@@ -1074,7 +1074,7 @@ export function sendE2eeMessage(ctx: GroupControlContext): Record<string, unknow
   // 推进是密码学层的另一回事。§10.6 与 P4 的 `group.send` 同级，所以 `group_state_version`
   // 不动，响应里回的是受理时的快照。
   const counters = ctx.storage.advanceGroupCounters(groupDid, false)
-  const receipt = groupReceipt({
+  const receipt = groupReceipt(ctx, {
     receiptType: RECEIPT_MESSAGE,
     groupDid,
     stateVersion: counters.groupStateVersion,
