@@ -10,7 +10,7 @@
 //! what is here is the policy that goes in the bodies.
 
 use anp::group_e2ee::v2_models::{
-    V2GroupAddBody, V2GroupCreateBody, V2GroupKeyPackage, V2GroupRemoveBody,
+    V2GroupAddBody, V2GroupCipherObject, V2GroupCreateBody, V2GroupKeyPackage, V2GroupRemoveBody,
 };
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -65,6 +65,21 @@ pub fn add_body(body: &V2GroupAddBody) -> Result<Map<String, Value>> {
 /// and the crate refuses a removal that produced a Welcome at all.
 pub fn remove_body(body: &V2GroupRemoveBody) -> Result<Map<String, Value>> {
     object_of(body, "a group.e2ee.remove body")
+}
+
+/// The body of `group.e2ee.send` (P6 §9.5.3) — one field, the cipher object, unchanged.
+///
+/// The point of §9.5.3 is that the object is *the sender's to make*: the service has no way to
+/// check a `PrivateMessage` and no key material to try (§12.6), so anything this module did to
+/// the object beyond serialising it would be unverifiable by the receiver who has to decrypt
+/// it. It travels byte-for-byte, `epoch_authenticator` included.
+pub fn send_body(cipher: &V2GroupCipherObject) -> Result<Map<String, Value>> {
+    let mut body = Map::new();
+    body.insert(
+        "group_cipher_object".to_string(),
+        value_of(cipher, "a group cipher object")?,
+    );
+    Ok(body)
 }
 
 /// A crate model as a request body: the object form, or an error naming what could not be
@@ -325,6 +340,45 @@ mod tests {
             body["epoch"],
             Value::String("2".to_string()),
             "§9.4.3's `epoch` is the one *after* the remove, so it is the crate's value"
+        );
+    }
+
+    /// §9.5.3's single field, carrying the cipher object unchanged.
+    ///
+    /// The object is built field by field rather than parsed from a literal, for the same
+    /// reason as the KeyPackage above: it is the crate's model the receiver will decrypt, so a
+    /// field that moves must stop this compiling rather than quietly testing a shape nobody
+    /// sends. The assertion that matters is that nothing is renamed on the way out —
+    /// `epoch_authenticator` included, which the receiver's `decrypt_v2` checks against the
+    /// epoch it actually reached.
+    #[test]
+    fn a_send_body_carries_the_object_under_the_field_the_service_reads() {
+        let cipher = V2GroupCipherObject {
+            crypto_group_id_b64u: "Z3JvdXA".to_string(),
+            epoch: "2".to_string(),
+            private_message_b64u: "AA".to_string(),
+            group_state_ref: V2GroupStateRef {
+                group_did: "did:web:svc.example:g:team".to_string(),
+                group_state_version: "7".to_string(),
+                policy_hash: None,
+                roster_hash: None,
+            },
+            epoch_authenticator: Some("BB".to_string()),
+        };
+
+        let body = send_body(&cipher).unwrap();
+        assert_eq!(body.len(), 1, "§9.5.3 names one field and nothing else");
+        let sent = &body["group_cipher_object"];
+        assert_eq!(sent["epoch"], Value::String("2".to_string()));
+        assert_eq!(
+            sent["group_state_ref"]["group_state_version"],
+            Value::String("7".to_string()),
+            "the P4 version travels inside the object, where §7.4 puts it"
+        );
+        assert_eq!(
+            sent["epoch_authenticator"],
+            Value::String("BB".to_string()),
+            "§12.6 forbids re-encoding the object, so the authenticator goes as it was made"
         );
     }
 

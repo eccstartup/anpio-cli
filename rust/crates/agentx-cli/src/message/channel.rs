@@ -218,6 +218,29 @@ impl Sender {
             signing_key,
         })
     }
+
+    /// The same run, proved by **this device's** key instead of the DID's root key.
+    ///
+    /// P6 §13.3 item 6 asks `group.e2ee.send`'s origin proof to be made with the sending
+    /// device's current signing key: the service compares the proof's `keyid` against the
+    /// DID document's `signing_key_id` for `meta.sender_device_id`, so a proof made with
+    /// `key-1` — the root key every other call signs with — is refused (`anp.unauthorized`,
+    /// verified against the service). The DID on the wire does not change; only which
+    /// verification method proves it does.
+    ///
+    /// The key arrives already read rather than being looked up here: which fragment holds a
+    /// device key is `crate::mls`'s fact (`{device_id}-sign`), and a second copy of that
+    /// convention in this layer is exactly the kind of drift the split is meant to prevent.
+    pub fn signing_as_device(&self, keyid: String, signing_key: PrivateKeyMaterial) -> Self {
+        Self {
+            did: self.did.clone(),
+            keyid,
+            agent: self.agent.clone(),
+            profile: self.profile.clone(),
+            device_id: self.device_id.clone(),
+            signing_key,
+        }
+    }
 }
 
 /// A read is addressed to the caller's OWN message service. There is no `--to`: the owner
@@ -796,5 +819,51 @@ mod tests {
         let as_signed = serde_json::to_value(&meta).unwrap();
         let request = build_message_request("id", "direct.send", meta, None, None).unwrap();
         assert_eq!(serde_json::to_value(&request.params.meta).unwrap(), as_signed);
+    }
+
+    /// The device cut swaps the verification method and nothing else.
+    ///
+    /// P6 §13.3 item 6 is the reason [`Sender::signing_as_device`] exists, and the DID it
+    /// leaves alone is the half that matters most: the service authenticates the proof's
+    /// `keyid` *against* `meta.sender_did`, so a cut that moved the DID would not be a
+    /// retargeting of the proof but a different sender entirely.
+    #[test]
+    fn cutting_the_sender_as_a_device_keeps_the_did_and_swaps_the_proof_key() {
+        let material = PrivateKeyMaterial::Ed25519(ed25519_dalek::SigningKey::generate(
+            &mut rand::rngs::OsRng,
+        ));
+        let mut keys = std::collections::BTreeMap::new();
+        keys.insert(
+            "key-1".to_string(),
+            crate::identity::StoredKeyPair {
+                private_key_pem: material.to_pem(),
+                public_key_pem: material.public_key().to_pem(),
+            },
+        );
+        let identity = Identity {
+            did: "did:wba:example.com:user:test:e1_abc".to_string(),
+            device_id: "test/default".to_string(),
+            agent: "test".to_string(),
+            profile: "default".to_string(),
+            handle: "test".to_string(),
+            did_host: "https://example.com".to_string(),
+            created_at: "2026-10-02T00:00:00Z".to_string(),
+            keys,
+            did_document: serde_json::json!({}),
+        };
+
+        let root = Sender::from_identity(&identity).unwrap();
+        assert_eq!(root.keyid, "did:wba:example.com:user:test:e1_abc#key-1");
+        let device = root.signing_as_device(
+            "did:wba:example.com:user:test:e1_abc#test/default-sign".to_string(),
+            material,
+        );
+        assert_eq!(device.did, root.did, "the DID on the wire does not move");
+        assert_eq!(device.device_id, root.device_id);
+        assert_eq!(
+            device.keyid,
+            "did:wba:example.com:user:test:e1_abc#test/default-sign",
+            "only the verification method changes"
+        );
     }
 }

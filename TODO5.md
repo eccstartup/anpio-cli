@@ -125,12 +125,12 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
    所以只保留**字面 IP** 的判断（与 TS 在没有 `node:dns` 时的回退同形）。见
    [`assert_allowed_host`](rust/crates/agentx-cli/src/message/resolve.rs) 的函数注释。
 5. **[部分]** **命令逻辑**（~1500 行）：`group` / `msg` / `listen`（含 `msg listen` 这条唯一的常驻契约，
-   [realtime.md](docs/design/realtime.md)）。三族都已落；`group e2ee` 的 `send` 与收包
+   [realtime.md](docs/design/realtime.md)）。三族都已落；`group e2ee` 六条方法全落，只剩收包
    路径未做。
 6. **[部分]** **[client-mls.md](docs/design/client-mls.md) 的 store 与编排**：落
    **`<新 store 根>/<agent>/<profile>/mls/`**（**不是** `CONNECTX_HOME`——§0.1 第 1 条把两个
    客户端的 store 根分开了）；owner 编排（§11.12）从 CLI 挪进 Rust 客户端。
-   store 已落且真的在跑（`publish` / `get-key-package` / `create` / `add` / `remove`）；owner 编排的后半未动。
+   store 已落且真的在跑（`publish` / `get-key-package` / `create` / `add` / `remove` / `send`）；owner 编排的后半未动。
 7. **[未动]** **客户端消息存储（新，§4）。**
 
 **被省掉的东西**：走这条路，B2 的 **napi 壳整条取消**——不是"要写两次"，是"换一种方式拿 MLS"。
@@ -216,7 +216,7 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 | `group e2ee` | `create` | ~~做完~~（对真服务跑通） |
 | `group e2ee` | `add` | ~~做完~~（对真服务跑通；群寻址，commit/welcome 进设备队列） |
 | `group e2ee` | `remove` | ~~做完~~（对真服务跑通；群寻址，目标 leaf 转 terminal） |
-| `group e2ee` | `send` | 还没 |
+| `group e2ee` | `send` | ~~做完~~（对真服务跑通；群寻址，收件进设备队列，只推 `group_event_seq`） |
 | `group e2ee` | 收包路径（`process_welcome_v2` / `process_commit_v2`） | 还没（靠 `msg listen` 投递驱动） |
 | `anp` | `show` / `login` / `sign` | 还没 |
 | `agent` | `show` / `use` / `list` | 还没 |
@@ -441,6 +441,27 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
   `find_exact_accepted_leaf` 在本地 group 里找不到那片 leaf，回
   `did_binding_invalid: exact DID/device pair must identify one current MLS leaf`，
   且**不留 pending 行**（prepare 还没走到写库）。
+- **`group e2ee send` 已落并对真服务跑通（2026-10-02）**，四条控制方法里的最后一条（§9.5）。
+  它是这四条里唯一**不是三阶段**的一条，另外三处值得记：
+  （a）**没有 prepare / finalize / abort**。本地没有"等服务的受理或拒绝"的状态：它只是按
+  **当前** epoch 造一个 `PrivateMessage`，加密要么产出 cipher object、要么失败，没有 pending
+  行。服务的 `accepted: true` 也只说"收下并排序了"（§9.5 自己的成功语义），从不说有谁能解出来。
+  （b）**origin proof 要由*设备*的钥签，不是 DID 根的 `key-1`**——§13.3 第 6 项。服务拿证明
+  底里的 `keyid` 去比 `meta.sender_device_id` 在 DID 文档里的 `signing_key_id`，而本客户端
+  其余每一跳都签 `key-1`（`Sender::from_identity`），所以 `send` 得把 signer 换成设备那一半
+  （`Sender::signing_as_device` + `mls::device_signing_key`，`{device_id}-sign` 这条约定的
+  唯一出处仍在 `mls.rs`）。**第一次跑就是被这条挡下来的**：回 `anp.unauthorized`，逐字说
+  proof 必须用 `…#carol/default-sign` 做出。服务端只在 `send` 上比这一条（`groupControl.ts`
+  L996），`add` / `remove` 不比，所以另外三条不改。
+  （c）**三个 content type 各有各的规矩**。外层 `meta.content_type` 被 §9.5.3 钉死成
+  `application/anp-group-cipher+json`（crate 常量，不给调用方选）；里层
+  `application_content_type` 是自由的（注明"加密进去的是什么"）；而 `--text` / `--body`
+  恰好二选一，对应 §7.4 的三选一里本客户端会产出的两种（`text` / `payload`，不产
+  `payload_b64u`），且 `--text` 不许配 `application/json`——那是同一具身体的两句话。
+  端到端（carol 对 e2e3 群发两次，一次 `--text` 一次 `--body`）：都回 `accepted: true`，
+  epoch 2、**P4 的 `group_state_version` 停在 2**（§14.1：进排序链的只有 `send`），
+  `group_event_seq` 从 2 推到 3、4；设备队列里 carol（群里唯一 `active` 的 leaf）各多一条
+  `incoming`——那正是还没写的收包路径要取的东西。
 - **第四个坑：crate 内部验文档那条路没有 `document_is_bound` 的那层回退。** §6 上面记的
   `@context` 折入问题不只在**解析**侧：`generate_key_package_v2` 会拿调用方递进来的
   issuer 文档再跑一次 `validate_did_document_binding`（`rust/src/proof/object_proof.rs`），
@@ -451,7 +472,7 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
   `document_in_crate_form`（要的是"递给 crate 的那份"），`mls.rs` 用后者。**只换编码，
   不重写验签器**，与解析侧同一条底线。这也解释了为什么 §8-J 生成侧与解析侧会互为镜像：
   同一个 crate 的签与验在 base58 这条分支上就不自洽。
-- **未做**：`group e2ee` 剩下的最后一条群作用域方法（`send`）与收包路径
+- **未做**：`group e2ee` 的收包路径
   （`process_welcome_v2` / `process_commit_v2`，靠 `msg listen` 投递驱动）；身份这块还剩
   "换钥/换设备/`update_document`"。
 - 先落 **`msg`** 一族（含 `msg listen` 常驻契约），因为它是 §4 消息库的入口。
@@ -470,7 +491,7 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 - [x] ~~`group e2ee create`~~（2026-10-02）
 - [x] ~~`group e2ee add`~~（2026-10-02）
 - [x] ~~`group e2ee remove`~~（2026-10-02）
-- [ ] `group e2ee send`（§9.5）
+- [x] ~~`group e2ee send`~~（2026-10-02）
 - [ ] `group e2ee` 收包路径：`process_welcome_v2` / `process_commit_v2`（靠 `msg listen` 投递驱动）
 - [ ] 身份：换钥 / 换设备 / `update_document`
 - [ ] `did` 剩下的三条：`resolve` / `update` / `restore`
@@ -497,9 +518,9 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 **本轮不再有挂起的裁定。** 身份存储 + DID 文档发布（含挂 awiki host）已跑通（§6 Phase 1）；
 `msg` 一族的五个命令也跑通了（`send` / `caps` / `inbox` / `show` / `read`，见 §6）。
 Phase 1 到此收口：`msg listen` 与 `group` 一族都已落地（见 §6）。Phase 3 已开工：
-`group e2ee` 的两条服务作用域方法（`publish` / `get-key-package`）与三条群作用域控制方法
-（`create` / `add` / `remove`）已落并对真服务跑通
-（见 §6），接着是剩下的最后一条群作用域方法（`send`）与收包路径，然后是剩下的身份工作
+`group e2ee` 的六条方法（两条服务作用域的 `publish` / `get-key-package`，四条控制方法
+`create` / `add` / `remove` / `send`）已落并对真服务跑通
+（见 §6），接着是收包路径（`process_welcome_v2` / `process_commit_v2`），然后是剩下的身份工作
 （换钥 / 换设备 / `update_document`）与 `did` / `anp` / `agent` 三族。
 
 ---
@@ -618,5 +639,5 @@ Phase 1 到此收口：`msg listen` 与 `group` 一族都已落地（见 §6）�
 不提交密钥。**消息库一旦落明文，它就是密钥**（§8-B）——备份、调试、分享一律按 TODO4 §E 那条办。
 
 **当前基线**（TODO4 §E）：`npm run typecheck` 通过，`npm test` = 213 + 695 + 4 + 652 = **1564**
-全绿。本台账**已不是"纯方案"**：命令面落到哪儿见 §6 的「进度总表」；Rust 侧 `cargo test` = **71**
+全绿。本台账**已不是"纯方案"**：命令面落到哪儿见 §6 的「进度总表」；Rust 侧 `cargo test` = **78**
 全绿（`rust/`）。

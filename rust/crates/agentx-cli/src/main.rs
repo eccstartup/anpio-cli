@@ -11,7 +11,9 @@ use serde_json::{json, Map, Value};
 use std::sync::Arc;
 
 use agentx::group::{group_target, policy_of, service_target};
-use agentx::group_e2ee::{add_body, create_body, get_key_package_body, publish_body, remove_body};
+use agentx::group_e2ee::{
+    add_body, create_body, get_key_package_body, publish_body, remove_body, send_body,
+};
 use agentx::identity::{
     create_identity, fetch_host_service, register_identity, CreateIdentityInput, Identity,
     IdentityLocation,
@@ -24,15 +26,17 @@ use agentx::message::{
     AnpResponse, AnpTarget, CallRequest, Channel, ConnectFn, ListenArgs, ListenDeps, ResolvePolicy,
     Sender, TargetKind, CORE_BINDING, DIRECT_PROFILE, DIRECT_SEND, DID_SUPERSEDED,
     GET_CAPABILITIES, GET_KEY_PACKAGE, GROUP_CREATE, GROUP_E2EE_ADD, GROUP_E2EE_CREATE,
-    GROUP_E2EE_PROFILE, GROUP_E2EE_REMOVE, GROUP_GET_INFO, GROUP_JOIN, GROUP_LEAVE, GROUP_PROFILE,
-    GROUP_SEND, INBOX_GET, INBOX_MARK_READ, MESSAGE_GET_BATCH, PUBLISH_KEY_PACKAGE,
-    TRANSPORT_PROTECTED,
+    GROUP_E2EE_PROFILE, GROUP_E2EE_REMOVE, GROUP_E2EE_SEND, GROUP_GET_INFO, GROUP_JOIN,
+    GROUP_LEAVE, GROUP_PROFILE, GROUP_SEND, INBOX_GET, INBOX_MARK_READ, MESSAGE_GET_BATCH,
+    PUBLISH_KEY_PACKAGE, TRANSPORT_PROTECTED,
 };
 use agentx::mls::{
-    abort_commit, finalize_commit, generate_key_package, new_key_package_id, prepare_add,
-    prepare_create, prepare_remove, AddInput, CreateInput, KEY_PACKAGE_VALID_DAYS, RemoveInput,
+    abort_commit, application_plaintext, device_signing_key, finalize_commit, generate_key_package,
+    new_key_package_id, prepare_add, prepare_create, prepare_remove, send_message, AddInput,
+    CreateInput, KEY_PACKAGE_VALID_DAYS, RemoveInput, SendInput,
 };
 use anp::group_e2ee::v2_models::V2GroupKeyPackage;
+use anp::group_e2ee::GROUP_CIPHER_CONTENT_TYPE;
 
 #[derive(Parser)]
 #[command(
@@ -487,6 +491,39 @@ enum GroupE2eeCommand {
         #[command(flatten)]
         own: OwnIdentity,
     },
+    /// Encrypt one message to the group and have the service order it (P6 `group.e2ee.send`).
+    ///
+    /// The one P6 control method that is **not** a three-phase commit: it makes one MLS
+    /// `PrivateMessage` against the current epoch, so there is no local pending state to
+    /// finalize or roll back — the service's answer says only "taken and ordered" (§9.5). The
+    /// ciphertext is opaque to the service; only the members' runtimes can read it.
+    ///
+    /// The body is what this device encrypted, so the message is one the sender can also be
+    /// expected to read back through its own `group.incoming` — `msg listen` is where that
+    /// arrives.
+    Send {
+        #[arg(value_name = "GROUP_DID")]
+        group_did: String,
+        /// The message as plain text. Sent as §7.4's `text`, content type `text/plain`.
+        #[arg(long, value_name = "TEXT", conflicts_with = "body")]
+        text: Option<String>,
+        /// The message as a JSON object. Sent as §7.4's `payload`, content type
+        /// `application/json`.
+        #[arg(long, value_name = "JSON", conflicts_with = "text")]
+        body: Option<String>,
+        /// The content type of what is encrypted (P6 §7.4 `application_content_type`). Free,
+        /// unlike the outer `meta.content_type`, which §9.5.3 pins to one value.
+        #[arg(long = "content-type", value_name = "TYPE")]
+        content_type: Option<String>,
+        /// Reuse an operation id. As on `group send`, one flag names both `operation_id` and
+        /// `message_id` (P1 §6.2.6), so a retry reuses the whole triple.
+        #[arg(long = "operation-id", value_name = "UUID")]
+        operation_id: Option<String>,
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        own: OwnIdentity,
+    },
 }
 
 /// How many unread ids `msg read --all` asks for at a time.
@@ -718,6 +755,29 @@ async fn main() -> anyhow::Result<()> {
                     )
                     .await
                 }
+                GroupE2eeCommand::Send {
+                    group_did,
+                    text,
+                    body,
+                    content_type,
+                    operation_id,
+                    json,
+                    own,
+                } => {
+                    cmd_group_e2ee_send(
+                        &own,
+                        &group_did,
+                        SendPayload {
+                            text,
+                            body,
+                            content_type,
+                            operation_id,
+                            json,
+                        },
+                        &allow_private,
+                    )
+                    .await
+                }
             },
         },
     }
@@ -865,6 +925,12 @@ async fn cmd_did_register(agent: &str, profile: &str) -> anyhow::Result<()> {
 
 // ---- msg send ------------------------------------------------------------------
 
+/// The flags the two `send` commands carry, gathered so their handlers take one argument
+/// instead of five.
+///
+/// `msg send` and `group e2ee send` ask for the same five things but put them in different
+/// bodies (`payload_of` vs `application_plaintext`), so the grouping is about the *command
+/// face*, not about the wire: the same `--text`/`--body` one-of, the same retry id.
 struct SendPayload {
     text: Option<String>,
     body: Option<String>,
@@ -2044,6 +2110,134 @@ fn report_group_e2ee_removed(result: &Value) -> anyhow::Result<()> {
     field("member:", result.get("member_did"));
     field("device:", result.get("member_device_id"));
     field("epoch:", result.get("epoch"));
+    field("accepted at:", result.get("accepted_at"));
+    Ok(())
+}
+
+/// `group e2ee send` (P6 §9.5) — the one control method with no local commit to finish.
+///
+/// The shape is `group send`'s, minus the three-phase machinery: encrypt against the current
+/// epoch, put the one cipher object in the body, and let the service order it. There is no
+/// pending commit, so a service refusal needs no rollback — the local MLS state was only ever
+/// *read* (§9.5 sends the current epoch; it does not advance it).
+async fn cmd_group_e2ee_send(
+    own: &OwnIdentity,
+    group_did: &str,
+    payload: SendPayload,
+    allow_private: &[String],
+) -> anyhow::Result<()> {
+    let SendPayload {
+        text,
+        body,
+        content_type,
+        operation_id,
+        json,
+    } = payload;
+    let plaintext = application_plaintext(text.as_deref(), body.as_deref(), content_type.as_deref())?;
+    let location = IdentityLocation::new(&own.agent, &own.profile);
+    let identity = Identity::load(&location)?;
+    let client = http_client()?;
+
+    // The group's document names the service holding this group, as on the other methods.
+    let group_channel = open_channel_for(
+        &client,
+        Sender::from_identity(&identity)?,
+        group_did,
+        allow_private,
+    )
+    .await?;
+    let info = call_group(
+        &client,
+        &group_channel,
+        GROUP_GET_INFO,
+        group_target(group_did),
+        Map::new(),
+        group_did,
+    )
+    .await?;
+    let group_state_version = text_of(info.get("group_state_version")).ok_or_else(|| {
+        anyhow::anyhow!("group.get_info answered without a group_state_version (P4 §8.2.3)")
+    })?;
+
+    // One flag names both halves of the triple `group send` also pins together (P1 §6.2.6):
+    // the request's `operation_id` and the message's `message_id` are the same value here, so
+    // a retry that reuses `--operation-id` reuses the whole identity of the message.
+    let operation_id = operation_id.unwrap_or_else(uuid_v4);
+    let cipher = send_message(
+        &location,
+        &identity,
+        SendInput {
+            group_did,
+            group_state_version,
+            message_id: &operation_id,
+            operation_id: &operation_id,
+            plaintext,
+        },
+    )?;
+
+    // §13.3 item 6: this is the one P6 call whose origin proof has to be made with the
+    // sending *device's* key rather than the DID root's. The service compares the proof's
+    // `keyid` against the DID document's `signing_key_id` for `meta.sender_device_id`, and
+    // `key-1` loses that comparison — so the sender is re-cut here, same DID, device key.
+    let (device_keyid, device_key) = device_signing_key(&identity)?;
+    let sender = group_channel
+        .sender
+        .signing_as_device(device_keyid, device_key);
+
+    let response = call(
+        &client,
+        &sender,
+        &group_channel.endpoint,
+        CallRequest {
+            method: GROUP_E2EE_SEND.to_string(),
+            profile: GROUP_E2EE_PROFILE.to_string(),
+            // §4.4.2: group-addressed, like `add` and `remove`.
+            target: group_target(group_did),
+            body: send_body(&cipher)?,
+            sender_device_id: Some(group_channel.sender.device_id.clone()),
+            security_profile: Some(group_e2ee_security_profile(GROUP_E2EE_SEND).to_string()),
+            // §9.5.3 makes both mandatory on this method — this is the one P6 call that
+            // carries an application message.
+            message_id: Some(operation_id.clone()),
+            content_type: Some(GROUP_CIPHER_CONTENT_TYPE.to_string()),
+            operation_id: Some(operation_id),
+        },
+    )
+    .await?;
+
+    match response {
+        AnpResponse::Success { result, .. } => report_group_e2ee_sent(&result, json),
+        AnpResponse::Error { error, .. } => Err(rejection(
+            GROUP_E2EE_SEND,
+            group_did,
+            error.code,
+            error.data.as_ref().and_then(|data| data.anp_code.as_deref()),
+            &error.message,
+        )
+        .into()),
+    }
+}
+
+/// §9.5.4's success fields.
+///
+/// Two of them are worth reading rather than skipping. `epoch` is the epoch of **the accepted
+/// ciphertext**, not the group's current one — §9.5.3 says the two may differ under reordered
+/// delivery, so a caller comparing them would be comparing two different things. And
+/// `accepted: true` says only that the service took and ordered the message; it never says a
+/// member could decrypt it (§9.5's own success semantics).
+fn report_group_e2ee_sent(result: &Value, json: bool) -> anyhow::Result<()> {
+    if result.get("accepted").and_then(Value::as_bool) != Some(true) {
+        anyhow::bail!("group.e2ee.send did not report `accepted: true` (P6 §9.5.4)")
+    }
+    if json {
+        println!("{}", serde_json::to_string_pretty(result)?);
+        return Ok(());
+    }
+    field("group:", result.get("group_did"));
+    field("message id:", result.get("message_id"));
+    field("epoch:", result.get("epoch"));
+    field("event seq:", result.get("group_event_seq"));
+    field("state version:", result.get("group_state_version"));
     field("accepted at:", result.get("accepted_at"));
     Ok(())
 }

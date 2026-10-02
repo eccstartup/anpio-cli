@@ -17,15 +17,16 @@
 use std::path::PathBuf;
 
 use anp::group_e2ee::operations::v2::{
-    abort_commit_v2, add_member_prepare_v2, create_group_prepare_v2, finalize_commit_v2,
-    generate_key_package_v2, remove_member_prepare_v2, V2AddMemberInput, V2CreateGroupInput,
-    V2FinalizeInput, V2GenerateKeyPackageInput, V2PreparedAdd, V2PreparedCreate, V2PreparedRemove,
-    V2RemoveMemberInput,
+    abort_commit_v2, add_member_prepare_v2, create_group_prepare_v2, encrypt_v2,
+    finalize_commit_v2, generate_key_package_v2, remove_member_prepare_v2, V2AddMemberInput,
+    V2CreateGroupInput, V2EncryptInput, V2FinalizeInput, V2GenerateKeyPackageInput, V2PreparedAdd,
+    V2PreparedCreate, V2PreparedRemove, V2RemoveMemberInput,
 };
 use anp::group_e2ee::storage::ImCoreSqliteGroupMlsStore;
 use anp::group_e2ee::v2_models::{
-    V2GroupAddBody, V2GroupControlMetadata, V2GroupCreateBody, V2GroupKeyPackage, V2GroupRemoveBody,
-    V2GroupStateRef, V2ServiceMetadata, V2Target, GROUP_E2EE_PROFILE_V2,
+    V2GroupAddBody, V2GroupApplicationPlaintext, V2GroupCipherObject, V2GroupControlMetadata,
+    V2GroupCreateBody, V2GroupKeyPackage, V2GroupRemoveBody, V2GroupSendMetadata, V2GroupStateRef,
+    V2ServiceMetadata, V2Target, GROUP_CIPHER_CONTENT_TYPE_V2, GROUP_E2EE_PROFILE_V2,
     GROUP_E2EE_SECURITY_PROFILE_V2,
 };
 use anp::PrivateKeyMaterial;
@@ -414,6 +415,156 @@ pub fn prepare_remove(
     })
 }
 
+/// The plaintext `group.e2ee.send` encrypts (P6 §7.4).
+///
+/// §7.4 requires **exactly one** of `text` / `payload` / `payload_b64u`, so the two spellings
+/// a caller has map onto the first two: `--text` becomes `text` (content type `text/plain`),
+/// `--body` becomes `payload` (a JSON object, content type `application/json`). This client
+/// never produces `payload_b64u` — it would be a second way to carry bytes that `payload`
+/// already carries as JSON, and §6.2.5 of the message profiles does not ask a text client for
+/// it.
+///
+/// `application_content_type` is the type of what was *encrypted*, and is free-form unlike the
+/// outer `meta.content_type`, which §9.5.3 pins to one value. Refusing `--text` under
+/// `application/json` is the same call `message::payload_of` makes: `text` is not a shape
+/// `application/json` has, so sending one under the other would be two claims about the body.
+pub fn application_plaintext(
+    text: Option<&str>,
+    body: Option<&str>,
+    content_type: Option<&str>,
+) -> Result<V2GroupApplicationPlaintext> {
+    match (text, body) {
+        (Some(_), Some(_)) => {
+            return Err(AgentxError::MessageInvalid(
+                "--text and --body are two spellings of the same thing; pass one".to_string(),
+            ))
+        }
+        (None, None) => {
+            return Err(AgentxError::MessageInvalid(
+                "missing required option --text or --body".to_string(),
+            ))
+        }
+        _ => {}
+    }
+
+    if let Some(text) = text {
+        let content_type = content_type.unwrap_or("text/plain").to_string();
+        if content_type == "application/json" {
+            return Err(AgentxError::MessageInvalid(
+                "--text is sent as `text`, which application/json has no body shape for \
+                 (P6 §7.4); pass --body instead"
+                    .to_string(),
+            ));
+        }
+        return Ok(V2GroupApplicationPlaintext {
+            application_content_type: content_type,
+            thread_id: None,
+            reply_to_message_id: None,
+            annotations: None,
+            text: Some(text.to_string()),
+            payload: None,
+            payload_b64u: None,
+        });
+    }
+
+    let raw = body.unwrap_or_default();
+    let parsed: Value = serde_json::from_str(raw).map_err(|_| {
+        AgentxError::MessageInvalid(format!(
+            "--body must be JSON (got {})",
+            serde_json::to_string(raw).unwrap_or_else(|_| format!("{raw:?}"))
+        ))
+    })?;
+    if !parsed.is_object() {
+        return Err(AgentxError::MessageInvalid(
+            "--body must be a JSON object, which is the only shape `payload` has (P6 §7.4); \
+             use --text for a plain string"
+                .to_string(),
+        ));
+    }
+    Ok(V2GroupApplicationPlaintext {
+        application_content_type: content_type.unwrap_or("application/json").to_string(),
+        thread_id: None,
+        reply_to_message_id: None,
+        annotations: None,
+        text: None,
+        payload: Some(parsed),
+        payload_b64u: None,
+    })
+}
+
+/// What `send` needs from the caller (P6 §9.5).
+///
+/// The plaintext is built and parsed by [`application_plaintext`]; this carries it together
+/// with the two names §9.5.3 requires in `meta` rather than in the body — `message_id` and
+/// `operation_id` — because they identify the *request*, not the ciphertext. The outer
+/// `content_type` is not here: §9.5.3 fixes it to one value, so letting a caller pass one
+/// would only be a way to get it wrong.
+pub struct SendInput<'a> {
+    pub group_did: &'a str,
+    /// The group's current P4 version, read the same way the three control methods read it —
+    /// §9.5 carries it inside the cipher object's `group_state_ref`.
+    pub group_state_version: &'a str,
+    pub message_id: &'a str,
+    pub operation_id: &'a str,
+    pub plaintext: V2GroupApplicationPlaintext,
+}
+
+/// Encrypt one application message into a `group_cipher_object` (P6 §9.5).
+///
+/// **Not** the three-phase shape the control methods have. There is nothing for the service to
+/// accept or refuse in the local state: this is one `PrivateMessage` made against the current
+/// epoch, and the service's answer says only "taken and ordered" (§9.5's success semantics).
+/// So there is no pending commit, no finalize and no abort — the encrypt either produces a
+/// cipher object or fails, and the caller sends that object.
+///
+/// The document here is the **sender's own**, not a peer's: the crate re-validates this
+/// device's own leaf binding against it before encrypting, the same way it does when minting a
+/// KeyPackage — hence the same crate-form handling ([`did_document_in_crate_form`]).
+pub fn send_message(
+    location: &IdentityLocation,
+    identity: &Identity,
+    input: SendInput<'_>,
+) -> Result<V2GroupCipherObject> {
+    let store = store_for(location, identity)?;
+    let document = did_document_in_crate_form(identity)?;
+    let now = Utc::now().to_rfc3339();
+
+    encrypt_v2(
+        &store,
+        V2EncryptInput {
+            meta: V2GroupSendMetadata {
+                anp_version: None,
+                profile: GROUP_E2EE_PROFILE_V2.to_string(),
+                security_profile: GROUP_E2EE_SECURITY_PROFILE_V2.to_string(),
+                sender_did: identity.did.clone(),
+                sender_device_id: identity.device_id.clone(),
+                target: V2Target {
+                    kind: "group".to_string(),
+                    did: input.group_did.to_string(),
+                },
+                operation_id: input.operation_id.to_string(),
+                message_id: input.message_id.to_string(),
+                // §9.5.3: not a caller's choice. The crate enforces it too
+                // (`V2GroupSendMetadata::validate`).
+                content_type: GROUP_CIPHER_CONTENT_TYPE_V2.to_string(),
+                created_at: Some(now.clone()),
+            },
+            group_state_ref: V2GroupStateRef {
+                group_did: input.group_did.to_string(),
+                group_state_version: input.group_state_version.to_string(),
+                policy_hash: None,
+                roster_hash: None,
+            },
+            application_plaintext: input.plaintext,
+            sender_did_document: document,
+            now,
+            draft_extension_negotiated: true,
+            request_id: uuid_v4(),
+        },
+    )
+    .map_err(|err| AgentxError::MessageInvalid(format!("encrypting a group message: {err}")))
+}
+
 /// Phase three, accepted: the service took the commit, so the local pending one becomes the
 /// device's state.
 ///
@@ -523,5 +674,75 @@ mod tests {
             err.to_string().contains("test/default-sign"),
             "an identity with no device key must name the fragment it is missing: {err}"
         );
+    }
+
+    /// `--text` is §7.4's `text`, and the default content type is the one that goes with it.
+    ///
+    /// The freed-up field that matters is the negative half: `payload` and `payload_b64u` must
+    /// be *absent*, not present-and-null, because §7.4 makes the three spellings a one-of — a
+    /// plaintext carrying two would be refused by the receiver before it ever decrypted.
+    #[test]
+    fn a_text_plaintext_is_the_text_field_under_text_plain() {
+        let plaintext = application_plaintext(Some("hello"), None, None).unwrap();
+        assert_eq!(plaintext.text.as_deref(), Some("hello"));
+        assert_eq!(plaintext.application_content_type, "text/plain");
+        assert!(plaintext.payload.is_none(), "only one of the three spellings");
+        assert!(plaintext.payload_b64u.is_none(), "this client never makes this one");
+
+        let named = application_plaintext(Some("hello"), None, Some("text/markdown")).unwrap();
+        assert_eq!(
+            named.application_content_type, "text/markdown",
+            "an explicit type is the caller's, not overridden back to text/plain"
+        );
+    }
+
+    /// `--body` is §7.4's `payload`, which only has an object shape.
+    #[test]
+    fn a_body_plaintext_is_the_payload_field_under_application_json() {
+        let plaintext = application_plaintext(None, Some(r#"{"kind":"ping","n":1}"#), None).unwrap();
+        assert_eq!(plaintext.application_content_type, "application/json");
+        assert_eq!(
+            plaintext.payload.as_ref().and_then(|value| value.get("kind")),
+            Some(&Value::String("ping".to_string()))
+        );
+        assert!(plaintext.text.is_none(), "only one of the three spellings");
+    }
+
+    /// Passing both spellings is refused here, not at the receiver.
+    ///
+    /// The same reason `message::payload_of` refuses it: two claims about one body cannot both
+    /// be true, and a client that guessed which one the caller meant would silently drop the
+    /// other. Neither is a default.
+    #[test]
+    fn both_spellings_or_neither_is_refused_before_it_is_encrypted() {
+        let err = application_plaintext(Some("hello"), Some("{}"), None).unwrap_err();
+        assert!(err.to_string().contains("--text and --body"), "{err}");
+
+        let err = application_plaintext(None, None, None).unwrap_err();
+        assert!(err.to_string().contains("--text or --body"), "{err}");
+    }
+
+    /// `--text` under `application/json` is two claims about one body, so it is refused.
+    ///
+    /// This mirrors `message::payload_of`'s call rather than inventing a rule: `text` is not a
+    /// shape `application/json` has, so the pair could only be sent by contradicting the
+    /// content type the receiver will parse it under.
+    #[test]
+    fn a_text_under_application_json_is_refused() {
+        let err = application_plaintext(Some("hello"), None, Some("application/json")).unwrap_err();
+        assert!(err.to_string().contains("--body"), "{err}");
+    }
+
+    /// `--body` that is not a JSON object is refused, and the message says why.
+    ///
+    /// §7.4's `payload` is a JSON *object*; `"5"` and `[1,2]` parse as JSON but are not one, so
+    /// both fall out here rather than at a receiver that would have to decide what they meant.
+    #[test]
+    fn a_body_that_is_not_a_json_object_is_refused() {
+        let err = application_plaintext(None, Some("[1,2]"), None).unwrap_err();
+        assert!(err.to_string().contains("JSON object"), "{err}");
+
+        let err = application_plaintext(None, Some("not json"), None).unwrap_err();
+        assert!(err.to_string().contains("must be JSON"), "{err}");
     }
 }
