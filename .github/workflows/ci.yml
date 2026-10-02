@@ -1,0 +1,51 @@
+# The gate that did not exist: until now every check was run by hand, on one machine.
+#
+# The build step is not optional and not a formality. Every package's tests import
+# `@agentx/core` by package name, and that name resolves to `packages/core/dist`
+# (`core/package.json`'s `exports`). A checkout with no `dist` has no `@agentx/core`
+# to import, so `npm test` on a fresh clone fails in a way that looks like a broken
+# test rather than a missing build. Hence: install, build, then check.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A push while a run is in flight supersedes it — the older run's answer is about
+# code nobody is looking at any more.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # `engines` in the root package.json declares `>=24.16.0`, so this pins the
+      # FLOOR rather than whatever is newest — a declared minimum that no run ever
+      # exercises is a claim, not a fact.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      # `ci`, not `install`: it fails when package-lock.json and package.json disagree
+      # instead of quietly rewriting the lockfile. A gate should not be able to fix
+      # the thing it is checking.
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # Includes `packages/e2e`, which boots a real service on a real loopback port
+      # and runs one exchange through it. It is the slowest group and the only one
+      # that would catch "each half works, the two together do not".
+      - name: Test
+        run: npm test

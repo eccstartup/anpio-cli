@@ -62,6 +62,18 @@ npm run docs:build    # 构建静态站点
 [`docs/design/`](docs/design/) 是**实现者**看的文档：逐条引规范行号，记录取舍与偏离，
 以及哪些规范条款本实现故意不覆盖。改代码前先读对应的那一篇。
 
+## 门禁
+
+`.github/workflows/ci.yml` 在每次 push 与 PR 上跑四步：`npm ci` → `npm run build` →
+`npm run typecheck` → `npm test`。本地跑同一套：
+
+```bash
+npm run build && npm run typecheck && npm test
+```
+
+**`build` 不能省。** 每个包的测试按包名 import `@agentx/core`，而那个名字解析到
+`packages/core/dist`——空检出直接跑 `npm test` 会红得像测试坏了，其实是缺构建。
+
 ## 规范版本
 
 引用行号以 ANP **已发布的 v1.2** 为准。一处例外需要记住：**P6（群组端到端加密）仍是
