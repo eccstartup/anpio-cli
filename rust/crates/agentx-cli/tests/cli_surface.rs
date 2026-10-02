@@ -188,3 +188,84 @@ fn version_is_always_answerable() {
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("version --json is JSON");
     assert!(value["version"].is_string(), "got {value}");
 }
+
+/// The `agentx-cli …` invocations inside `skill/agentx-cli/SKILL.md`'s fenced blocks, with
+/// the line each one starts on.
+///
+/// The skill deliberately does not restate the command surface — it carries judgment and
+/// sends the reader to `--help` — so the only part a gate can hold is the few invocations
+/// a reader copies verbatim. Those are the ones that must still resolve. This gate used to
+/// live in `packages/cli/src/help/help.test.ts`, checking the same file against the TS
+/// client's manifest; it moved here when the skill was renamed and rewritten for this
+/// binary, because the skill now names `agentx-cli` commands and a gate on the TS side
+/// would have been checking the wrong surface.
+fn skill_invocations() -> Vec<(usize, Vec<String>)> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../skill/agentx-cli/SKILL.md");
+    let markdown =
+        std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+
+    let mut out = Vec::new();
+    let mut in_fence = false;
+    for (index, raw) in markdown.lines().enumerate() {
+        if raw.starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if !in_fence || raw.trim_start().starts_with('#') {
+            continue;
+        }
+        let Some(at) = raw.find("agentx-cli ") else { continue };
+        let argv = raw[at + "agentx-cli ".len()..]
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+        out.push((index + 1, argv));
+    }
+    out
+}
+
+/// Every invocation the skill spells out resolves against the real binary: the page
+/// exists, and the flags on it are flags that page accepts.
+///
+/// Checked by asking the binary rather than by reading a list, for the same reason the
+/// rest of this file runs the binary — what is being pinned is the surface a caller types.
+#[test]
+fn the_skill_only_names_commands_the_binary_has() {
+    let invocations = skill_invocations();
+    assert!(
+        invocations.len() >= 3,
+        "the skill should spell out at least the golden path, found {}",
+        invocations.len()
+    );
+
+    let home = Home::new("skill");
+    for (line, argv) in &invocations {
+        let Some(family) = argv.first() else { continue };
+        if family.starts_with('-') {
+            continue; // a bare `agentx-cli --help`
+        }
+        let mut page: Vec<&str> = vec![family];
+        if let Some(sub) = argv.get(1).filter(|token| !token.starts_with('-')) {
+            page.push(sub);
+        }
+        let named = page.join(" ");
+        page.push("--help");
+
+        let out = run(&home, &page);
+        let printed = format!("{}{}", text(&out.stdout), text(&out.stderr));
+        assert!(
+            out.status.success(),
+            "SKILL.md:{line}: `agentx-cli {named}` has no such page:\n{printed}"
+        );
+        for token in argv {
+            if !token.starts_with("--") {
+                continue;
+            }
+            let flag = token.split('=').next().unwrap_or(token);
+            assert!(
+                printed.contains(flag),
+                "SKILL.md:{line}: `agentx-cli {named}` does not accept {flag}"
+            );
+        }
+    }
+}
