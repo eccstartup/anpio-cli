@@ -140,6 +140,28 @@ expect_status() {
   fi
 }
 
+# 直接查本地库并断言结果里有某个字符串（client-messages.md）。库是明文 sqlite，所以这条断言
+# 不经过客户端任何读路径——它证明的正是"写进去的东西真的在文件里"。以只读方式打开：一个不该
+# 存在的库不该被这条断言**创建**出来，它该让断言失败。
+expect_db() {
+  local why="$1" db="$2" sql="$3" needle="$4" got
+  got="$(python3 -c '
+import sqlite3, sys
+try:
+    conn = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+    print(conn.execute(sys.argv[2]).fetchall())
+except Exception as err:
+    print(f"ERROR: {err}")
+' "$db" "$sql")"
+  if printf '%s' "$got" | grep -qF -- "$needle"; then
+    printf '    \033[32mok\033[0m   %s\n' "$why"
+  else
+    printf '    \033[31mFAIL\033[0m %s\n         in %s: %s\n         expected to find: %s\n' \
+      "$why" "$db" "$got" "$needle"
+    FAILED=$((FAILED + 1))
+  fi
+}
+
 # 从上一份输出里取一个 JSON 字段（`--json` 那一档才用）。
 field() {
   python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$LAST_OUT" "$1"
@@ -294,6 +316,19 @@ expect_status "the one-shot listener exits 0" 0
 expect "  and replays what was waiting before it ever connected" "hello bob"
 expect "  and names the sender it came from" "$ALICE_DID"
 expect "  and carries the delivery cursor, which is what dedupes a reconnect" '"seq":'
+
+# 本地库（TODO5 §6 Phase 2 的写入侧）。上面两条命令各自落了一行，一边一行：`msg send` 在
+# **成功之后**写发出的一侧，`msg listen` 在**消费**时写收到的一侧。最后一条断言是那个不变式
+# 本身——落行与推游标在同一个事务里，所以两者必须相等，而且库是只读打开的。
+section "messages.db — both sides kept a row, and the cursor followed the delivery"
+expect_db "the sender kept its own row" "$WORK/home/alice/default/messages.db" \
+  "SELECT direction, text FROM messages" "('out', 'hello bob')"
+expect_db "the recipient kept the row it was delivered" "$WORK/home/bob/default/messages.db" \
+  "SELECT direction, text FROM messages" "('in', 'hello bob')"
+expect_db "and the local cursor is exactly the delivery it recorded" \
+  "$WORK/home/bob/default/messages.db" \
+  "SELECT applied_seq = (SELECT service_seq FROM messages WHERE direction = 'in') FROM sync_state" \
+  "[(1,)]"
 
 section "contacts — a name for that DID, and the name coming back"
 run "$CLI" contacts add --agent alice "$BOB_DID" --remark Bob

@@ -19,7 +19,8 @@ pub mod stream;
 
 pub use channel::{
     call, call_device, call_extension, call_group, discover, extension_rejection,
-    group_e2ee_security_profile, is_error, now_rfc3339, open_channel, open_channel_for, payload_of,
+    group_e2ee_security_profile, is_error, now_rfc3339, open_channel, open_channel_for, payload_from,
+    payload_of,
     policy_for, rejection, relaxed_hosts, sign_request, uuid_v4, CallRequest, Channel, Endpoint,
     Payload, Sender, CONTACTS_LIST, CONTACTS_PROFILE, CONTACTS_PUT, CONTACTS_REMOVE, CORE_BINDING,
     DID_SUPERSEDED, DIRECT_PROFILE, DIRECT_SEND, GET_CAPABILITIES,

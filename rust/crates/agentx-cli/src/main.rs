@@ -35,7 +35,7 @@ use agentx::identity::{
 use agentx::message::{
     build_message_request, call, call_device, call_extension, call_group, device_of, did_host, did_to_url,
     discover, document_in_crate_form, document_url, group_e2ee_security_profile, http_client, now_rfc3339,
-    open_channel, open_channel_for, parse_capabilities, payload_of, policy_for, post_message,
+    open_channel, open_channel_for, parse_capabilities, payload_from, payload_of, policy_for, post_message,
     resolve_did_document, rejection, run_listen, uuid_v4, view_for, websocket_connect, AnpMeta,
     AnpResponse, AnpTarget, CallRequest, Channel, ConnectFn, ListenArgs, ListenDeps, ResolvePolicy,
     Sender, TargetKind, CONTACTS_LIST, CONTACTS_PROFILE, CONTACTS_PUT, CONTACTS_REMOVE,
@@ -51,7 +51,9 @@ use agentx::mls::{
     new_key_package_id, prepare_add, prepare_create, prepare_remove, send_message, AddInput,
     CreateInput, KEY_PACKAGE_VALID_DAYS, RemoveInput, SendInput,
 };
-use agentx::messages::{MessageStore, RecordingView};
+use agentx::messages::{
+    Conversation, MessageStore, Record as MessageRecord, RecordingView,
+};
 use anp::group_e2ee::v2_models::V2GroupKeyPackage;
 use anp::group_e2ee::GROUP_CIPHER_CONTENT_TYPE;
 
@@ -2638,6 +2640,9 @@ async fn cmd_msg_send(
     // therefore pins both, which is the entire reason `--operation-id` exists.
     let operation_id = requested_operation_id.unwrap_or_else(uuid_v4);
     let content_type = payload.content_type;
+    // Before `payload.body` moves into the request: the local row keeps §7.4's arms apart
+    // rather than storing the wire shape it sent.
+    let (sent_text, sent_payload) = payload_from(&payload.body);
 
     let response = call(
         &client,
@@ -2654,14 +2659,35 @@ async fn cmd_msg_send(
             sender_device_id: None,
             security_profile: None,
             message_id: Some(operation_id.clone()),
-            content_type: Some(content_type),
-            operation_id: Some(operation_id),
+            content_type: Some(content_type.clone()),
+            operation_id: Some(operation_id.clone()),
         },
     )
     .await?;
 
     match response {
-        AnpResponse::Success { result, .. } => report_accepted(&result, json),
+        AnpResponse::Success { result, .. } => {
+            if result.get("accepted").and_then(Value::as_bool) == Some(true) {
+                record_outgoing(
+                    &location,
+                    &identity,
+                    &endpoint.target.endpoint,
+                    &device_of(&sender, None)?,
+                    text_of(result.get("accepted_at")),
+                    MessageRecord::outgoing(
+                        Conversation::Direct {
+                            peer_did: to.to_string(),
+                        },
+                        &sender.did,
+                        &operation_id,
+                        content_type,
+                        sent_text,
+                        sent_payload,
+                    ),
+                );
+            }
+            report_accepted(&result, json)
+        }
         AnpResponse::Error { error, .. } => {
             let anp_code = error.data.as_ref().and_then(|data| data.anp_code.as_deref());
             if anp_code == Some(DID_SUPERSEDED) {
@@ -2678,6 +2704,28 @@ async fn cmd_msg_send(
             }
             Err(rejection(DIRECT_SEND, &to, error.code, anp_code, &error.message).into())
         }
+    }
+}
+
+/// Write the row for a message this run has just sent (TODO5 §6 Phase 2, client-messages.md §3).
+///
+/// Called on the **success arm only**, after `accepted: true` was checked: a row for a message
+/// the service refused would be a local claim the conversation does not support. A store that
+/// cannot be opened or written is a **warning, not a failure** — the message *was* sent, and
+/// turning a full disk into exit 1 would tell a script the opposite of what happened.
+fn record_outgoing(
+    location: &IdentityLocation,
+    identity: &Identity,
+    endpoint: &str,
+    device: &str,
+    accepted_at: Option<&str>,
+    mut record: MessageRecord,
+) {
+    record.accepted_at = accepted_at.map(str::to_string);
+    let outcome = MessageStore::open(location, identity, endpoint, device)
+        .and_then(|mut store| store.record(&record).map(|_| ()));
+    if let Err(err) = outcome {
+        eprintln!("agentx-cli: not recorded in messages.db: {err}");
     }
 }
 
@@ -3567,11 +3615,17 @@ async fn cmd_group_send(
         payload.content_type.as_deref(),
     )?;
     let (client, channel) = group_channel(own, group_did, allow_private).await?;
+    // Read again rather than threaded out of `group_channel`: the local record wants the
+    // identity, and widening that helper's return for one caller would put the store's needs
+    // into the channel's signature.
+    let location = own.location()?;
+    let identity = Identity::load(&location)?;
 
     // P1 §6.2.6: one flag pins `operation_id` and `message_id` together, so a retry keeps
     // the pair unchanged (P4 §5.4).
     let operation_id = requested_operation_id.unwrap_or_else(uuid_v4);
     let content_type = payload.content_type;
+    let (sent_text, sent_payload) = payload_from(&payload.body);
 
     let response = call(
         &client,
@@ -3585,14 +3639,35 @@ async fn cmd_group_send(
             sender_device_id: None,
             security_profile: None,
             message_id: Some(operation_id.clone()),
-            content_type: Some(content_type),
-            operation_id: Some(operation_id),
+            content_type: Some(content_type.clone()),
+            operation_id: Some(operation_id.clone()),
         },
     )
     .await?;
 
     match response {
-        AnpResponse::Success { result, .. } => report_group_sent(&result, json),
+        AnpResponse::Success { result, .. } => {
+            if result.get("accepted").and_then(Value::as_bool) == Some(true) {
+                record_outgoing(
+                    &location,
+                    &identity,
+                    &channel.endpoint.target.endpoint,
+                    &device_of(&channel.sender, None)?,
+                    text_of(result.get("accepted_at")),
+                    MessageRecord::outgoing(
+                        Conversation::Group {
+                            group_did: group_did.to_string(),
+                        },
+                        &channel.sender.did,
+                        &operation_id,
+                        content_type,
+                        sent_text,
+                        sent_payload,
+                    ),
+                );
+            }
+            report_group_sent(&result, json)
+        }
         // No `anp.did_superseded` retry here, unlike `msg send` (cli.md §3.4): DID continuity
         // inside a group is member-level and host-driven — P4 §8.12 says
         // `group.member_did_update` is not even a JSON-RPC method — and P4 defines no client
@@ -4225,6 +4300,13 @@ async fn cmd_group_e2ee_send(
     // the request's `operation_id` and the message's `message_id` are the same value here, so
     // a retry that reuses `--operation-id` reuses the whole identity of the message.
     let operation_id = operation_id.unwrap_or_else(uuid_v4);
+    // Kept for the local row: `plaintext` moves into `SendInput` below, and the row keeps the
+    // **plaintext**'s content type rather than the cipher's — the row is what this device knows
+    // about the conversation, while `application/…+group-cipher` is a fact about the transport.
+    let sent_content_type = plaintext.application_content_type.clone();
+    let sent_text = plaintext.text.clone();
+    let sent_payload = plaintext.payload.clone();
+
     let cipher = send_message(
         &location,
         &identity,
@@ -4262,13 +4344,41 @@ async fn cmd_group_e2ee_send(
             // carries an application message.
             message_id: Some(operation_id.clone()),
             content_type: Some(GROUP_CIPHER_CONTENT_TYPE.to_string()),
-            operation_id: Some(operation_id),
+            operation_id: Some(operation_id.clone()),
         },
     )
     .await?;
 
     match response {
-        AnpResponse::Success { result, .. } => report_group_e2ee_sent(&result, json),
+        AnpResponse::Success { result, .. } => {
+            if result.get("accepted").and_then(Value::as_bool) == Some(true) {
+                // The version is the one the cipher was encrypted against — the same field the
+                // receive path reads off `group_state_ref` — so a sender's row and a
+                // receiver's row are reconcilable the same way.
+                let mut record = MessageRecord::outgoing(
+                    Conversation::Group {
+                        group_did: group_did.to_string(),
+                    },
+                    &identity.did,
+                    &operation_id,
+                    sent_content_type,
+                    sent_text,
+                    sent_payload,
+                );
+                record.group_state_version =
+                    Some(cipher.group_state_ref.group_state_version.clone());
+                record.group_event_seq = text_of(result.get("group_event_seq")).map(str::to_string);
+                record_outgoing(
+                    &location,
+                    &identity,
+                    &group_channel.endpoint.target.endpoint,
+                    &device_of(&group_channel.sender, None)?,
+                    text_of(result.get("accepted_at")),
+                    record,
+                );
+            }
+            report_group_e2ee_sent(&result, json)
+        }
         AnpResponse::Error { error, .. } => Err(rejection(
             GROUP_E2EE_SEND,
             group_did,

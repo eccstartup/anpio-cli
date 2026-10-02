@@ -144,6 +144,39 @@ impl Record {
             group_state_version: None,
         }
     }
+
+    /// A message this run sent, written **after** the service accepted it.
+    ///
+    /// `sender_did` is our own DID, and `message_id` is the `operation_id`: P1 §6.2.6 makes the
+    /// sender choose both, which is what `--operation-id` exists to pin across a retry. The
+    /// two body arms come from the caller because the two send paths hold them differently —
+    /// `crate::message::payload_from` reads them back out of a P3/P4 request body, while P6's
+    /// send path has the plaintext struct itself.
+    ///
+    /// `service_seq` stays `None` for the same reason it does on a received group frame: the
+    /// service never tells a sender where its own message landed in the *recipient's* inbox.
+    pub fn outgoing(
+        conversation: Conversation,
+        sender_did: impl Into<String>,
+        message_id: impl Into<String>,
+        content_type: impl Into<String>,
+        text: Option<String>,
+        payload: Option<Value>,
+    ) -> Record {
+        Record {
+            conversation,
+            direction: Direction::Outgoing,
+            sender_did: sender_did.into(),
+            message_id: message_id.into(),
+            content_type: Some(content_type.into()),
+            text,
+            payload,
+            service_seq: None,
+            accepted_at: None,
+            group_event_seq: None,
+            group_state_version: None,
+        }
+    }
 }
 
 /// One identity's message record.
@@ -653,18 +686,24 @@ mod tests {
     #[test]
     fn an_outgoing_message_has_no_delivery_number_and_moves_nothing() {
         let (_dir, mut store) = store("outgoing");
-        let mut record = Record::incoming(
+        let record = Record::outgoing(
             Conversation::Direct {
                 peer_did: "did:wba:example.com:bob".to_string(),
             },
             "did:wba:example.com:alice",
             "m-out",
+            "text/plain",
+            Some("hi bob".to_string()),
+            None,
         );
-        record.direction = Direction::Outgoing;
-        record.text = Some("hi bob".to_string());
         assert!(store.record(&record).unwrap());
         assert_eq!(store.applied_seq().unwrap(), None, "nothing was delivered to us");
         assert_eq!(store.message_count().unwrap(), 1);
+        let direction: String = store
+            .conn
+            .query_row("SELECT direction FROM messages", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(direction, "out");
     }
 
     #[test]

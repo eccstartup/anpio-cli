@@ -685,6 +685,21 @@ pub fn payload_of(
     Ok(Payload { body, content_type })
 }
 
+/// The inverse of [`payload_of`]: a body this client built, read back into §7.4's two arms.
+///
+/// The local record (`crate::messages`) keeps "the text was this string" and "the payload was
+/// this object" apart instead of storing the wire shape, so a send path that wants to write a
+/// row has to read its own request back. Anything that is **neither** shape — a body from some
+/// other implementation — comes back as neither arm: that is what exactly-one-of says, and
+/// guessing which arm was meant would put a claim in the record the wire never made.
+pub fn payload_from(body: &Map<String, Value>) -> (Option<String>, Option<Value>) {
+    match (body.get("text"), body.get("payload")) {
+        (Some(Value::String(text)), None) => (Some(text.clone()), None),
+        (None, Some(payload)) => (None, Some(payload.clone())),
+        _ => (None, None),
+    }
+}
+
 // ---- reporting ---------------------------------------------------------------
 
 pub fn is_error(response: &AnpResponse) -> bool {
@@ -780,6 +795,35 @@ mod tests {
     fn text_and_body_are_two_spellings_of_one_payload() {
         assert!(payload_of(Some("hi"), Some("{}"), None).is_err());
         assert!(payload_of(None, None, None).is_err());
+    }
+
+    /// The record reads a body back so it can keep §7.4's two arms apart. If this inverse ever
+    /// drifts from `payload_of`, the local record starts storing the wire shape instead.
+    #[test]
+    fn a_body_reads_back_into_the_arm_it_was_built_from() {
+        let text = payload_of(Some("hi"), None, None).unwrap();
+        assert_eq!(payload_from(&text.body), (Some("hi".to_string()), None));
+
+        let object = payload_of(None, Some(r#"{"k":1}"#), None).unwrap();
+        assert_eq!(
+            payload_from(&object.body),
+            (None, Some(json!({"k": 1})))
+        );
+    }
+
+    /// A body this client did not build is neither arm rather than a guess at which was meant.
+    #[test]
+    fn a_foreign_body_reads_back_as_neither_arm() {
+        let mut body = Map::new();
+        body.insert("text".to_string(), json!("hi"));
+        body.insert("payload".to_string(), json!({"k": 1}));
+        assert_eq!(payload_from(&body), (None, None));
+
+        assert_eq!(
+            payload_from(&Map::new()),
+            (None, None),
+            "and neither does an empty one"
+        );
     }
 
     #[test]
