@@ -149,7 +149,9 @@ impl Record {
 /// One identity's message record.
 ///
 /// Holds the endpoint and device it is recording *for*, because those are what the local
-/// cursor is keyed by (design §4.2) and neither is a property of a message.
+/// cursor is keyed by (design §4.2). Neither is an argument to [`MessageStore::record`]: they
+/// are properties of the store, and a row's `endpoint` — the namespace its delivery number is
+/// in — is read from here rather than asked of the caller.
 #[derive(Debug)]
 pub struct MessageStore {
     conn: Connection,
@@ -271,9 +273,9 @@ impl MessageStore {
             .execute(
                 "INSERT OR IGNORE INTO messages (
                      conversation_id, direction, sender_did, message_id, content_type,
-                     text, payload_json, service_seq, accepted_at, group_event_seq,
+                     text, payload_json, service_seq, endpoint, accepted_at, group_event_seq,
                      group_state_version, received_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     conversation_id,
                     record.direction.as_str(),
@@ -283,6 +285,7 @@ impl MessageStore {
                     record.text,
                     payload_json,
                     record.service_seq.map(|seq| seq as i64),
+                    self.endpoint,
                     record.accepted_at,
                     group_event_seq,
                     group_state_version,
@@ -377,6 +380,10 @@ CREATE TABLE messages (
   text                TEXT,
   payload_json        TEXT,
   service_seq         INTEGER,
+  -- Which inbox `service_seq` is a number *in* (design §4.2). A delivery number without its
+  -- namespace means nothing: after a move the same conversation holds rows numbered by two
+  -- different services, and ordering by a bare `service_seq` would interleave them.
+  endpoint            TEXT NOT NULL,
   accepted_at         TEXT,
   group_event_seq     INTEGER,
   group_state_version INTEGER,
@@ -705,6 +712,20 @@ mod tests {
             store.applied_seq().unwrap(),
             None,
             "a refused row must not move the cursor"
+        );
+    }
+
+    #[test]
+    fn a_row_remembers_which_inbox_numbered_it() {
+        let (_dir, mut store) = store("endpoint-column");
+        store.record(&incoming(1, "m-1")).unwrap();
+        let endpoint: String = store
+            .conn
+            .query_row("SELECT endpoint FROM messages", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            endpoint, "http://127.0.0.1:8787",
+            "the delivery number was a number *in* this inbox"
         );
     }
 
