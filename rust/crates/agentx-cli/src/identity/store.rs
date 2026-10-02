@@ -22,6 +22,10 @@ use serde_json::Value;
 /// their `msg listen` processes would consume each other's deliveries (TODO5 §8-A).
 pub const HOME_ENV: &str = "AGENTXCLI_HOME";
 
+/// The file name [`IdentityLocation::successor_path`] resolves to. Also what the
+/// "kept at …" warnings on the ambiguous-delivery path print, so it is spelled once.
+pub const SUCCESSOR_FILE: &str = "successor.json";
+
 /// `<store root>`, from the environment or `~/.agentx-cli`.
 pub fn store_root() -> PathBuf {
     match std::env::var(HOME_ENV) {
@@ -63,6 +67,19 @@ impl IdentityLocation {
 
     pub fn identity_path(&self) -> PathBuf {
         self.dir().join("identity.json")
+    }
+
+    /// The staged successor: an identity minted for an update hop the DID server has not
+    /// accepted yet.
+    ///
+    /// A sibling of `identity.json` rather than a field inside it, because the two are
+    /// true at different moments. Until the server accepts, the store still signs as the
+    /// **old** DID — that is the only key that can deliver the hop — so a crash in the
+    /// middle has to leave the old identity intact. What it must not leave behind is a
+    /// successor key nobody can find: once the server accepts, that file is the only copy
+    /// of the key the DID has moved to, and it is unrecoverable if lost.
+    pub fn successor_path(&self) -> PathBuf {
+        self.dir().join(SUCCESSOR_FILE)
     }
 
     /// `realtime.md` §5.4: the delivery cursor is per `(owner_did, device_id)`, and the
@@ -343,13 +360,69 @@ impl Identity {
     pub fn save(&self, location: &IdentityLocation) -> Result<()> {
         let dir = location.dir();
         fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-        let path = location.identity_path();
-        let temporary = path.with_extension("json.tmp");
-        let text = serde_json::to_string_pretty(self)?;
-        fs::write(&temporary, text).with_context(|| format!("writing {}", temporary.display()))?;
-        restrict_permissions(&temporary)?;
-        fs::rename(&temporary, &path).with_context(|| format!("replacing {}", path.display()))?;
-        Ok(())
+        write_private(&location.identity_path(), self)
+    }
+
+    /// Write this identity to the staged-successor slot, **before** anything has been sent.
+    ///
+    /// Step 1 of `did update`, and the reason the whole staging dance exists: a successor
+    /// key that exists only in this process's memory is a key that a crash between "the
+    /// server accepted" and "the store moved" destroys. Staging makes the window survivable,
+    /// and [`promote_staged_successor`] makes the move itself a rename.
+    pub fn stage_successor(&self, location: &IdentityLocation) -> Result<PathBuf> {
+        let dir = location.dir();
+        fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        let path = location.successor_path();
+        write_private(&path, self)?;
+        Ok(path)
+    }
+
+    /// True when a hop was staged and its outcome is still unsettled.
+    pub fn has_staged_successor(location: &IdentityLocation) -> bool {
+        location.successor_path().is_file()
+    }
+
+    /// The staged successor, read back for `--resume`.
+    pub fn load_staged_successor(location: &IdentityLocation) -> Result<Self> {
+        let path = location.successor_path();
+        let text = fs::read_to_string(&path).with_context(|| {
+            format!(
+                "no staged successor for agent \"{}\" profile \"{}\" ({}); that file exists only \
+                 between an ambiguous `did update` and `did update --resume` settling it",
+                location.agent,
+                location.profile,
+                path.display()
+            )
+        })?;
+        serde_json::from_str(&text).with_context(|| format!("{} is not a readable identity", path.display()))
+    }
+
+    /// Drop the staged successor.
+    ///
+    /// Two callers, and both have *learned* something: an update that failed for a reason
+    /// proving the hop was never delivered (nothing was signed, or the peer refused), and a
+    /// `--resume` that found the server still serving the old DID. A missing file is not an
+    /// error — discarding is written to converge on "no staged successor", including when it
+    /// is already there.
+    pub fn discard_staged_successor(location: &IdentityLocation) -> Result<()> {
+        let path = location.successor_path();
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err).with_context(|| format!("removing {}", path.display())),
+        }
+    }
+
+    /// Make the staged successor THE identity, and clear the staging slot.
+    ///
+    /// The write comes first and the delete second, and that order is the whole point: the
+    /// staged file is the only copy of a key the DID may already have been moved to, so an
+    /// interruption may leave both files, never neither.
+    pub fn promote_staged_successor(location: &IdentityLocation) -> Result<Self> {
+        let successor = Self::load_staged_successor(location)?;
+        successor.save(location)?;
+        Self::discard_staged_successor(location)?;
+        Ok(successor)
     }
 
     /// True when the file is only readable by its owner. `0600` is what `save` writes;
@@ -357,6 +430,21 @@ impl Identity {
     pub fn permissions_are_private(location: &IdentityLocation) -> bool {
         permissions_are_private(&location.identity_path())
     }
+}
+
+/// Write one identity-shaped file atomically and `0600`.
+///
+/// Shared by `identity.json` and the staged successor because they carry the same thing —
+/// private keys — and are on opposite sides of one crash window. A second copy of the
+/// temp-then-rename dance is a second chance to forget `restrict_permissions`, which would
+/// leak the successor's key on a machine where the identity's is protected.
+fn write_private(path: &Path, value: &impl Serialize) -> Result<()> {
+    let temporary = path.with_extension("json.tmp");
+    let text = serde_json::to_string_pretty(value)?;
+    fs::write(&temporary, text).with_context(|| format!("writing {}", temporary.display()))?;
+    restrict_permissions(&temporary)?;
+    fs::rename(&temporary, path).with_context(|| format!("replacing {}", path.display()))?;
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -438,6 +526,27 @@ mod tests {
             ),
         )
         .unwrap();
+    }
+
+    /// A whole identity, for the tests that go through the store rather than around it.
+    fn identity(agent: &str, did: &str) -> Identity {
+        Identity {
+            did: did.to_string(),
+            device_id: format!("{agent}/default"),
+            agent: agent.to_string(),
+            profile: "default".to_string(),
+            handle: agent.to_string(),
+            did_host: "http://host".to_string(),
+            created_at: "2026-10-02T00:00:00Z".to_string(),
+            keys: BTreeMap::from([(
+                "key-1".to_string(),
+                StoredKeyPair {
+                    private_key_pem: "-----BEGIN PRIVATE KEY-----\nold\n-----END PRIVATE KEY-----".to_string(),
+                    public_key_pem: "old-public".to_string(),
+                },
+            )]),
+            did_document: serde_json::json!({"id": did}),
+        }
     }
 
     #[test]
@@ -564,5 +673,74 @@ mod tests {
         // It is exactly the entry the user needs to see in order to fix it.
         assert_eq!(broken.did, None);
         assert_eq!(broken.handle, None);
+    }
+
+    #[test]
+    fn a_staged_successor_leaves_the_identity_where_it_was() {
+        let (_guard, _scratch) = isolated("staged");
+        let location = IdentityLocation::resolve(Some("alice"), None).unwrap();
+        identity("alice", "did:wba:host:user:alice:e1_old").save(&location).unwrap();
+
+        let successor = identity("alice", "did:wba:host:user:alice:e1_new");
+        let path = successor.stage_successor(&location).unwrap();
+        assert_eq!(path, location.successor_path());
+        assert!(Identity::has_staged_successor(&location));
+
+        // The whole reason staging is a separate file: until the server accepts the hop,
+        // the store still holds — and signs with — the DID being retired.
+        assert_eq!(Identity::load(&location).unwrap().did, "did:wba:host:user:alice:e1_old");
+        assert_eq!(Identity::load_staged_successor(&location).unwrap().did, successor.did);
+    }
+
+    #[test]
+    fn the_staged_successor_holds_private_keys_and_is_written_0600() {
+        let (_guard, _scratch) = isolated("staged-private");
+        let location = IdentityLocation::resolve(Some("alice"), None).unwrap();
+        let successor = identity("alice", "did:wba:host:user:alice:e1_new");
+        successor.stage_successor(&location).unwrap();
+
+        // TODO4 §E: this file is key material, exactly like `identity.json`. A store whose
+        // identity is protected and whose successor is not has protected nothing.
+        assert!(permissions_are_private(&location.successor_path()));
+    }
+
+    #[test]
+    fn promoting_moves_the_successor_into_the_identity_slot_and_clears_the_staging_one() {
+        let (_guard, _scratch) = isolated("promote");
+        let location = IdentityLocation::resolve(Some("alice"), None).unwrap();
+        identity("alice", "did:wba:host:user:alice:e1_old").save(&location).unwrap();
+        identity("alice", "did:wba:host:user:alice:e1_new")
+            .stage_successor(&location)
+            .unwrap();
+
+        let promoted = Identity::promote_staged_successor(&location).unwrap();
+        assert_eq!(promoted.did, "did:wba:host:user:alice:e1_new");
+        assert_eq!(Identity::load(&location).unwrap().did, promoted.did);
+        // Cleared, so a later `--resume` cannot ask about a hop that is already settled.
+        assert!(!Identity::has_staged_successor(&location));
+    }
+
+    #[test]
+    fn discarding_a_staged_successor_converges_on_none() {
+        let (_guard, _scratch) = isolated("discard");
+        let location = IdentityLocation::resolve(Some("alice"), None).unwrap();
+        // Nothing staged yet: the ordinary state after a settle, and not an error.
+        Identity::discard_staged_successor(&location).unwrap();
+
+        identity("alice", "did:wba:host:user:alice:e1_new")
+            .stage_successor(&location)
+            .unwrap();
+        assert!(Identity::has_staged_successor(&location));
+        Identity::discard_staged_successor(&location).unwrap();
+        assert!(!Identity::has_staged_successor(&location));
+    }
+
+    #[test]
+    fn resuming_with_nothing_staged_says_what_the_file_is_for() {
+        let (_guard, _scratch) = isolated("resume-missing");
+        let location = IdentityLocation::resolve(Some("alice"), None).unwrap();
+        let err = Identity::load_staged_successor(&location).unwrap_err().to_string();
+        assert!(err.contains("successor.json"), "{err}");
+        assert!(err.contains("--resume"), "{err}");
     }
 }

@@ -547,6 +547,37 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
   （d）**`did restore` 是明说的拒绝，不是缺口。** `anp` 没有恢复路径：更新链把钥往前推，
   推不回来。所以它 `exit 1` 并说清楚"什么都没读、什么都没恢复"；有这个子命令本身也是为了让
   这个缺口是**确定**的，而不是一句像打错字的 `Unknown subcommand`。
+- **`did update` 已落（2026-10-02）**。四点：
+  （a）**次序就是安全属性：先暂存，再投递。** 后继钥在**任何字节出门之前**就写进
+  `successor.json`（0600，与 `identity.json` 同级而不是塞进它里面——两者在**不同的时刻**为真）。
+  中间任何一步崩掉，旧身份都还是完整的（那才是唯一能投递这一跳的钥），而新钥也不会没人找得到：
+  服务器一旦接受，那个文件是 DID 已经搬过去的钥的**唯一**副本。提升是"先写身份、再删暂存"，
+  所以中断最多留下两份，永远不会一份不剩。
+  （b）**失败分两型，因为两型的后果相反。** `UpdateError::Settled`（本地就拒了，或服务器用一个
+  错误状态回了话）证明这一跳没落地——暂存钥无所属，丢掉它，下一次 `--resume` 才是在问一个还没被
+  回答的问题。`Ambiguous`（连接被掐、超时、读不到响应体）则**什么都不能断言**：服务器很可能已经
+  接受了。这时暂存钥**留着**，并把文件名与 `--resume` 打出来。这就是这里需要一个枚举、而不是一条
+  `anyhow` 字符串的全部理由——调用方的下一步由它决定。
+  （c）**`--resume` 的答案只来自服务器自己的文档。** 走 `resolve_chain`（同一套 SSRF 策略，只放行
+  本身份自己的主机，且是从 DID **推**出来的，不用再要一个旗标）。三种答案三种处置：当前 DID **就是**
+  暂存的继任者 → 提升；当前 DID **还是旧的** → 这一跳从未落地，丢掉暂存钥并报 `update_failed`；
+  当前 DID 是**第三个** → 别人把这个身份推走了，**什么都不动**，暂存钥留在原处（改一个字都可能
+  把唯一一份钥弄丢）。链**验不过**（`did_chain_broken`）不是"哪个 DID 当前"的答案，所以同样什么都不动。
+  （d）**已经暂存着继任者时，`did update` 拒绝，而不是覆盖**——这一点比 TS 客户端严。覆盖会把
+  暂存想保护的那份钥正好毁掉；所以它让你先把上一跳结清（`agentx-cli did update --resume`）。
+  另外投递里**没有** `login` 那样的 409 重试：这个请求是用**它要退休的那个 DID** 签的，
+  "该 DID 已被取代"意味着调用方的前提就是错的，先去解链，而不是让客户端去猜一个自己可能连钥
+  都没有的前任。
+- **`did update` 的端到端（2026-10-02，真 rig 上跑过）**。搭了一台记账的 DID 主机，
+  验到的是：401 挑战**只答一次**（第二个请求体里带着服务器给的 nonce）、body 与签名覆盖一致
+  （`@method`/`@target-uri`/`@authority`/`content-digest`）、退休文档就是"在册的那份 + `deactivated`
+  + `successorDid`"且仍由 key-1（退休 DID 自己的绑定钥）签。四条失败路径都实跑过：500（有答案的
+  拒绝）与"第二次仍挑战同一个 nonce"都**丢掉**暂存钥；连接被掐 而服务器**已经发布**了这一跳 →
+  暂存钥留着，`--resume` 提升，随后 `did resolve --chain` 报 `SUPERSEDED`、`assurance: verified`。
+  一个 rig 上的坑值得记：`anp` 拒绝把**字面 IP** 当 authority（"Hostname cannot be an IP address"），
+  而这一跳必须**铸一个新 DID**，所以 rig 里那个 `127.0.0.1%3A9001` 的身份根本没法用来跑 update——
+  只能另切一份 `localhost%3A9001` 的（`build.py` 那套重写+旧式签名的机械照搬）。这不是缺口：
+  真实 DID 主机是域名。
 - **与 TS `connectx` 并存**，`CONNECTX_HOME` 的处理见 §8-F。
 
 **Phase 2 —— 消息库**（还没动）
@@ -566,7 +597,8 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 - [ ] 身份：换钥 / 换设备 / `update_document`
 - [x] ~~`did resolve` / `did restore`~~（2026-10-02；`resolve` 的文档面 + `--chain` 走完更新链，
   `restore` 是明说的拒绝。见 §6）
-- [ ] `did update`（写的那半：`--target` / `--resume`，与本机钥的生命周期一起）
+- [x] ~~`did update`（写的那半：`--target` / `--resume`，与本机钥的生命周期一起）~~（2026-10-02；
+  后继钥先暂存后投递，失败分 Settled / Ambiguous 两型决定暂存钥的生死，`--resume` 靠走链结清。见 §6）
 - [ ] `anp` 一族：`show` / `login` / `sign`
 - [x] ~~`agent` 一族：`show` / `use` / `list`~~（2026-10-02；含 `--agent` 的解析链，见 §6）
 - [ ] `version`
@@ -594,8 +626,8 @@ Phase 1 到此收口：`msg listen` 与 `group` 一族都已落地（见 §6）�
 `create` / `add` / `remove` / `send`）已落并对真服务跑通
 （见 §6），收包路径（`process_notice_v2` / `decrypt_received_v2`，由 `msg listen` 投递驱动）
 也已落并对真服务跑通，然后是剩下的身份工作（换钥 / 换设备 / `update_document`）与
-`did` / `anp` 三族。`agent` 一族与 `did resolve` / `did restore` 已落（2026-10-02，见 §6）；
-`did` 只剩写的那半 `update`，`anp` 一族与 `version` 未动。
+`did` / `anp` 三族。`agent` 一族、`did resolve` / `did restore` 与写的那半 `did update`
+都已落（2026-10-02，见 §6）；`anp` 一族与 `version` 未动。
 
 ---
 

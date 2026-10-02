@@ -25,9 +25,10 @@ use anp::authentication::device_manifest::{
     build_vnext_did_document, DeviceManifestEntry, PROFILE_CORE_BINDING_V1, PROFILE_GROUP_BASE_V2,
     PROFILE_GROUP_E2EE_V2, PROFILE_IDENTITY_DISCOVERY_V1,
 };
+use anp::authentication::did_transition::parse_did_wba_e1;
 use anp::authentication::did_wba::{
     build_anp_message_service, create_did_wba_document, AnpMessageServiceOptions, DidDocumentOptions,
-    DidProfile,
+    DidProfile, ANP_MESSAGE_SERVICE_TYPE,
 };
 use anp::proof::{
     generate_w3c_proof, ProofGenerationOptions, CRYPTOSUITE_EDDSA_JCS_2022, PROOF_TYPE_DATA_INTEGRITY,
@@ -190,6 +191,130 @@ fn base_document(did: &str, built: &Value) -> Value {
     Value::Object(base)
 }
 
+/// Mint the successor half of an update hop: a fresh key for the **same** subject.
+///
+/// Everything that makes the identity *this* identity is carried over — the host, the path,
+/// the handle, the device name, the creation date — and only the key material is new. The
+/// DID changes because it embeds key-1's fingerprint (ANP-03 §2.5.3 L413); the stable
+/// subject path does not, because nothing above the fingerprint moved. That is the property
+/// the crate's `verify_transition_hop` re-checks on delivery (`StablePathMismatch`), so it is
+/// arranged here by construction rather than asserted afterwards: one function reads the
+/// retiring identity's own fields, so the two cannot drift apart.
+///
+/// The authority is taken from the retiring DID rather than from the host again: it is
+/// `did:wba:<authority>:…`, so re-deriving it is a string operation, and asking the host
+/// would make a local step depend on the network.
+pub fn successor_of(identity: &Identity) -> Result<Identity> {
+    let profile = parse_did_wba_e1(&identity.did).map_err(|err| {
+        anyhow!(
+            "{} is not a did:wba E1 DID, so it has no successor ({})",
+            identity.did,
+            err.message
+        )
+    })?;
+    let (service_endpoint, service_did) = message_service(&identity.did_document, &identity.did)?;
+
+    let mut successor = create_identity(CreateIdentityInput {
+        authority: profile.origin,
+        agent: identity.agent.clone(),
+        profile: identity.profile.clone(),
+        handle: identity.handle.clone(),
+        did_host_url: identity.did_host.clone(),
+        service_endpoint,
+        service_did,
+    })?;
+    // The update moves the key, not the account: an identity that has been renewed is not
+    // a new account, and `did show` must not report it as one born today.
+    successor.created_at = identity.created_at.clone();
+    Ok(successor)
+}
+
+/// The endpoint and service DID an identity's document advertises, read back off it.
+///
+/// `create_identity` wrote these from the host's own `/.well-known/did.json`; reading them
+/// back is what lets [`successor_of`] rebuild the same document without a second round trip
+/// to a host that may not be up. The document is the store's own, so a missing entry means
+/// the file was hand-edited — worth naming rather than composing a document with no service.
+fn message_service(document: &Value, did: &str) -> Result<(String, String)> {
+    let service = document
+        .get("service")
+        .and_then(Value::as_array)
+        .and_then(|entries| {
+            entries.iter().find(|entry| {
+                entry.get("type").and_then(Value::as_str) == Some(ANP_MESSAGE_SERVICE_TYPE)
+            })
+        })
+        .ok_or_else(|| {
+            anyhow!("{did}'s document advertises no {ANP_MESSAGE_SERVICE_TYPE} service to carry over")
+        })?;
+    let endpoint = service
+        .get("serviceEndpoint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("{did}'s message service has no serviceEndpoint"))?;
+    let service_did = service
+        .get("serviceDid")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("{did}'s message service has no serviceDid"))?;
+    Ok((endpoint.to_string(), service_did.to_string()))
+}
+
+/// Build the retirement half of an update hop: the document that was on file, marked retired.
+///
+/// ANP-03 §2.5.3 L417: the predecessor's document gets `deactivated` and `successorDid`, and
+/// L419: the proof it is re-made with covers the properties it carries. So this is the
+/// **same** document — the base is the one the DID server holds, not one composed here, or
+/// the hop retires a document that was never published (any `service` entry the host added
+/// out of band would be missing) — with exactly those two fields added and one fresh proof.
+///
+/// Signed by key-1, the key whose fingerprint *is* the DID: `verify_transition_hop` looks
+/// for a binding method that matches the DID's fingerprint, finds key-1, and requires the
+/// proof to be key-1's. Re-signing is not optional — the old proof covered a document
+/// without `deactivated`, so leaving it would be asserting something that is no longer true.
+pub fn retirement_document(
+    base: &Value,
+    did: &str,
+    successor_did: &str,
+    key1: &PrivateKeyMaterial,
+) -> Result<Value> {
+    let mut retired = base
+        .as_object()
+        .cloned()
+        .ok_or_else(|| anyhow!("the document on file is not a JSON object"))?;
+    if retired.get("id").and_then(Value::as_str) != Some(did) {
+        // Not a formality: a base from before a key change describes the DID that was
+        // current then, and retiring it would deliver a hop about the wrong identifier.
+        bail!(
+            "the document on file is for {}, not {did} — it cannot be the base of a hop retiring {did}",
+            retired.get("id").and_then(Value::as_str).unwrap_or("<no id>")
+        );
+    }
+    retired.insert("deactivated".to_string(), Value::Bool(true));
+    retired.insert("successorDid".to_string(), Value::String(successor_did.to_string()));
+
+    let signed = generate_w3c_proof(
+        &Value::Object(retired),
+        key1,
+        &format!("{did}#key-1"),
+        ProofGenerationOptions {
+            proof_purpose: Some("assertionMethod".to_string()),
+            proof_type: Some(PROOF_TYPE_DATA_INTEGRITY.to_string()),
+            cryptosuite: Some(CRYPTOSUITE_EDDSA_JCS_2022.to_string()),
+            created: Some(Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()),
+            domain: None,
+            challenge: None,
+        },
+    )
+    .map_err(|err| anyhow!("signing the retirement document: {err}"))?;
+    to_multibase_proof_value(signed)
+}
+
+/// Load a stored key pair as signing material — `key-1`, for the two documents `did update`
+/// signs.
+pub fn load_stored_key(pair: &StoredKeyPair) -> Result<PrivateKeyMaterial> {
+    PrivateKeyMaterial::from_pem(&pair.private_key_pem)
+        .map_err(|err| anyhow!("the stored private key is not readable: {err}"))
+}
+
 /// The device's own key pair, and the two verification methods P6 binds it through.
 ///
 /// Distinct from the DID root by construction, which is the whole point: a device that
@@ -321,4 +446,131 @@ fn to_multibase_proof_value(mut document: Value) -> Result<Value> {
         Value::String(format!("z{}", bs58::encode(signature).into_string())),
     );
     Ok(document)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use anp::authentication::did_transition::{
+        resolve_current_did, InMemoryTransitionCache, TransitionAssurance, TransitionStatus,
+        DEFAULT_MAX_TRANSITION_HOPS,
+    };
+
+    use super::*;
+    use crate::message::resolve::document_in_crate_form;
+
+    /// An identity with no host and no network behind it: every input `create_identity` wants
+    /// is a string, so the whole successor/retirement pair can be exercised offline.
+    fn mint(agent: &str) -> Identity {
+        create_identity(CreateIdentityInput {
+            authority: "did.example.com".to_string(),
+            agent: agent.to_string(),
+            profile: "default".to_string(),
+            handle: agent.to_string(),
+            did_host_url: "https://did.example.com".to_string(),
+            service_endpoint: "https://svc.example.com/anp".to_string(),
+            service_did: "did:wba:svc.example.com".to_string(),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn a_successor_moves_the_fingerprint_and_nothing_else() {
+        let older = mint("alice");
+        let next = successor_of(&older).unwrap();
+
+        assert_ne!(next.did, older.did);
+        // The stable subject path is what makes the server treat this as the same account
+        // (§2.5.3) — and what `verify_transition_hop` refuses the hop over if it moved.
+        let before = parse_did_wba_e1(&older.did).unwrap();
+        let after = parse_did_wba_e1(&next.did).unwrap();
+        assert_eq!(before.stable_subject_path, after.stable_subject_path);
+        assert_ne!(before.fingerprint, after.fingerprint);
+        assert!(next.did.starts_with("did:wba:did.example.com:user:alice:e1_"));
+
+        // Everything an update carries over: the account, not a new one.
+        assert_eq!(next.agent, older.agent);
+        assert_eq!(next.profile, older.profile);
+        assert_eq!(next.handle, older.handle);
+        assert_eq!(next.did_host, older.did_host);
+        assert_eq!(next.created_at, older.created_at);
+        assert_eq!(next.device_id, older.device_id);
+        // The service entry is rebuilt from the retiring document, not from the host.
+        let (_, service_did) = message_service(&next.did_document, &next.did).unwrap();
+        assert_eq!(service_did, "did:wba:svc.example.com");
+    }
+
+    #[test]
+    fn a_retirement_document_is_the_one_on_file_marked_retired() {
+        let older = mint("alice");
+        let next = successor_of(&older).unwrap();
+        let key1 = load_stored_key(&older.keys["key-1"]).unwrap();
+
+        let retired = retirement_document(&older.did_document, &older.did, &next.did, &key1).unwrap();
+
+        assert_eq!(retired["id"], older.did_document["id"]);
+        assert_eq!(retired["deactivated"], true);
+        assert_eq!(retired["successorDid"], next.did);
+        // Not a document composed here: the same verification methods, so the DID server is
+        // asked to retire what it published.
+        assert_eq!(retired["verificationMethod"], older.did_document["verificationMethod"]);
+        assert_eq!(retired["service"], older.did_document["service"]);
+        // One proof, over the retired document — the old one covered a document without
+        // `deactivated`, so keeping it would assert something no longer true.
+        assert!(retired["proof"].is_object());
+        assert_ne!(retired["proof"]["proofValue"], older.did_document["proof"]["proofValue"]);
+    }
+
+    #[test]
+    fn a_retirement_document_for_another_did_is_refused() {
+        let older = mint("alice");
+        let next = successor_of(&older).unwrap();
+        let key1 = load_stored_key(&older.keys["key-1"]).unwrap();
+
+        let err = retirement_document(&older.did_document, &next.did, &next.did, &key1)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("cannot be the base"), "{err}");
+    }
+
+    /// The test that matters: the hop this client builds is one the crate can **verify**.
+    ///
+    /// The daemon's chain walk is `anp`'s, so "our documents are self-consistent" is not the
+    /// question — "does the verifier accept them" is. Run the real walk over the pair, with
+    /// the same re-encoding the fetch path applies (TODO5 §8-J, third pit).
+    #[test]
+    fn the_crate_walks_the_hop_these_two_documents_make() {
+        let older = mint("alice");
+        let next = successor_of(&older).unwrap();
+        let key1 = load_stored_key(&older.keys["key-1"]).unwrap();
+        let retired = retirement_document(&older.did_document, &older.did, &next.did, &key1).unwrap();
+
+        let old_did = older.did.clone();
+        let new_did = next.did.clone();
+        let fetcher = |target: &str| -> std::result::Result<Value, String> {
+            let document = if target == old_did {
+                retired.clone()
+            } else {
+                next.did_document.clone()
+            };
+            document_in_crate_form(&document).ok_or_else(|| format!("{target} does not bind under either convention"))
+        };
+        let mut cache = InMemoryTransitionCache::default();
+        let result = resolve_current_did(
+            &old_did,
+            &fetcher,
+            &HashMap::new(),
+            &mut cache,
+            DEFAULT_MAX_TRANSITION_HOPS,
+        )
+        .expect("the hop must verify");
+
+        assert_eq!(result.current_did, new_did);
+        assert_eq!(result.status, TransitionStatus::Superseded);
+        assert_eq!(result.hops.len(), 1);
+        // Signed by key-1, the key whose fingerprint is the DID: `verified`, not the
+        // `provider_asserted` a proof-less retirement would fall back to.
+        assert_eq!(result.hops[0].assurance, TransitionAssurance::Verified);
+    }
 }

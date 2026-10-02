@@ -16,9 +16,11 @@ use agentx::group_e2ee::{
     add_body, create_body, get_key_package_body, publish_body, remove_body, send_body,
 };
 use agentx::identity::{
-    create_identity, current_agent_path, describe_status, document_is_superseded, fetch_host_service, list_identities,
-    read_current_agent, register_identity, resolve_agent_id, resolve_agent_id_with_source, resolve_chain,
-    select_current_agent, snake_case_name, ChainError, ChainResolution, CreateIdentityInput, Identity, IdentityLocation,
+    create_identity, current_agent_path, deliver, describe_status, document_is_superseded, fetch_host_service,
+    list_identities, load_stored_key, read_current_agent, register_identity, resolve_agent_id,
+    resolve_agent_id_with_source, resolve_chain, retirement_document, select_current_agent, snake_case_name,
+    successor_of, Accepted, ChainError, ChainResolution, CreateIdentityInput, Hop, Identity,
+    IdentityLocation, UpdateError,
 };
 use agentx::message::{
     build_message_request, call, call_device, call_extension, call_group, device_of, did_host, did_to_url,
@@ -151,6 +153,37 @@ enum DidCommand {
         agent: Option<String>,
         #[arg(long)]
         profile: Option<String>,
+    },
+    /// Retire this identity's DID in favour of a successor key (ANP-03 §2.5.3).
+    ///
+    /// Three steps, in this order: the successor key is minted and **staged** before anything
+    /// is sent; the hop is delivered to the DID server's own update endpoint; and only once
+    /// that server accepts does the store move. Staging is what makes a crash survivable —
+    /// between "the server accepted" and "the store moved", that file is the only copy of the
+    /// key the DID has been moved to.
+    ///
+    /// A delivery whose outcome cannot be known (a dropped connection, a timeout) keeps the
+    /// staged key and says so; `--resume` settles that case by asking the server which DID it
+    /// serves as current.
+    Update {
+        /// The DID server's own update endpoint.
+        ///
+        /// Required unless `--resume`: ANP-03 §2.5.3 defines no management interface, so where
+        /// a hop goes is the server's contract and cannot be derived here.
+        #[arg(long, value_name = "URI")]
+        target: Option<String>,
+        /// Settle an update whose delivery outcome is unknown.
+        ///
+        /// Resolves this identity's chain and asks which DID the server now serves: the
+        /// staged successor means the hop landed, the old DID means it never did, and a third
+        /// DID means something else moved this identity on — in which case nothing is touched.
+        #[arg(long)]
+        resume: bool,
+        /// Print the two DIDs and what accepted the hop, as JSON
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        own: OwnIdentity,
     },
     /// Resolution: read what any DID publishes, and walk its update links.
     ///
@@ -638,6 +671,22 @@ async fn main() -> anyhow::Result<()> {
             } => cmd_did_show(agent.as_deref(), profile.as_deref(), json),
             DidCommand::Register { agent, profile } => cmd_did_register(agent.as_deref(), profile.as_deref()).await,
             DidCommand::Resolve { did, chain, json } => cmd_did_resolve(&did, chain, json, &allow_private).await,
+            DidCommand::Update {
+                target,
+                resume,
+                json,
+                own,
+            } => {
+                cmd_did_update(
+                    target.as_deref(),
+                    resume,
+                    json,
+                    own.agent.as_deref(),
+                    own.profile.as_deref(),
+                    &allow_private,
+                )
+                .await
+            }
             DidCommand::Restore => cmd_did_restore(),
         },
         Command::Agent { command } => match command {
@@ -1152,6 +1201,308 @@ fn cmd_did_restore() -> anyhow::Result<()> {
          `anp` defines no recovery path — the update chain moves a key forward, it cannot \
          bring one back."
     )
+}
+
+/// The host a `--target` URL names, for the allowlist.
+fn target_host(target: &str) -> anyhow::Result<String> {
+    let url = Url::parse(target).map_err(|err| anyhow::anyhow!("--target must be a URL: {err}"))?;
+    url.host_str()
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("--target {target} names no host"))
+}
+
+/// The document this hop's retirement half is built on.
+///
+/// Fetched rather than taken from the store, because §2.5.3 L417 retires **the document on
+/// file** and the store's copy is only what this client published — a server that added a
+/// `service` entry out of band would be asked to retire a document it never served. A fetch
+/// that fails falls back to the local copy and says so: L411 leaves the document's other
+/// content to us, so the hop is still valid, but it may be missing what the server holds.
+async fn retirement_base(
+    client: &reqwest::Client,
+    identity: &Identity,
+    policy: &ResolvePolicy,
+) -> anyhow::Result<Value> {
+    match resolve_did_document(client, &identity.did, policy).await {
+        Ok(document) => Ok(document),
+        Err(err) => {
+            eprintln!(
+                "agentx-cli: warning: could not read the document on file for {} ({err:#}).",
+                identity.did
+            );
+            eprintln!(
+                "agentx-cli: warning: FALLING BACK to the copy in the store — any field the DID \
+                 server holds and this client cannot compose will be MISSING from this hop's \
+                 retirement document."
+            );
+            Ok(identity.did_document.clone())
+        }
+    }
+}
+
+/// `did update [--target <uri>] [--resume]`.
+///
+/// The successor's whole lifecycle is here: minted and staged before anything leaves the
+/// process, delivered, and promoted only on acceptance. What the two failure arms do with the
+/// staged key is the one decision that cannot be undone — see [`UpdateError`].
+async fn cmd_did_update(
+    target: Option<&str>,
+    resume: bool,
+    json: bool,
+    agent: Option<&str>,
+    profile: Option<&str>,
+    allow_private: &[String],
+) -> anyhow::Result<()> {
+    let location = IdentityLocation::resolve(agent, profile)?;
+    let identity = Identity::load(&location)?;
+
+    if resume {
+        if target.is_some() {
+            anyhow::bail!(
+                "--resume settles an update that was already attempted, so it takes no --target. \
+                 To deliver a NEW hop, run: agentx-cli did update --target <uri>"
+            );
+        }
+        return resume_update(&location, &identity, json, allow_private).await;
+    }
+
+    let target = target.ok_or_else(|| {
+        anyhow::anyhow!(
+            "missing --target: the DID server's own update endpoint. ANP-03 §2.5.3 defines no \
+             management interface, so where a hop goes cannot be derived."
+        )
+    })?;
+
+    // Refused, not overwritten — and this is stricter than the TS client on purpose. A staged
+    // successor means a previous delivery's outcome is unknown, so that file may be the only
+    // copy of the key the DID has already moved to. Staging a second one over it would destroy
+    // exactly what staging exists to protect.
+    if Identity::has_staged_successor(&location) {
+        anyhow::bail!(
+            "a successor is already staged at {}: a previous delivery's outcome is unknown, so \
+             that key is kept — it may be the only copy of the key this DID has moved to. \
+             Settle it first:\n  agentx-cli did update --resume",
+            location.successor_path().display()
+        );
+    }
+
+    let client = http_client()?;
+    let did = identity.did.clone();
+    let policy = policy_for(&[did_host(&did)?, target_host(target)?], allow_private);
+
+    // The successor is minted first and needs no network, which is what lets the retirement
+    // document name it.
+    let successor = successor_of(&identity)?;
+    let key1 = load_stored_key(identity.keys.get("key-1").ok_or_else(|| {
+        anyhow::anyhow!(
+            "{} has no key-1 in the store; the DID's binding key is what signs a hop",
+            location.identity_path().display()
+        )
+    })?)?;
+
+    let base = retirement_base(&client, &identity, &policy).await?;
+    let retirement = retirement_document(&base, &did, &successor.did, &key1)?;
+
+    // Staged BEFORE the delivery. From here on, every exit path either promotes this key or
+    // deliberately keeps it.
+    successor.stage_successor(&location)?;
+
+    match deliver(
+        &client,
+        target,
+        &policy,
+        &Hop {
+            retiring_did: &did,
+            retirement_document: &retirement,
+            successor_did: &successor.did,
+            successor_document: &successor.did_document,
+            key1: &key1,
+        },
+    )
+    .await
+    {
+        Ok(accepted) => {
+            let installed = Identity::promote_staged_successor(&location)?;
+            print_update(&location, &installed, &accepted, json)?;
+            Ok(())
+        }
+        Err(UpdateError::Settled(err)) => {
+            // The hop provably did not land — nothing was sent, or the server answered with an
+            // error status — so the staged key has no identity to belong to. Dropping it is
+            // what makes the next `--resume` ask a question that is not already settled.
+            //
+            // A cleanup that fails is reported and then set aside: the reason the command failed
+            // is the delivery, and that is what the caller needs to see.
+            if let Err(cleanup) = Identity::discard_staged_successor(&location) {
+                eprintln!(
+                    "agentx-cli: warning: the staged successor at {} could not be cleared \
+                     ({cleanup:#}). The hop did not land, so that file is inert and can be \
+                     deleted by hand.",
+                    location.successor_path().display()
+                );
+            }
+            Err(err)
+        }
+        Err(UpdateError::Ambiguous(err)) => {
+            eprintln!(
+                "agentx-cli: warning: the update delivery to {target} did not complete, and \
+                 whether the server accepted it is NOT knowable from here."
+            );
+            eprintln!(
+                "agentx-cli: warning: the successor key has been KEPT at {} (the store itself is \
+                 unchanged).",
+                location.successor_path().display()
+            );
+            eprintln!(
+                "agentx-cli: warning: settle it with `agentx-cli did update --resume` — if the hop \
+                 WAS accepted, that file is the only key for {}.",
+                successor.did
+            );
+            Err(err)
+        }
+    }
+}
+
+/// `did update --resume` — settle an update by asking the DID server which DID it serves.
+///
+/// The answer comes from the server's own documents, never from the store and never from a
+/// guess. Three outcomes, three different facts: the staged successor is current (the hop
+/// landed), the old DID is still current (it never did), or a third DID is (something else
+/// moved this identity on). The last is why an unknown answer touches nothing.
+async fn resume_update(
+    location: &IdentityLocation,
+    identity: &Identity,
+    json: bool,
+    allow_private: &[String],
+) -> anyhow::Result<()> {
+    if !Identity::has_staged_successor(location) {
+        anyhow::bail!(
+            "nothing to resume: there is no staged successor at {}. That file exists only between \
+             `did update` starting and its outcome being settled.",
+            location.successor_path().display()
+        );
+    }
+    let staged = Identity::load_staged_successor(location)?;
+
+    let client = http_client()?;
+    // Only the identity's OWN host is allowlisted, and derived rather than flagged: the DID
+    // being asked about is this store's, so nothing else needs to be reachable for the answer.
+    let policy = policy_for(&[did_host(&identity.did)?], allow_private);
+
+    let chain = match resolve_chain(&client, &identity.did, &policy).await {
+        Ok(chain) => chain,
+        // A broken chain is not an answer about which DID is current — it is a verdict on the
+        // chain, and acting on it would mean guessing. Nothing is touched.
+        Err(ChainError::Broken(err)) => anyhow::bail!(
+            "did_chain_broken: {}: {}. Nothing was changed: the staged key is kept at {}.",
+            snake_case_name(&err.kind),
+            err.message,
+            location.successor_path().display()
+        ),
+        Err(ChainError::Unavailable(err)) => return Err(err),
+    };
+
+    if chain.result.current_did == staged.did {
+        let installed = Identity::promote_staged_successor(location)?;
+        let accepted = Accepted {
+            retiring_did: identity.did.clone(),
+            successor_did: staged.did.clone(),
+            accepted_by: "the DID server's own documents".to_string(),
+        };
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "ok": true,
+                    "resumed": true,
+                    "agent": location.agent,
+                    "profile": location.profile,
+                    "retiringDid": accepted.retiring_did,
+                    "currentDid": installed.did,
+                    "assurance": chain.result.assurance.map(|value| snake_case_name(&value)),
+                    "identityFile": location.identity_path(),
+                }))?
+            );
+        } else {
+            println!("resumed {}", installed.handle);
+            println!("superseded did: {}", identity.did);
+            println!("current did:    {}", installed.did);
+            println!(
+                "assurance:      {}",
+                chain
+                    .result
+                    .assurance
+                    .map(|value| snake_case_name(&value))
+                    .unwrap_or_else(|| "none (no hops)".to_string())
+            );
+            println!("local:          {}/{} now signs as the successor", location.agent, location.profile);
+        }
+        return Ok(());
+    }
+
+    if !chain.is_superseded() {
+        // The server still serves the OLD DID, so the hop was never accepted. The staged key
+        // therefore has no identity to belong to, and keeping it would only make the next
+        // `--resume` ask the same settled question.
+        Identity::discard_staged_successor(location)?;
+        anyhow::bail!(
+            "update_failed: the DID server still serves {} as current, so the staged successor \
+             ({}) was never published. The staged key has been dropped; retry with \
+             `agentx-cli did update --target <uri>`.",
+            identity.did,
+            staged.did
+        );
+    }
+
+    anyhow::bail!(
+        "did_superseded: {} has been superseded to {}, which is NOT the staged successor {}. \
+         Something else moved this DID on. Nothing was changed: the staged key is kept at {}, and \
+         the store still holds the key it had.",
+        identity.did,
+        chain.result.current_did,
+        staged.did,
+        location.successor_path().display()
+    )
+}
+
+/// Report an accepted hop.
+///
+/// Deliberately does not claim the successor is current: the server accepted the delivery, and
+/// §2.5.3 defines no response body that could confirm more. Saying so — and naming the command
+/// that *can* confirm it — is the difference between a report and a guess.
+fn print_update(
+    location: &IdentityLocation,
+    installed: &Identity,
+    accepted: &Accepted,
+    json: bool,
+) -> anyhow::Result<()> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "ok": true,
+                "agent": location.agent,
+                "profile": location.profile,
+                "retiringDid": accepted.retiring_did,
+                "successorDid": accepted.successor_did,
+                "acceptedBy": accepted.accepted_by,
+                "identityFile": location.identity_path(),
+            }))?
+        );
+        return Ok(());
+    }
+    println!("updated {}", installed.handle);
+    println!("retiring did:  {}", accepted.retiring_did);
+    println!("successor did: {}", accepted.successor_did);
+    println!("accepted by:   {}", accepted.accepted_by);
+    println!(
+        "local:         {}/{} now signs as the successor (handle and creation date kept)",
+        location.agent, location.profile
+    );
+    println!();
+    println!("The DID server is the authority on whether the successor is now current; confirm with:");
+    println!("  agentx-cli did resolve {} --chain", accepted.successor_did);
+    Ok(())
 }
 
 // ---- agent show / use / list ----------------------------------------------------

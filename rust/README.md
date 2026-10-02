@@ -40,7 +40,7 @@ pin 为准**，源码阅读用 `git show origin/release/0929:rust/...`。
 
 store 根是 `AGENTXCLI_HOME`（缺省 `~/.agentx-cli`），一条身份由 `--agent` / `--profile`
 命名——两个都可以不写：`--agent` > `$AGENTXCLI_AGENT` > 当前 agent（`agent use` 选的）>
-`default`，`--profile` > `$AGENTXCLI_PROFILE` > `default`。`cargo test` 全绿（103 个单测）。
+`default`，`--profile` > `$AGENTXCLI_PROFILE` > `default`。`cargo test` 全绿（116 个单测）。
 
 - **`did create | show | register`** —— 身份存储 + DID 文档。
 - **`did resolve | restore`** —— `resolve` 是解析面：不给 `--chain` 就取那一份文档
@@ -49,6 +49,14 @@ store 根是 `AGENTXCLI_HOME`（缺省 `~/.agentx-cli`），一条身份由 `--a
   （`identity/chain.rs` 只是那条同步 fetcher 与本客户端异步取文档之间的适配器）。
   `restore` 是**明说的拒绝**：`anp` 没有恢复路径，更新链把钥往前推、推不回来，所以它
   退出 1 并说清"什么都没读、什么都没恢复"。
+- **`did update [--target <uri>] [--resume]`** —— 写的那半：把 DID 换到一把后继钥
+  （ANP-03 §2.5.3）。后继钥在**任何字节出门之前**先写进 `successor.json`（0600），因为
+  服务器接受之后、store 搬过去之前，那个文件是 DID 已经搬过去的钥的**唯一**副本。
+  投递失败分两型：证明没落地的（本地拒绝、服务器回错误状态）丢掉暂存钥；不能断言的
+  （连接被掐、超时）**留着**并把文件名与 `--resume` 打出来。`--resume` 走一次更新链问
+  服务器"现在服务的是哪个 DID"：是暂存的继任者就提升，还是旧的就没落地、丢掉，是第三个
+  就什么都不动——这是那种"一个字都可能把唯一一份钥弄丢"的地方。`--target` 必须点名：
+  §2.5.3 没有定义管理接口，往哪投是服务器自己的契约。
 - **`agent show | use | list`** —— 本机现在是谁（当前 agent 存在 store 根的一个文件里，
   所以是整机范围而不是单进程）。`use` 允许点名一个还没存身份的 agent——先选 agent、
   再造它的钥，正是一个新 agent 出生的顺序——但会说出来。

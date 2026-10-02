@@ -9,14 +9,16 @@ mod chain;
 mod did;
 mod host;
 mod store;
+mod update;
 
 pub use chain::{
     describe_status, document_is_superseded, resolve_chain, snake_case_name, ChainError, ChainResolution,
 };
-pub use did::{create_identity, CreateIdentityInput};
+pub use did::{create_identity, load_stored_key, retirement_document, successor_of, CreateIdentityInput};
 pub use host::{fetch_host_service, register_identity, HostService};
 pub use store::{
     assert_segment, current_agent_path, list_identities, read_current_agent, resolve_agent_id,
     resolve_agent_id_with_source, resolve_profile_name, select_current_agent, store_root, AgentSource, Identity,
-    IdentityLocation, StoredIdentitySummary, StoredKeyPair, AGENT_ENV, HOME_ENV, PROFILE_ENV,
+    IdentityLocation, StoredIdentitySummary, StoredKeyPair, AGENT_ENV, HOME_ENV, PROFILE_ENV, SUCCESSOR_FILE,
 };
+pub use update::{deliver, Accepted, Hop, UpdateError};
