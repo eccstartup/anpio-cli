@@ -113,7 +113,10 @@ cargo run --manifest-path rust/Cargo.toml -- discover http://127.0.0.1:8787
   两个名字指向同一人时**退出 1 并列出候选**，不随便挑一个。
   `msg send` 两个本机身份**双向** `direct.send` 跑通（两边都回 `accepted: true`）；
   `inbox` / `show` / `read` 是 `x_agentx.inbox.v1` 扩展面，仅实现规范的对端回 `-32601`
-  是**正确的负结果**（cli.md §5），不是缺陷。
+  是**正确的负结果**（cli.md §5），不是缺陷：它报成 `unsupported_extension` 并退出 1，
+  与"对端拒绝了"（`message_send_failed`）分开——两句话要能分开，脚本才分得出"该换个对端"
+  和"这次没成"。`msg listen` 的握手同理。这两条各有单测咬住，真主机那半在
+  `scripts/e2e.sh --with-awiki` 里断言。
 - **`contacts list | add | set-remark | remove | resolve`** —— 名字 ↔ DID 那一层（TODO6 §3）。
   表不在本地文件里，在**本仓 `packages/service` 的库**里（`x_agentx.contacts.v1`），
   按**请求的已验证签名者** `owner_did` 分行，所以一个身份的备注对另一个身份天然不可见，

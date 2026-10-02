@@ -402,6 +402,18 @@ PY
 
     run "$CLI" me set --agent "$AWIKI_AGENT" --name "e2e on awiki"
     expect_status "me set succeeds against awiki" 0
+
+    # ---- 负结果：这一条**要的就是失败**（TODO6 §5.3，`cli.md` §5）----------------
+    #
+    # awiki 实现的是**规范**，不是这个客户端的扩展面。所以对它读收件箱，正确的答复是
+    # `-32601`——"我没有这个方法"。客户端的正确行为是把这句话原样报成
+    # `unsupported_extension` 并退出 1：**不是**空收件箱，**不是**崩溃，也**不是**含糊的
+    # 失败。这条断言最容易在重构里被悄悄改成"跳过"，所以它留在这儿，取值是**真主机**给的。
+    run "$CLI" msg inbox --agent "$AWIKI_AGENT"
+    expect_status "msg inbox against a spec-only peer exits 1" 1
+    expect "  and reports the stable code a script branches on" "unsupported_extension"
+    expect "  and says the peer does not implement it" "does not implement inbox.get"
+    expect "  and quotes the peer's own code" "JSON-RPC error -32601"
   fi
 fi
 

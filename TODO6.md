@@ -342,9 +342,24 @@ msg * / group * / group e2ee *  ──►  packages/service（本仓，:8787 之
       它跑**真二进制**（解析器推出来的清单与被测对象同源，什么都钉不住），覆盖九族的
       `--help`、`contacts resolve <did>` 的不读库短路、以及两条必须在联网前发生的拒绝。
       全是**不需要 DID host** 的那一半——`did publish` 三个分支仍要等 §5.2 的裁定。
-- [ ] **负结果的测试值得单列。** 这个客户端的正确行为里有好几条"对端不支持时应该怎样"
+- [x] ~~**负结果的测试值得单列。** 这个客户端的正确行为里有好几条"对端不支持时应该怎样"~~
       （`msg inbox` 一族对 awiki 回 `-32601` 是**正确**结果，`cli.md` §5）。
       这类断言最容易在重构里被悄悄改成"跳过"，要有测试咬住。
+      —— **2026-10-02 落地**。写这条时撞到一个真的分歧：TS 那边有一枚自己的错误码
+      `unsupported_extension`（`packages/core/src/errors.ts`），`cli.md` §5 与文档站
+      （`vercel/reference/errors.md`）也这么写，**而 Rust 这边把它折进了 `message_invalid`**。
+      折进去的代价正是这条待办要防的：一个脚本再也分不出"对端只实现规范"（该换个对端）
+      与"这次没成"（该重试或查因），而"折"本身正是那种重构。所以先补上这枚码
+      （`error.rs::UnsupportedExtension`，`code()` 给 `unsupported_extension`），
+      `channel.rs::extension_rejection` 与 `listen.rs` 的未知方法那条都改回它。
+      咬住它的是两处：**单测**（`channel.rs::tests` 四条——`-32601` 与 `1001
+      anp.unsupported_profile` 报成 `unsupported_extension` 且带"实现扩展、规范未定义"那句话；
+      `-32602` / `1014` 这类**真的拒绝**报成 `message_send_failed` 且不许出现
+      "does not implement"——反方向也钉住，否则"把拒绝读成没有"同样是错的；
+      拒绝那条把对端自己的 `anp_code` 带上行）；**真主机**（`scripts/e2e.sh --with-awiki`
+      新增四条断言，awiki 对 `inbox.get` 回的就是 `-32601`）。实跑过：退出 1、首行是
+      `unsupported_extension`、话里带 `does not implement inbox.get (JSON-RPC error -32601)`。
+      这一条断言是目前唯一**以失败为预期**的那种，所以它单独占一段并写明了为什么。
 
 ---
 

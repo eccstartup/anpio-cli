@@ -21,6 +21,16 @@ pub enum AgentxError {    /// The exchange completed but what came back is not s
     #[error("message_send_failed: {0}")]
     MessageSendFailed(String),
 
+    /// The peer answered, and the answer was "I do not have this method" — a **correct**
+    /// negative result, not a failure of the exchange (`cli.md` §5). Kept apart from
+    /// [`AgentxError::MessageSendFailed`] for the same reason the TS client keeps it apart
+    /// (`packages/core/src/errors.ts`'s `unsupported_extension`): a script that branches on
+    /// the code has to be able to tell "this peer only implements the spec" from "this peer
+    /// refused me", and folding the first into the second would let a refactor turn a
+    /// documented answer into a bug report.
+    #[error("unsupported_extension: {0}")]
+    UnsupportedExtension(String),
+
     /// The peer's answer exceeded the size cap. Separate because it is about the data.
     #[error("response_too_large: {0}")]
     ResponseTooLarge(String),
@@ -58,6 +68,7 @@ impl AgentxError {
         match self {
             AgentxError::MessageInvalid(_) => "message_invalid",
             AgentxError::MessageSendFailed(_) => "message_send_failed",
+            AgentxError::UnsupportedExtension(_) => "unsupported_extension",
             AgentxError::ResponseTooLarge(_) => "response_too_large",
             AgentxError::DidInvalid(_) => "invalid_did",
             AgentxError::DidResolveBlocked(_) => "did_resolve_blocked",

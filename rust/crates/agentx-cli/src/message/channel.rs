@@ -725,7 +725,7 @@ pub fn extension_rejection(
         return rejection(method, identity, code, anp_code, message);
     }
     let named = anp_code.map(str::to_string).unwrap_or_else(|| format!("JSON-RPC error {code}"));
-    AgentxError::MessageInvalid(format!(
+    AgentxError::UnsupportedExtension(format!(
         "{identity} does not implement {method} ({named}): the inbox / history / read-state / \
          address-book methods are an implementation extension, not defined by the ANP message \
          specification"
@@ -912,5 +912,71 @@ mod tests {
             "did:wba:example.com:user:test:e1_abc#test/default-sign",
             "only the verification method changes"
         );
+    }
+
+    // ---- the negative results (TODO6 §5.3) -----------------------------------
+    //
+    // "The peer does not implement this" is the *right* answer from a peer that only
+    // implements the specification, and `cli.md` §5 says so. It is also the answer a
+    // refactor is most likely to quietly turn into something else — an empty list, a
+    // warning, a generic failure — so each shape of it is pinned here by the code a
+    // script branches on, not just by the prose.
+
+    /// `-32601` is awiki's answer for any method outside its surface, and it means the peer
+    /// is conformant, not broken.
+    #[test]
+    fn a_peer_without_the_extension_says_so_and_is_not_a_failure() {
+        let error = extension_rejection(INBOX_GET, "did:wba:x:user:alice:e1_a", METHOD_NOT_FOUND, None, "no such method");
+        assert_eq!(
+            error.code(),
+            "unsupported_extension",
+            "a peer that lacks the surface answered; that is not an exchange failure"
+        );
+        let text = error.to_string();
+        assert!(text.contains(INBOX_GET), "{text}");
+        assert!(text.contains("does not implement"), "{text}");
+        assert!(
+            text.contains("implementation extension, not defined by the ANP message specification"),
+            "the message has to say the surface is an extension, not a spec capability: {text}"
+        );
+    }
+
+    /// `1001 anp.unsupported_profile` is the other spelling of the same answer, and it is the
+    /// profile — not the method — that is absent. The peer's own code goes on the line.
+    #[test]
+    fn an_unsupported_extension_profile_reads_the_same_way() {
+        let error = extension_rejection(
+            INBOX_GET,
+            "did:wba:x:user:alice:e1_a",
+            1001,
+            Some(UNSUPPORTED_PROFILE),
+            "unknown profile",
+        );
+        assert_eq!(error.code(), "unsupported_extension");
+        assert!(error.to_string().contains(UNSUPPORTED_PROFILE), "{error}");
+    }
+
+    /// The direction that matters most: a peer that *did* read the method and refused it must
+    /// not be reported as "this peer has no such extension". Reading a real refusal as an
+    /// absent surface would tell a caller to stop asking a service that is in fact reachable
+    /// and, here, would misattribute the refusal to the wrong party.
+    #[test]
+    fn a_real_refusal_is_not_downgraded_to_an_absent_extension() {
+        for (code, named) in [(-32602, None), (1014, Some("anp.invalid_target_binding"))] {
+            let error = extension_rejection(INBOX_GET, "did:wba:x:user:alice:e1_a", code, named, "no");
+            assert_eq!(error.code(), "message_send_failed", "code {code} was answered, not missing");
+            let text = error.to_string();
+            assert!(text.contains("rejected"), "{text}");
+            assert!(!text.contains("does not implement"), "{text}");
+        }
+    }
+
+    /// A refusal outside the extension surface keeps the peer's own `anp_code` on the line, so
+    /// a script can branch on it without `--json`.
+    #[test]
+    fn a_refusal_names_the_peer_code() {
+        let error = rejection(DIRECT_SEND, "did:wba:x:user:alice:e1_a", 409, Some(DID_SUPERSEDED), "moved");
+        assert_eq!(error.code(), "message_send_failed");
+        assert!(error.to_string().contains(DID_SUPERSEDED), "{error}");
     }
 }

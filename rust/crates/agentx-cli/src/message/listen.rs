@@ -676,7 +676,7 @@ async fn request(
     // §7.2: a refusal is not retried. Reconnecting with the same key gets the same answer, and
     // a loop of them would look like a working listener.
     if error.code == METHOD_NOT_FOUND || anp_code.as_deref() == Some(UNSUPPORTED_PROFILE) {
-        return Step::Fatal(AgentxError::MessageInvalid(format!(
+        return Step::Fatal(AgentxError::UnsupportedExtension(format!(
             "{} does not implement {method} ({named}): the stream is an implementation extension, \
              not defined by the ANP message specification",
             ctx.url
@@ -1547,7 +1547,10 @@ mod tests {
         let (_tx, abort) = watch::channel(false);
 
         match session(side, &ctx, abort).await {
-            Step::Fatal(error) => assert!(matches!(error, AgentxError::MessageInvalid(_))),
+            // `unsupported_extension`, not `message_invalid`: the peer answered, and the
+            // answer was "I do not have this". The stable code on the NDJSON line is how a
+            // supervisor tells this from a peer that refused (realtime.md §7.1).
+            Step::Fatal(error) => assert_eq!(error.code(), "unsupported_extension"),
             _ => panic!("expected a fatal refusal"),
         }
     }
