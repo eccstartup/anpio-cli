@@ -33,3 +33,9 @@ base64.workspace = true
 ed25519-dalek.workspace = true
 x25519-dalek.workspace = true
 rand.workspace = true
+
+[dev-dependencies]
+# The command-surface test (`tests/cli_surface.rs`) reads `--json` output as JSON rather
+# than matching on it as a string. Already in the tree; this declares it for the test
+# target, which does not inherit the crate's regular dependencies.
+serde_json.workspace = true
