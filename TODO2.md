@@ -158,12 +158,19 @@ KeyPackage 的 `did_wba_binding` Object Proof 由设备自签，验证侧从**�
       active 成员则不并、非 active 不入批）+ `storage/sqlite.test.ts` 的游标三条与 v9→v10 迁移
       一条。**这一层只负责"看一眼"**：退役旧 leaf 仍要 owner 按 §10.5 编排。）
 
-- **A4 同 DID 的 Remove 分支 v1 不做，回 5003。**
+- ~~**A4 同 DID 的 Remove 分支 v1 不做，回 5003。**
   理由写在 `packages/service/src/rpc/groupControl.ts:52`：该分支的前置是
   "目标设备已撤销/已失去资格"这个**否定**结论，而本服务是**肯定**门禁；且它还要 Host 验"发送
   设备有当前设备管理授权"，P2 清单里没有这个概念可读（只有 `signingAuthorizedBy` /
   `e2eeAuthorizedBy` 两个关系）。这是**收窄不是放行**（该拒的仍拒），但那条合法路径暂时不可用。
-  选项：接受 v1 缺失，或补一个"否定门禁"的表达。
+  选项：接受 v1 缺失，或补一个"否定门禁"的表达。~~
+  （2026-10-02 裁定按**甲**：接受 v1 缺失。复核时找到一句把它从"缺口"变成"规范要求"的话——
+  §13.4 L148 逐字："设备管理授权是受信任的**部署侧**授权事实，不是新的 P6 请求字段。Group Host
+  若无法权威验证，**MUST** 拒绝该例外，且 **MUST NOT** 信任调用方自报或展示缓存。"我们手里没有
+  那份部署侧事实，所以拒绝正是规范点名要的行为，现状即合规、没有合规压力。将来要开这条路，先
+  得定出那份授权事实的来源（谁写、存哪、怎么签发与轮换）——规范明说它不是协议字段；在信任模型
+  定下来之前不开，定错等于给同 DID 下的设备开了互相移除的权限。已落进
+  [e2ee-group.md](docs/design/e2ee-group.md) §4.2 第 3 条、§12 与 `groupControl.ts` 的注释。）
 
 - ~~**A5 两个有界保留闸门是 worker 选项，不是 Config 设置。**
   `maxAttempts` 默认 8（`packages/service/src/delivery/deviceQueue.ts:49`）、
@@ -269,4 +276,5 @@ KeyPackage 的 `did_wba_binding` Object Proof 由设备自签，验证侧从**�
 - 提交信息末尾 `Co-Authored-By: Claude Code <noreply@anthropic.com>`；PR 描述末尾
   `🤖 Generated with [Claude Code](https://claude.com/claude-code)`。
 - 不提交密钥。
-- 当前基线：`a9e0a68`，`npm run typecheck` 通过，`npm test` 207 + 693 + 581 全绿。
+- 当前基线：`ec61ae8`，`npm run typecheck` 通过，`npm test` 207 + 693 + 620 全绿。
+  （2026-10-02 更正计数：服务端那组从 581 长到 620——A3c 的四段各自带了测试。）
