@@ -12,6 +12,7 @@
 pub mod error;
 pub mod group;
 pub mod group_e2ee;
+pub mod group_receive;
 pub mod identity;
 pub mod message;
 pub mod mls;

@@ -22,6 +22,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::watch;
 
 use crate::error::{AgentxError, AnpErrorObject, Result};
+use crate::group_receive::{GroupEvent, GroupSink};
 
 use super::channel::{
     sign_request, CallRequest, Channel, Sender, METHOD_NOT_FOUND, UNSUPPORTED_PROFILE,
@@ -95,6 +96,10 @@ pub enum ListenState {
 pub enum ListenEvent {
     State(ListenState),
     Message(ListenMessage),
+    /// A group-e2ee frame this device decrypted or applied itself. Not a [`ListenMessage`]:
+    /// that one is a service-visible delivery, and §12's envelope never is — a listener that
+    /// drew the two alike would be claiming the service can read a message it cannot.
+    Group(GroupEvent),
 }
 
 // ---- reading frames -----------------------------------------------------------
@@ -286,6 +291,9 @@ pub struct ListenDeps {
     pub abort: watch::Receiver<bool>,
     /// Jitter source, `[0, 1)`. Injected so a test's reconnect schedule is deterministic.
     pub random: Arc<dyn Fn() -> f64 + Send + Sync>,
+    /// The P6 receive path (group-e2ee.md §12). `None` on a run that was not given one — the
+    /// transport then treats §12's frames as it always did, by not knowing them.
+    pub receiver: Option<Arc<dyn GroupSink>>,
 }
 
 /// How one connection ended. `Frame` is what continuing looks like.
@@ -301,6 +309,7 @@ struct SessionCtx<'a> {
     args: &'a ListenArgs,
     view: &'a dyn ListenView,
     channel: &'a Channel,
+    receiver: Option<&'a dyn GroupSink>,
 }
 
 /// The device this stream is (§5.4). Defaults to the local `agent/profile` — the same two
@@ -332,6 +341,7 @@ pub async fn run_listen(channel: &Channel, args: ListenArgs, deps: ListenDeps) -
         args: &args,
         view: deps.view.as_ref(),
         channel,
+        receiver: deps.receiver.as_deref(),
     };
 
     let mut attempt: u32 = 0;
@@ -490,6 +500,28 @@ async fn delta(
     }
 }
 
+/// Offer one frame to the group-e2ee receive path, if this run has one.
+///
+/// `None` means "not mine, read it as an ordinary delivery": either no receiver was given, or
+/// the frame is not one of §12's two — including P4's own `group.incoming`, which shares a
+/// method name and is told apart by its security profile inside the receiver.
+///
+/// `Some(Err(_))` is the receiver's verdict on a frame it *did* claim, and it is deliberately
+/// not a fall-through: a frame that reached the e2ee path must never also be drawn as a
+/// service-visible delivery, which is what [`decode_message`] would make of it.
+async fn dispatch_group(
+    ctx: &SessionCtx<'_>,
+    method: &str,
+    frame: &Value,
+) -> Option<Result<GroupEvent>> {
+    let receiver = ctx.receiver?;
+    match receiver.handle(method, frame).await {
+        Ok(Some(event)) => Some(Ok(event)),
+        Ok(None) => None,
+        Err(error) => Some(Err(error)),
+    }
+}
+
 /// After the backfill the cursor is the head the server took at registration, and every frame
 /// from here on is one message further (§5.5). Non-message notifications do not advance it —
 /// they are not queue entries.
@@ -508,6 +540,26 @@ async fn live(
         let Some((method, _)) = notification_of(&frame) else {
             continue; // a Response nobody is waiting for
         };
+
+        // group-e2ee.md §12's two frames are answered before the delivery filter, and
+        // `continue` here is load-bearing: §12.6 gives them no `deliveries` row, so they are
+        // not queue entries and must not move the cursor — moving it would claim this device
+        // has been delivered a message it was never sent, and the next reconnect would skip
+        // whatever sits at that number.
+        if let Some(outcome) = dispatch_group(ctx, &method, &frame).await {
+            match outcome {
+                Ok(event) => ctx.view.event(&ListenEvent::Group(event)),
+                // Not fatal: a notice that arrived before one it depends on applies on a
+                // later frame, so exiting would throw away a session that is about to work.
+                // The listener reports it the way it reports any other state change.
+                Err(error) => ctx.view.event(&ListenEvent::State(ListenState::Error {
+                    code: error.code().to_string(),
+                    message: error.to_string(),
+                })),
+            }
+            continue;
+        }
+
         if !INCOMING_METHODS.contains(&method.as_str()) {
             continue;
         }
@@ -719,6 +771,18 @@ impl ListenView for HumanView {
                 let mut err = std::io::stderr().lock();
                 let _ = writeln!(err, "{}", render_state(state));
             }
+            // A decrypted application message is a message, and a notice is bookkeeping — the
+            // same split the two lines above make, for the same reason.
+            ListenEvent::Group(group) => {
+                let line = render_group(group);
+                if group.is_message() {
+                    let mut out = std::io::stdout().lock();
+                    let _ = writeln!(out, "{line}");
+                } else {
+                    let mut err = std::io::stderr().lock();
+                    let _ = writeln!(err, "{line}");
+                }
+            }
         }
     }
 }
@@ -731,6 +795,56 @@ pub fn view_for(json: bool) -> Arc<dyn ListenView> {
         Arc::new(MachineView)
     } else {
         Arc::new(HumanView)
+    }
+}
+
+/// A `group-e2ee.md` §12 event. A decrypted message is drawn like any other — the group heads
+/// it and the sender is prefixed — while a notice gets one terser, markered line, because it
+/// is not something anyone said.
+fn render_group(event: &GroupEvent) -> String {
+    match event {
+        GroupEvent::Message {
+            group_did,
+            from,
+            content_type,
+            text,
+            payload,
+            accepted_at,
+            ..
+        } => {
+            let when = accepted_at
+                .as_deref()
+                .map(|at| format!("  {}", format_time(at)))
+                .unwrap_or_default();
+            let body = text.clone().or_else(|| {
+                payload
+                    .as_ref()
+                    .map(|value| {
+                        serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+                    })
+            });
+            // The body is ciphertext the service never saw, so a type this renderer cannot
+            // draw is named rather than dropped — the fact that something arrived is the news.
+            let body = body.unwrap_or_else(|| format!("[{content_type}]"));
+            let mut lines = body.lines();
+            let first = lines.next().unwrap_or_default().to_string();
+            let mut out = vec![
+                format!("● {group_did} (group, e2ee){when}"),
+                format!("  {from}: {first}"),
+            ];
+            out.extend(lines.map(|line| format!("  {line}")));
+            out.join("\n")
+        }
+        GroupEvent::Notice {
+            group_did,
+            notice_type,
+            from_epoch,
+            epoch,
+            self_removed,
+        } => {
+            let removed = if *self_removed { " — this device was removed" } else { "" };
+            format!("· {group_did}: {notice_type} {from_epoch}→{epoch}{removed}")
+        }
     }
 }
 
@@ -810,6 +924,11 @@ fn format_delay(ms: u64) -> String {
 mod tests {
     use super::*;
     use crate::identity::{create_identity, CreateIdentityInput};
+    use crate::message::channel::{
+        GROUP_E2EE_INCOMING, GROUP_E2EE_NOTICE, TRANSPORT_PROTECTED,
+    };
+    use std::future::Future;
+    use std::pin::Pin;
     use std::sync::Mutex;
     use tokio::sync::mpsc::unbounded_channel;
 
@@ -1096,6 +1215,7 @@ mod tests {
             args: &args,
             view: view.as_ref(),
             channel: &channel,
+            receiver: None,
         };
         let (_tx, abort) = watch::channel(false);
 
@@ -1155,6 +1275,7 @@ mod tests {
             args: &args,
             view: view.as_ref(),
             channel: &channel,
+            receiver: None,
         };
         let (_tx, abort) = watch::channel(false);
 
@@ -1164,6 +1285,136 @@ mod tests {
         assert_eq!(messages[0].seq, 1);
         assert_eq!(messages[1].seq, 2);
         assert_eq!(messages[1].text.as_deref(), Some("live"));
+    }
+
+    /// §12's frames are answered by the receive path and then dropped, so they must not be
+    /// counted as deliveries. The counting is the assertion: the `direct.incoming` that follows
+    /// takes `head + 1`, which it could only do if the group frame before it took no number.
+    /// A cursor that moved for a frame §12.6 gives no `deliveries` row would skip a real
+    /// message on the next reconnect.
+    #[tokio::test]
+    async fn group_e2ee_frames_are_answered_and_not_counted_as_deliveries() {
+        let channel = test_channel();
+        let (side, mut server_in, server_out) = duplex();
+        let view = Arc::new(RecordingView::default());
+        let sink = Arc::new(RecordingSink::default());
+
+        server_out.send(Frame::Raw(hello())).unwrap();
+        tokio::spawn(async move {
+            answer(
+                &mut server_in,
+                &server_out,
+                STREAM_AUTH,
+                json!({"device_id": "carol/default", "cursor_accepted": 0, "head_seq": 1}),
+            )
+            .await;
+            answer(
+                &mut server_in,
+                &server_out,
+                SYNC_DELTA,
+                json!({"messages": [backfill_entry()], "next_since": 1, "has_more": false}),
+            )
+            .await;
+            server_out
+                .send(Frame::Raw(group_frame(GROUP_E2EE_NOTICE, "group-e2ee")))
+                .unwrap();
+            server_out
+                .send(Frame::Raw(group_frame(GROUP_E2EE_INCOMING, "group-e2ee")))
+                .unwrap();
+            // P4's `group.incoming`: the same method name, a different profile. The sink must
+            // refuse it and the transport must read it as an ordinary delivery.
+            server_out
+                .send(Frame::Raw(group_frame(GROUP_E2EE_INCOMING, TRANSPORT_PROTECTED)))
+                .unwrap();
+            drop(server_out);
+        });
+
+        let args = ListenArgs {
+            device: "carol/default".to_string(),
+            since: None,
+            ack: false,
+            once: false,
+        };
+        let ctx = SessionCtx {
+            url: "ws://localhost:8765/anp-im/stream",
+            args: &args,
+            view: view.as_ref(),
+            channel: &channel,
+            receiver: Some(sink.as_ref()),
+        };
+        let (_tx, abort) = watch::channel(false);
+
+        assert!(matches!(session(side, &ctx, abort).await, Step::Dropped));
+
+        assert_eq!(
+            sink.methods(),
+            vec![
+                GROUP_E2EE_NOTICE.to_string(),
+                GROUP_E2EE_INCOMING.to_string(),
+                GROUP_E2EE_INCOMING.to_string()
+            ],
+            "every frame is offered, and the sink is what decides"
+        );
+        let messages = view.messages();
+        assert_eq!(messages.len(), 2, "the two group-e2ee frames are not deliveries");
+        assert_eq!(messages[1].seq, 2, "the P4 frame took the first number after the head");
+    }
+
+    /// A sink that claims `group.incoming` at the e2ee profile and refuses everything else,
+    /// with the same discrimination the real one makes. Only the method list is asserted on.
+    #[derive(Default)]
+    struct RecordingSink {
+        methods: Mutex<Vec<String>>,
+    }
+
+    impl RecordingSink {
+        fn methods(&self) -> Vec<String> {
+            self.methods.lock().unwrap().clone()
+        }
+    }
+
+    impl GroupSink for RecordingSink {
+        fn handle<'a>(
+            &'a self,
+            method: &'a str,
+            frame: &'a Value,
+        ) -> Pin<Box<dyn Future<Output = Result<Option<GroupEvent>>> + Send + 'a>> {
+            self.methods.lock().unwrap().push(method.to_string());
+            let profile = notification_of(frame)
+                .and_then(|(_, params)| params.get("meta").cloned())
+                .and_then(|meta| meta.get("security_profile").cloned());
+            let claimed = method == GROUP_E2EE_NOTICE
+                || (method == GROUP_E2EE_INCOMING
+                    && profile.as_ref().and_then(Value::as_str) == Some("group-e2ee"));
+            Box::pin(async move {
+                Ok(claimed.then(|| GroupEvent::Message {
+                    group_did: "did:wba:localhost%3A8765:group:g1".to_string(),
+                    from: "did:wba:localhost%3A8765:user:alice".to_string(),
+                    message_id: "m-1".to_string(),
+                    group_event_seq: None,
+                    accepted_at: None,
+                    content_type: "text/plain".to_string(),
+                    text: Some("group hello".to_string()),
+                    payload: None,
+                }))
+            })
+        }
+    }
+
+    fn group_frame(method: &str, security_profile: &str) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": {
+                "meta": {
+                    "sender_did": "did:wba:localhost%3A8765:user:alice",
+                    "content_type": "application/anp-group-cipher+json",
+                    "security_profile": security_profile,
+                    "created_at": "2026-10-02T00:02:00Z"
+                },
+                "body": { "group_did": "did:wba:localhost%3A8765:group:g1" }
+            }
+        })
     }
 
     /// `--ack` (§6): two calls per live frame — the read state and the delivery cursor. The
@@ -1219,6 +1470,7 @@ mod tests {
             args: &args,
             view: view.as_ref(),
             channel: &channel,
+            receiver: None,
         };
         let (_tx, abort) = watch::channel(false);
 
@@ -1251,6 +1503,7 @@ mod tests {
             args: &args,
             view: view.as_ref(),
             channel: &channel,
+            receiver: None,
         };
         let (_tx, abort) = watch::channel(false);
 
@@ -1289,6 +1542,7 @@ mod tests {
             args: &args,
             view: view.as_ref(),
             channel: &channel,
+            receiver: None,
         };
         let (_tx, abort) = watch::channel(false);
 
@@ -1354,6 +1608,50 @@ mod tests {
             accepted_at: None,
         };
         assert!(render_message(&message).contains("(application/octet-stream body, not rendered)"));
+    }
+
+    /// A decrypted group message is headed by the group and the sender is prefixed, exactly as
+    /// an unencrypted one is — the difference is only who did the decrypting.
+    #[test]
+    fn the_renderer_shows_a_decrypted_group_message_under_the_group() {
+        let event = GroupEvent::Message {
+            group_did: "did:wba:example.com:group:team".to_string(),
+            from: "did:wba:example.com:user:bob".to_string(),
+            message_id: "m".to_string(),
+            group_event_seq: Some("7".to_string()),
+            accepted_at: None,
+            content_type: "text/plain".to_string(),
+            text: Some("secret".to_string()),
+            payload: None,
+        };
+        let rendered = render_group(&event);
+        assert!(rendered.starts_with("● did:wba:example.com:group:team (group, e2ee)"));
+        assert!(rendered.contains("  did:wba:example.com:user:bob: secret"));
+    }
+
+    /// A notice is one line, and a removal says so: §12.3 makes it the last frame this device
+    /// will ever get for that group, and a reader who sees only "commit 1→2" would not know.
+    #[test]
+    fn a_removal_notice_says_this_device_was_removed() {
+        let event = GroupEvent::Notice {
+            group_did: "did:wba:example.com:group:team".to_string(),
+            notice_type: "commit-delivery".to_string(),
+            from_epoch: "1".to_string(),
+            epoch: "2".to_string(),
+            self_removed: true,
+        };
+        let rendered = render_group(&event);
+        assert!(rendered.contains("commit-delivery 1→2"));
+        assert!(rendered.contains("this device was removed"));
+
+        let kept = GroupEvent::Notice {
+            group_did: "did:wba:example.com:group:team".to_string(),
+            notice_type: "commit-delivery".to_string(),
+            from_epoch: "1".to_string(),
+            epoch: "2".to_string(),
+            self_removed: false,
+        };
+        assert!(!render_group(&kept).contains("removed"));
     }
 
     #[test]

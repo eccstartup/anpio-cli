@@ -11,6 +11,7 @@ use serde_json::{json, Map, Value};
 use std::sync::Arc;
 
 use agentx::group::{group_target, policy_of, service_target};
+use agentx::group_receive::GroupReceiver;
 use agentx::group_e2ee::{
     add_body, create_body, get_key_package_body, publish_body, remove_body, send_body,
 };
@@ -1303,8 +1304,22 @@ async fn cmd_msg_listen(
     // The identity is opened and its own service resolved before anything long-running
     // starts, so a missing identity or an unreachable DID document fails like any other
     // command rather than as a stream that never connects.
-    let (_client, channel) = own_channel(own, allow_private).await?;
+    let location = IdentityLocation::new(&own.agent, &own.profile);
+    let identity = Identity::load(&location)?;
+    let client = http_client()?;
+    let channel = open_channel(&client, &identity, allow_private).await?;
     let device = device_of(&channel.sender, options.device.as_deref())?;
+
+    // A listener is exactly the place where §12's pushes arrive, so it is the place that
+    // carries the P6 receive path. The same `client` is shared: a notice costs a roster read
+    // and one DID document per member, and each of those should reuse the connection pool the
+    // stream's requests already warm.
+    let receiver = Arc::new(GroupReceiver::new(
+        client.clone(),
+        location,
+        identity,
+        allow_private.to_vec(),
+    ));
 
     let deps = ListenDeps {
         connect: websocket_connect_fn(),
@@ -1312,6 +1327,7 @@ async fn cmd_msg_listen(
         abort: interrupt_signal(),
         // `rand::random::<f64>()` is `[0, 1)`, which is the range the jitter expects.
         random: Arc::new(rand::random::<f64>),
+        receiver: Some(receiver),
     };
     run_listen(
         &channel,
