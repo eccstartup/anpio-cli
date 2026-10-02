@@ -99,6 +99,15 @@ import {
   validateInboxGetBody,
   validateMarkReadBody,
 } from './inbox'
+import {
+  CONTACTS_LIST,
+  CONTACTS_PROFILE,
+  CONTACTS_PUT,
+  CONTACTS_REMOVE,
+  validateContactPutBody,
+  validateContactRemoveBody,
+  validateContactsListBody,
+} from './contacts'
 import { STREAM_ACK, STREAM_AUTH, STREAM_PROFILE, validateStreamAckBody, validateStreamAuthBody } from './stream'
 import { validatePayloadBody } from './payload'
 
@@ -251,22 +260,27 @@ const DIRECT_SEND_SPEC: MethodSpec = {
 }
 
 /**
- * 取件面（message-service.md §9）共有的那几项。
+ * 本服务自定的扩展面（取件面 §9、通讯录 TODO6 §3）共有的那几项。
  *
- * 四个方法在这一层完全同形：自己那个 Profile、只认 `transport-protected`、要 proof、
- * 认证失败回 P1 §10.3 L706 的公共码（**这一族没有规范给的私有码**，`1005` 是公共段里
- * 唯一说"没通过认证"的那个）、目标必须是自己（§9.1.1）。差异只有正文校验与是否改状态，
- * 所以下面每个方法只写这两件，其余从这来。
+ * 两个扩展族在这一层完全同形：自己那个 `x_` Profile、只认 `transport-protected`、要
+ * proof、认证失败回 P1 §10.3 L706 的公共码（**这两族都没有规范给的私有码**，`1005` 是
+ * 公共段里唯一说"没通过认证"的那个）、目标必须是自己（§9.1.1）。差异只有正文校验与是否
+ * 改状态，所以下面每个方法只写这两件，其余从这来。
+ *
+ * `profile` 是参数而不是常量：`x_agentx.inbox.v1` 与 `x_agentx.contacts.v1` 服务的是
+ * 两件不同的事，而 P1 §6.2.2 L277 说 `meta.profile` 是"本次请求的唯一解释"——把"读我的
+ * 信箱"与"改我的通讯录"写成同一个解释，等于让一个只实现了前者的服务看起来实现了后者。
  */
 function extensionSpec(
   name: string,
+  profile: string,
   validateBody: (body: Record<string, unknown>) => AnpRejection | undefined,
   targetScope?: (meta: AnpMeta) => string,
 ): MethodSpec {
   return {
     name,
     targetMode: 'self-addressed',
-    profiles: [EXTENSION_PROFILE],
+    profiles: [profile],
     securityProfiles: ['transport-protected'],
     // §9.1 那一段线上形状里，每个方法都带 `operation_id`（P1 §6.2.6）与 `sender_did`
     // （要 proof 就必须有锚点）。`message_id` / `content_type` 是消息自己的字段，
@@ -280,18 +294,49 @@ function extensionSpec(
   }
 }
 
-/** 四个读方法不改状态，所以只有 `inbox.mark_read` 带 `targetScope`——它也是这一族里
- *  唯一进幂等台账的。作用域就是信箱主人，与 `direct.send` 取 `target.did` 同理。 */
-function selfScope(meta: AnpMeta): string {
-  const target = meta.target
-  if (target === undefined) throw new ConnectxError('message_invalid', `${INBOX_MARK_READ} requires meta.target`)
-  return target.did
+/** 扩展面里改状态的那几条共用的幂等作用域：就是这本子自己的主人，与 `direct.send` 取
+ *  `target.did` 同理。收 `method` 只为把"哪一条方法要求 target"写进那句不该发生的错误里。 */
+function selfScope(method: string): (meta: AnpMeta) => string {
+  return (meta) => {
+    const target = meta.target
+    if (target === undefined) throw new ConnectxError('message_invalid', `${method} requires meta.target`)
+    return target.did
+  }
 }
 
-const INBOX_GET_SPEC = extensionSpec(INBOX_GET, validateInboxGetBody)
-const INBOX_MARK_READ_SPEC = extensionSpec(INBOX_MARK_READ, validateMarkReadBody, selfScope)
-const MESSAGE_GET_BATCH_SPEC = extensionSpec(MESSAGE_GET_BATCH, validateGetBatchBody)
-const SYNC_DELTA_SPEC = extensionSpec(SYNC_DELTA, validateDeltaBody)
+const INBOX_GET_SPEC = extensionSpec(INBOX_GET, EXTENSION_PROFILE, validateInboxGetBody)
+const INBOX_MARK_READ_SPEC = extensionSpec(
+  INBOX_MARK_READ,
+  EXTENSION_PROFILE,
+  validateMarkReadBody,
+  selfScope(INBOX_MARK_READ),
+)
+const MESSAGE_GET_BATCH_SPEC = extensionSpec(MESSAGE_GET_BATCH, EXTENSION_PROFILE, validateGetBatchBody)
+const SYNC_DELTA_SPEC = extensionSpec(SYNC_DELTA, EXTENSION_PROFILE, validateDeltaBody)
+
+/**
+ * 通讯录（TODO6 §3，C14）。
+ *
+ * `list` 不改状态，所以没有 `targetScope`；`put` / `remove` 改，两条各自进幂等台账
+ * （`operation_id` 因此有意义：同一个 `operation_id` 重试拿到同一份答复）。
+ *
+ * 目标是**自己**（`self-addressed`）——一本通讯录是"我"的记忆，主人就是签名者。这条绑定
+ * 是这一族唯一的授权：它保证 `owner_did` 永远是验过签的那一个，而不是请求方自己写的话，
+ * 所以 A 的备注 C 看不见。
+ */
+const CONTACTS_LIST_SPEC = extensionSpec(CONTACTS_LIST, CONTACTS_PROFILE, validateContactsListBody)
+const CONTACTS_PUT_SPEC = extensionSpec(
+  CONTACTS_PUT,
+  CONTACTS_PROFILE,
+  validateContactPutBody,
+  selfScope(CONTACTS_PUT),
+)
+const CONTACTS_REMOVE_SPEC = extensionSpec(
+  CONTACTS_REMOVE,
+  CONTACTS_PROFILE,
+  validateContactRemoveBody,
+  selfScope(CONTACTS_REMOVE),
+)
 
 /**
  * 流上的两个传输方法（realtime.md §4、§6）。
@@ -874,6 +919,9 @@ const METHODS: readonly MethodSpec[] = [
   INBOX_MARK_READ_SPEC,
   MESSAGE_GET_BATCH_SPEC,
   SYNC_DELTA_SPEC,
+  CONTACTS_LIST_SPEC,
+  CONTACTS_PUT_SPEC,
+  CONTACTS_REMOVE_SPEC,
 ]
 
 /** 方法表里 `group.*` 那一族。分发与测试都从这里问"哪些是群方法"，不再各写一份名单。 */

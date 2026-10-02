@@ -854,10 +854,12 @@ export interface Storage {
    *  has to hold it anyway to answer "which of these is Alice" — a per-name round trip would
    *  be one network call per keystroke of an agent's reasoning. */
   contacts(ownerDid: string): StoredContact[]
-  /** Insert or replace one row. The key is `(ownerDid, subject)`, so this is how a row's
-   *  `did` is brought up to date after a key update — and why `createdAt` is only written
-   *  on the insert. */
-  upsertContact(contact: StoredContact): void
+  /** Insert or replace one row, returning it **as stored**. The key is
+   *  `(ownerDid, subject)`, so this is how a row's `did` is brought up to date after a key
+   *  update; `createdAt` is written only by the insert and kept by every later write, which
+   *  is why the answer comes back rather than being assumed — the caller cannot know which
+   *  of the two happened without asking. */
+  upsertContact(contact: StoredContact): StoredContact
   /** Drop one row. Returns whether one was there, so `contacts.remove` can answer honestly
    *  instead of reporting success for a no-op. */
   removeContact(ownerDid: string, subject: string): boolean

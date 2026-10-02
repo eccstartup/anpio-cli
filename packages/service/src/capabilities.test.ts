@@ -14,8 +14,15 @@ describe('serviceCapabilities', () => {
       'anp.group.base.v2',
     ])
     expect(capabilities.securityProfiles).toEqual(['direct-e2ee', 'group-e2ee', 'transport-protected'])
-    expect(capabilities.extensionProfiles).toEqual(['x_agentx.inbox.v1', 'x_agentx.stream.v1'])
+    expect(capabilities.extensionProfiles).toEqual([
+      'x_agentx.contacts.v1',
+      'x_agentx.inbox.v1',
+      'x_agentx.stream.v1',
+    ])
     expect(capabilities.extensionMethods).toEqual([
+      'contacts.list',
+      'contacts.put',
+      'contacts.remove',
       'inbox.get',
       'inbox.mark_read',
       'message.get_batch',

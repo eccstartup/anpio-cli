@@ -88,6 +88,14 @@ import {
 import type { ObjectStore } from '../objects'
 import { AnpRefusal, refusal } from './refusal'
 import { INBOX_GET, INBOX_MARK_READ, MESSAGE_GET_BATCH, SYNC_DELTA, markRead, readBatch, readDelta, readInbox } from './inbox'
+import {
+  CONTACTS_LIST,
+  CONTACTS_PUT,
+  CONTACTS_REMOVE,
+  putContact,
+  readContacts,
+  removeContact,
+} from './contacts'
 import { errorResponse, failureId, noResponse, parseRequestText, successResponse } from './envelope'
 
 /** 目标就是本服务（§3.3）。一个共享的常量：它没有内容，没必要每次现造一个。 */
@@ -306,6 +314,14 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
         return readDelta(deps.storage, meta, body)
       case INBOX_MARK_READ:
         return markRead(deps.storage, meta, body, input.acceptedAt)
+      // TODO6 §3 的通讯录。三条与取件面同形——`self-addressed` 那层绑定保证 `owner_did`
+      // 是验过签的 sender，所以这里不需要（也拿不到）第二个身份。
+      case CONTACTS_LIST:
+        return readContacts(deps.storage, meta)
+      case CONTACTS_PUT:
+        return putContact(deps.storage, meta, body, input.acceptedAt)
+      case CONTACTS_REMOVE:
+        return removeContact(deps.storage, meta, body)
       default: {
         // `group.*` 与 `attachment.*` 两族都不在这里逐个枚举：它们的处理器按方法名查
         // （`groups.ts` / `attachments.ts`），因为同族的方法在这一层完全同形，逐个写一个

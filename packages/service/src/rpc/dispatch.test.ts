@@ -1183,6 +1183,152 @@ describe('the pick-up extension surface (§9)', () => {
   })
 })
 
+// ---- 通讯录扩展面（TODO6 §3）---------------------------------------------------
+//
+// 与取件面同形：自己给自己签名、`target.did == sender_did`。这一层的规矩不是规范给的
+// （规范里没有"备注"），是 TODO6 §3 定的，而它要挡住的具体事故有名字——换钥后备注消失。
+// 所以下面那条"同一主体、两把钥"的用例才是这一族里最重要的，其余是它的边界。
+
+describe('the address book extension surface (TODO6 §3)', () => {
+  /** 一次自签名的通讯录调用。`target` 默认是签名者自己，只有"地址绑定"那几条要改成别人。 */
+  async function selfCall(
+    h: Harness,
+    signer: AnpSigningIdentity,
+    method: string,
+    body: Record<string, unknown>,
+    overrides: Partial<AnpMeta> = {},
+  ): Promise<Outcome> {
+    return h.call(
+      await signed({
+        method,
+        meta: {
+          profile: 'x_agentx.contacts.v1',
+          security_profile: 'transport-protected',
+          sender_did: signer.did,
+          target: { kind: 'agent', did: signer.did },
+          operation_id: `op-${method}`,
+          ...overrides,
+        },
+        body,
+        signer,
+      }),
+    )
+  }
+
+  it('stores a row and hands it back with the subject it derived', async () => {
+    const h = harness()
+    const outcome = await selfCall(h, receiver, 'contacts.put', { did: second.did, remark: 'Bob' })
+
+    expect(outcome.json?.error).toBeUndefined()
+    expect(outcome.json?.result).toEqual({
+      contact: {
+        subject: subjectOf(second.did),
+        did: second.did,
+        remark: 'Bob',
+        created_at: NOW.toISOString(),
+        updated_at: NOW.toISOString(),
+      },
+      created: true,
+    })
+
+    const listed = await selfCall(h, receiver, 'contacts.list', {})
+    expect(listed.json?.result?.contacts).toHaveLength(1)
+  })
+
+  it('keeps the first created_at and moves updated_at when the same subject is put again', async () => {
+    const h = harness()
+    await selfCall(h, receiver, 'contacts.put', { did: second.did, remark: 'Bob' }, { operation_id: 'op-p1' })
+    const again = await selfCall(
+      h,
+      receiver,
+      'contacts.put',
+      { did: second.did, remark: 'Bobby' },
+      { operation_id: 'op-p2' },
+    )
+
+    // `created` 是给人的一句话（"加好了" vs "更新了"），不是存储层的分工；`created_at`
+    // 由存储层在冲突时保留，所以它还是第一次那个瞬间。
+    expect(again.json?.result?.created).toBe(false)
+    expect((again.json?.result?.contact as { created_at: string }).created_at).toBe(NOW.toISOString())
+    expect((again.json?.result?.contact as { remark: string }).remark).toBe('Bobby')
+  })
+
+  it('recognises the same person across a key change, because the key is the subject', async () => {
+    const h = harness()
+    // `second` 与 `successor` 同域同路径、不同一把钥——`did update` 之后的样子。挂在
+    // `did` 上的备注会在这一刻变成孤儿行；挂在 subject 上的两行合成一行。
+    await selfCall(h, receiver, 'contacts.put', { did: second.did, remark: 'Bob' }, { operation_id: 'op-p1' })
+    const after = await selfCall(
+      h,
+      receiver,
+      'contacts.put',
+      { did: successor.did, remark: 'Bob' },
+      { operation_id: 'op-p2' },
+    )
+
+    expect(after.json?.result?.created).toBe(false)
+    const listed = await selfCall(h, receiver, 'contacts.list', {})
+    const rows = listed.json?.result?.contacts as { did: string; subject: string }[]
+    expect(rows).toHaveLength(1)
+    expect(rows[0]?.did).toBe(successor.did)
+    expect(rows[0]?.subject).toBe(subjectOf(second.did))
+  })
+
+  it('clears a remark by putting the row without one', async () => {
+    const h = harness()
+    await selfCall(h, receiver, 'contacts.put', { did: second.did, remark: 'Bob' }, { operation_id: 'op-p1' })
+    const cleared = await selfCall(h, receiver, 'contacts.put', { did: second.did }, { operation_id: 'op-p2' })
+
+    // 缺席报 `null` 而不是省略这个键：省略会让"没有备注"和"这版服务端不返回备注"长得一样。
+    expect(cleared.json?.result?.contact).toMatchObject({ remark: null })
+  })
+
+  it('removes by subject and says whether there was anything to remove', async () => {
+    const h = harness()
+    await selfCall(h, receiver, 'contacts.put', { did: second.did, remark: 'Bob' })
+
+    const removed = await selfCall(h, receiver, 'contacts.remove', { subject: subjectOf(second.did) })
+    expect(removed.json?.result).toEqual({ subject: subjectOf(second.did), removed: true })
+
+    const again = await selfCall(h, receiver, 'contacts.remove', { subject: subjectOf(second.did) }, {
+      operation_id: 'op-again',
+    })
+    expect(again.json?.result?.removed).toBe(false)
+  })
+
+  it('keeps one owner out of another owner book', async () => {
+    const h = harness()
+    await selfCall(h, receiver, 'contacts.put', { did: second.did, remark: 'Bob' })
+
+    // 同一本书、同一个被备注的人，换个签名者就是另一本。`owner_did` 来自验过签的
+    // `sender_did`，不是请求里某个可改的字段。
+    const other = await selfCall(h, sender, 'contacts.list', {})
+    expect(other.json?.result?.contacts).toEqual([])
+  })
+
+  it('refuses a target that is not the signer, with 1014', async () => {
+    const h = harness()
+    // 往别人的通讯录里写备注不是这个面有的操作，所以是地址绑定失败，不是"反正你也没写进去"。
+    const outcome = await selfCall(
+      h,
+      receiver,
+      'contacts.put',
+      { did: second.did },
+      { target: { kind: 'agent', did: second.did } },
+    )
+    expect(outcome.json?.error?.code).toBe(1014)
+    expect(outcome.json?.error?.data?.anp_code).toBe('anp.invalid_target_binding')
+  })
+
+  it('refuses a body field it does not know, and an empty did', async () => {
+    const h = harness()
+    expect((await selfCall(h, receiver, 'contacts.list', { extra: 1 })).json?.error?.code).toBe(1003)
+
+    const empty = await selfCall(h, receiver, 'contacts.put', { did: '' }, { operation_id: 'op-empty' })
+    expect(empty.json?.error?.data?.anp_code).toBe('anp.invalid_params_shape')
+  })
+})
+
 describe('capability discovery (P1 §8.2)', () => {
   /** §8.2.1 L524–538's request verbatim, minus `sender_did`: anonymous is the whole point of
    *  this method (L543–544), so it is not built through `signed()` — there is no proof. */

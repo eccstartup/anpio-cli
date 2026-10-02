@@ -396,6 +396,8 @@ describe('the schema the worker reads', () => {
     // on a table this file does not read either (`group_members` is P4's, not the outbox's).
     // v11 added `group_keys`, the per-group signing key (B1b-A1) — a new P4 table, nothing
     // to do with a retired outbox row. Checked, no action.
-    expect(SCHEMA_VERSION).toBe(11)
+    // v12 added `contacts`, the address book (TODO6 §3) — keyed by the owner's own DID and
+    // read only on the RPC path, so a retired outbox row never meets it. Checked, no action.
+    expect(SCHEMA_VERSION).toBe(12)
   })
 })

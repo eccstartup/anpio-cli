@@ -1464,7 +1464,7 @@ class SqliteStorage implements Storage {
     return rows.map(toContact)
   }
 
-  upsertContact(contact: StoredContact): void {
+  upsertContact(contact: StoredContact): StoredContact {
     // 一句话写完整行：`did` 与 `remark` 都以**这次的**值为准，所以一次换钥之后的 re-put
     // 只挪 `did`；`created_at` 靠 DO UPDATE 那句保持不动——它是"这一行什么时候进来的"，
     // 不是"这一行最后一次被摸是什么时候"（那是 `updated_at`）。
@@ -1486,6 +1486,12 @@ class SqliteStorage implements Storage {
       contact.createdAt,
       contact.updatedAt,
     )
+    // 读回来而不是把入参原样返回：`created_at` 在冲突那一支上保留的是**旧值**，而调用方
+    // 给的那一份是它自己猜的时刻。答案只能从行里取。
+    const row = this.stmt(
+      'SELECT * FROM contacts WHERE owner_did = ? AND subject = ?',
+    ).get(contact.ownerDid, contact.subject) as Row
+    return toContact(row)
   }
 
   removeContact(ownerDid: string, subject: string): boolean {

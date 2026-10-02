@@ -58,8 +58,15 @@ describe('what counts as a profile of the service', () => {
 
   it('puts the extensions in the x_agentx block instead', () => {
     const built = entry()
-    expect(built.x_agentx.profiles).toEqual(['x_agentx.inbox.v1', 'x_agentx.stream.v1'])
+    expect(built.x_agentx.profiles).toEqual([
+      'x_agentx.contacts.v1',
+      'x_agentx.inbox.v1',
+      'x_agentx.stream.v1',
+    ])
     expect(built.x_agentx.methods).toEqual([
+      'contacts.list',
+      'contacts.put',
+      'contacts.remove',
       'inbox.get',
       'inbox.mark_read',
       'message.get_batch',
