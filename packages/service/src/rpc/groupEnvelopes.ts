@@ -261,9 +261,21 @@ export function emitAddEnvelopes(
   // §7.6 L665：同一次密码学结果**逐叶**的那几份 MAY 共用一个 `notice_id`，因为每台设备只
   // 按 `(group_did, notice_id)` 去重自己收到的那些。共用一个更省，也让"这是同一次 Add"
   // 在日志里一眼可辨。
+  //
+  // `meta.operation_id` 则**必须每条信封各一个**，和 `notice_id` 正好相反。`anp` 的接收端
+  // 拿它当这一条 pushed frame 的幂等键：`process_notice_v2` 以
+  // `p6-v2-notice:{operation_id}` 记收据，收据里存的是 `{meta, notice, recipient_did,
+  // recipient_device_id}` 的摘要，摘要对不上就报
+  // `group.e2ee.commit_invalid: notice operation_id was replayed with different content`。
+  // 而被加进来的那台设备**同时**收 commit 和 welcome（本函数下面那一份，§12.4），两条
+  // 同 recipient、内容不同——共用一个 id 的话，后到的那条会被判成"同一操作换了内容"而整个
+  // 丢掉。逐叶那份 commit 之间共用则是安全的，因为 recipient 与 `meta.target` 都不同、
+  // 摘要也就不同，但逐条各给一个不必依赖这条推理。
+  //
+  // `notice_id` 解决的是"同一次结果投给多台设备"，`operation_id` 解决的是"这一台设备收到
+  // 的这一条"——§12.6 不定义 ack、服务端重发是常态，后者才是去重真正要用的那个键。
   const noticeId = newId()
   const messageId = newId()
-  const operationId = newId()
 
   const commitBody: Record<string, unknown> = {
     notice_id: noticeId,
@@ -288,7 +300,7 @@ export function emitAddEnvelopes(
         jsonrpc: '2.0',
         method: GROUP_E2EE_NOTICE,
         params: {
-          meta: noticeMeta(leaf.memberDid, leaf.memberDeviceId, input.groupDid, messageId, operationId, ctx.acceptedAt),
+          meta: noticeMeta(leaf.memberDid, leaf.memberDeviceId, input.groupDid, messageId, newId(), ctx.acceptedAt),
           body: commitBody,
         },
       },
@@ -305,7 +317,7 @@ export function emitAddEnvelopes(
       jsonrpc: '2.0',
       method: GROUP_E2EE_NOTICE,
       params: {
-        meta: noticeMeta(input.memberDid, input.memberDeviceId, input.groupDid, messageId, operationId, ctx.acceptedAt),
+        meta: noticeMeta(input.memberDid, input.memberDeviceId, input.groupDid, messageId, newId(), ctx.acceptedAt),
         body: {
           notice_id: noticeId,
           notice_type: 'welcome-delivery',
@@ -355,7 +367,6 @@ export function emitRemoveEnvelopes(
 ): void {
   const noticeId = newId()
   const messageId = newId()
-  const operationId = newId()
 
   const body: Record<string, unknown> = {
     notice_id: noticeId,
@@ -381,7 +392,7 @@ export function emitRemoveEnvelopes(
         jsonrpc: '2.0',
         method: GROUP_E2EE_NOTICE,
         params: {
-          meta: noticeMeta(leaf.memberDid, leaf.memberDeviceId, input.groupDid, messageId, operationId, ctx.acceptedAt),
+          meta: noticeMeta(leaf.memberDid, leaf.memberDeviceId, input.groupDid, messageId, newId(), ctx.acceptedAt),
           body,
         },
       },
@@ -398,7 +409,7 @@ export function emitRemoveEnvelopes(
       jsonrpc: '2.0',
       method: GROUP_E2EE_NOTICE,
       params: {
-        meta: noticeMeta(input.subjectDid, input.subjectDeviceId, input.groupDid, messageId, operationId, ctx.acceptedAt),
+        meta: noticeMeta(input.subjectDid, input.subjectDeviceId, input.groupDid, messageId, newId(), ctx.acceptedAt),
         body,
       },
     },

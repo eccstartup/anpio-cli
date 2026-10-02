@@ -969,6 +969,15 @@ describe('the Device Delivery Queue is written with the accepted call (§12)', (
     // （`anp` 的 `p6_v2_wire_vectors.json`，`notice_notification` 正是一条 welcome-delivery）
     // 里有这一位，crate 的 `V2E2eeNotice` 也把它当必填。
     expect(parsed(rows[1]).params.body.subject_status).toBe('active')
+
+    // `meta.operation_id` 与 `notice_id` 相反：每条信封各一个。接收端拿它当**这一条**的
+    // 幂等键——`anp` 的 `process_notice_v2` 以 `p6-v2-notice:{operation_id}` 记收据，摘要
+    // （含 recipient 与整条 notice）对不上就报 `notice operation_id was replayed with
+    // different content`。member 那台同时收 commit 和 welcome，两条同 recipient、内容不同，
+    // 共用一个 id 的话后到的那条会被整条丢掉。
+    const operationIds = rows.map((r) => parsed(r).params.meta.operation_id)
+    expect(new Set(operationIds).size).toBe(rows.length)
+    expect(operationIds.every((id) => typeof id === 'string' && id.length > 0)).toBe(true)
   })
 
   it('queues one group.incoming per current leaf on send, preserving the accepted fields', async () => {
@@ -1048,6 +1057,14 @@ describe('the Device Delivery Queue is written with the accepted call (§12)', (
     // 同一颗 Commit / 同一个坐标。
     expect(removed.params.body.commit_b64u).toBe('AAAA')
     expect(removed.params.body.epoch).toBe('2')
+
+    // 与 `notice_id` 相反，`meta.operation_id` 逐条信封各一个（理由见 `emitAddEnvelopes`）：
+    // 最终通知与同一颗 Commit 的那几份走的是**不同**设备的流，但一旦将来两个 recipient 撞在
+    // 一起，共用 id 就会让接收端把后到的那条判成"同一操作换了内容"。
+    const noticeOperationIds = queued(h.storage)
+      .filter((r) => r.groupDid === groupDid && (r.kind === 'commit' || r.kind === 'final-notice'))
+      .map((r) => parsed(r).params.meta.operation_id)
+    expect(new Set(noticeOperationIds).size).toBe(noticeOperationIds.length)
 
     // §12.6：一条 leaf 被 Remove 之后 MUST NOT 再为它入队新的应用信封。这里 member 的 P4 成员
     // 行还在、owner 的 leaf 也还在，所以这次 send 会成功——但它只给**还在投影里的**那条 leaf
