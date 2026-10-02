@@ -60,6 +60,7 @@ describe('what counts as a profile of the service', () => {
     const built = entry()
     expect(built.x_agentx.profiles).toEqual([
       'x_agentx.contacts.v1',
+      'x_agentx.group_remarks.v1',
       'x_agentx.inbox.v1',
       'x_agentx.stream.v1',
     ])
@@ -67,6 +68,9 @@ describe('what counts as a profile of the service', () => {
       'contacts.list',
       'contacts.put',
       'contacts.remove',
+      'group_remarks.list',
+      'group_remarks.put',
+      'group_remarks.remove',
       'inbox.get',
       'inbox.mark_read',
       'message.get_batch',

@@ -67,8 +67,13 @@
  *
  *  v12: `contacts` is new — the address book TODO6 §3 adds, keyed by `(owner_did, subject)`.
  *  Like v3/v6/v8/v9/v11 it arrives through the `IF NOT EXISTS` pass and needs no migration
- *  step of its own; the version moves for the usual reason. */
-export const SCHEMA_VERSION = 12
+ *  step of its own; the version moves for the usual reason.
+ *
+ *  v13: `group_remarks` is new — the other half of the address book (TODO6 §4.2): the name
+ *  an owner gives a *group*, as opposed to the name it gives a peer. Keyed by
+ *  `(owner_did, group_did)`. Like v3/v6/v8/v9/v11/v12 it arrives through the `IF NOT EXISTS`
+ *  pass and needs no migration step of its own; the version moves for the usual reason. */
+export const SCHEMA_VERSION = 13
 
 export const SCHEMA: readonly string[] = [
   // ---- idempotency -----------------------------------------------------------
@@ -478,5 +483,41 @@ export const SCHEMA: readonly string[] = [
      created_at  TEXT NOT NULL,
      updated_at  TEXT NOT NULL,
      PRIMARY KEY (owner_did, subject)
+   )`,
+
+  // ---- the same book's other half: groups (TODO6 §4.2) ------------------------
+  // 群的本地备注：**某个人**给**某个群**起的名字。和上面通讯录是同一个道理的另一半——
+  // ANP 里没有"我给这个群起了什么名"这一层，群自己的名字是 `group_profile.display_name`，
+  // 住在群的 Host 上、由 `group.update_profile` 改、**每个成员看到的都是它**（TODO6 §4.1）。
+  // 这张表存的是相反的东西：只有我看得见的那个称呼。
+  //
+  // 为什么不并进 `groups`：那张表的一行是**群的状态**（名册、事件序、策略），一个群一行、
+  // 全体成员共享。备注是每人一份的记忆，塞进那张表，第二个 owner 给同一个群起名时就会
+  // 覆盖第一个——而那次覆盖在 `groups` 里看起来像"群的状态变了"。
+  //
+  // 为什么不并进 `contacts`：那是"我能 `msg send` 给谁"的书，键的另一头是一个 **agent**
+  // （`target.kind: 'agent'`）。群是 P4 的 `group` 寻址，是另一种东西；并进去会让
+  // `contacts list` 把群当人列出来、让 `contacts resolve <名字>` 返回一个群 DID，
+  // 再让 `msg send --to <那个名字>` 走上一条通往群的 `direct.send`——而**群读不了那条
+  // 消息**（没有"群的信箱"这回事，`deliveries` 会落一行 `owner_did` 是群 DID、永不被取走）。
+  // 两本书、两个含义。
+  //
+  // 键是 `group_did` 本身，这里**与 `contacts` 不同**，而那处不同是有理由的：`contacts`
+  // 键 `subject` 是因为 agent 的 DID 内嵌钥指纹、`did update` 会把它挪走（§3.2），
+  // 而群 DID 是本服务自己命名空间里的 `did:web:…:g:<id>`，不含指纹也搬不动
+  //（`groupDidDocument.ts` §A5）。给一个不会动的名字套一层 `subjectOf` 只是让读者去核一个
+  // 恒等变换——`subjectOf` 对 `did:web` 原样返回。
+  //
+  // `remark` 是 `NOT NULL`，同样与 `contacts` 不同：通讯录里没有备注的行是正常状态
+  //（"我见过这个人，还没给他起名"——写入路径 ② 每天在造这样的行），而这张表**没有别的
+  // 写入路径**：只有"我给这个群起了个名字"才会产生一行。没有名字的行在这里不是一种状态，
+  // 是一个错误。要清掉就用 `group_remarks.remove`，不是写个空值。
+  `CREATE TABLE IF NOT EXISTS group_remarks (
+     owner_did   TEXT NOT NULL,
+     group_did   TEXT NOT NULL,
+     remark      TEXT NOT NULL,
+     created_at  TEXT NOT NULL,
+     updated_at  TEXT NOT NULL,
+     PRIMARY KEY (owner_did, group_did)
    )`,
 ]

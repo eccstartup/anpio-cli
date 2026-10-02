@@ -29,6 +29,7 @@ import type {
   StoredGroupKeyPackage,
   StoredGroupLeaf,
   StoredGroupMember,
+  StoredGroupRemark,
   StoredGroupSigningKey,
   StoredMessage,
   StoredOneTimePrekey,
@@ -430,6 +431,18 @@ function toContact(row: Row): StoredContact {
   const remark = maybeText(row.remark)
   if (remark !== undefined) contact.remark = remark
   return contact
+}
+
+function toGroupRemark(row: Row): StoredGroupRemark {
+  // 没有 `maybeText` 那一手：`remark` 在这里是 NOT NULL 的（见 `StoredGroupRemark`），
+  // 一行没有名字不是一种状态。
+  return {
+    ownerDid: text(row.owner_did),
+    groupDid: text(row.group_did),
+    remark: text(row.remark),
+    createdAt: text(row.created_at),
+    updatedAt: text(row.updated_at),
+  }
 }
 
 /**
@@ -1517,6 +1530,42 @@ class SqliteStorage implements Storage {
     const result = this.stmt('DELETE FROM contacts WHERE owner_did = ? AND subject = ?').run(
       ownerDid,
       subject,
+    )
+    return result.changes > 0
+  }
+
+  // ---- the address book's other half: groups (TODO6 §4.2) ----------------------
+
+  groupRemarks(ownerDid: string): StoredGroupRemark[] {
+    const rows = this.stmt('SELECT * FROM group_remarks WHERE owner_did = ? ORDER BY group_did').all(
+      ownerDid,
+    ) as Row[]
+    return rows.map(toGroupRemark)
+  }
+
+  upsertGroupRemark(remark: StoredGroupRemark): StoredGroupRemark {
+    // `contacts` 那条的三句话这里逐句成立，只把 `subject`/`did` 换成了 `group_did`：
+    // 整行以这次的为准（`remark` 一定在，那一列是 NOT NULL）、`created_at` 由 INSERT 写
+    // 而冲突支不动它。没有"只挪一行的一部分"的路径，所以也没有第二个写入方法。
+    this.stmt(
+      `INSERT INTO group_remarks (owner_did, group_did, remark, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (owner_did, group_did) DO UPDATE SET
+         remark = excluded.remark,
+         updated_at = excluded.updated_at`,
+    ).run(remark.ownerDid, remark.groupDid, remark.remark, remark.createdAt, remark.updatedAt)
+    // 读回来而不是把入参原样返回：冲突那一支保留的是**旧的** `created_at`。
+    const row = this.stmt('SELECT * FROM group_remarks WHERE owner_did = ? AND group_did = ?').get(
+      remark.ownerDid,
+      remark.groupDid,
+    ) as Row
+    return toGroupRemark(row)
+  }
+
+  removeGroupRemark(ownerDid: string, groupDid: string): boolean {
+    const result = this.stmt('DELETE FROM group_remarks WHERE owner_did = ? AND group_did = ?').run(
+      ownerDid,
+      groupDid,
     )
     return result.changes > 0
   }

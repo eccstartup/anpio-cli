@@ -16,6 +16,7 @@ describe('serviceCapabilities', () => {
     expect(capabilities.securityProfiles).toEqual(['direct-e2ee', 'group-e2ee', 'transport-protected'])
     expect(capabilities.extensionProfiles).toEqual([
       'x_agentx.contacts.v1',
+      'x_agentx.group_remarks.v1',
       'x_agentx.inbox.v1',
       'x_agentx.stream.v1',
     ])
@@ -23,6 +24,9 @@ describe('serviceCapabilities', () => {
       'contacts.list',
       'contacts.put',
       'contacts.remove',
+      'group_remarks.list',
+      'group_remarks.put',
+      'group_remarks.remove',
       'inbox.get',
       'inbox.mark_read',
       'message.get_batch',

@@ -422,6 +422,36 @@ export interface StoredContact {
   updatedAt: string
 }
 
+/**
+ * One group's name, as one owner calls it (TODO6 §4.2, `x_agentx.group_remarks.v1`).
+ *
+ * The sibling of {@link StoredContact}, and deliberately not the same table. A contact is a
+ * peer this owner can `msg send` to — an `agent` target. A group is `group`-addressed, and
+ * its own name already exists: `group_profile.display_name`, on the group's host, changed by
+ * `group.update_profile`, and visible to **every** member. What is stored here is the
+ * contrary thing: the name only this owner sees.
+ *
+ * **`group_did` is the key where a contact keys on `subject`**, and the difference is real
+ * rather than an oversight. An agent DID embeds a key fingerprint, so `did update` moves it —
+ * which is why a remark hung on it would vanish and why the address book keys on the stable
+ * subject instead (§3.2). A group DID is `did:web:…:g:<id>` in the service's own namespace;
+ * it carries no fingerprint and does not move, and `subjectOf` returns it unchanged. Wrapping
+ * it in a `subject` would be a column a reader has to check is an identity.
+ *
+ * `remark` is **not** optional here, unlike a contact's. Nothing but a deliberate naming
+ * creates one of these rows: there is no traffic path that teaches an owner a group's name
+ * (the owner already sees the group's real name in `group.get_info`), so a row without a
+ * remark would not be a state, it would be a bug. Clearing a name drops the row.
+ */
+export interface StoredGroupRemark {
+  ownerDid: string
+  groupDid: string
+  /** What this owner calls the group. Never empty — see the type comment. */
+  remark: string
+  createdAt: string
+  updatedAt: string
+}
+
 export interface OutboxEntry {
   seq: number
   /** The recipient's DID, NOT a resolved endpoint. The push resolves it through the
@@ -877,6 +907,26 @@ export interface Storage {
   /** Drop one row. Returns whether one was there, so `contacts.remove` can answer honestly
    *  instead of reporting success for a no-op. */
   removeContact(ownerDid: string, subject: string): boolean
+
+  // ---- the address book's other half: groups (TODO6 §4.2) ----------------------
+  //
+  // Same shape of accessor and the same reasoning about where name matching lives: nothing
+  // here decides anything about names, it moves rows.
+
+  /** Every group `ownerDid` has named, ordered by `group_did`.
+   *
+   *  The whole table rather than a lookup for the reason {@link Storage.contacts} gives: it is
+   *  small, and `group info` needs it in one piece to answer "what did I call this one". */
+  groupRemarks(ownerDid: string): StoredGroupRemark[]
+  /** Insert or replace one row, returning it **as stored**.
+   *
+   *  There is no `rememberGroupRemark` counterpart to `rememberContact`: a group's name is
+   *  never learned from traffic, so the only writer is the owner naming it. `createdAt` is
+   *  written only by the insert and kept by every later write, which is why the answer comes
+   *  back rather than being assumed. */
+  upsertGroupRemark(remark: StoredGroupRemark): StoredGroupRemark
+  /** Drop one row, i.e. forget the name. Returns whether one was there. */
+  removeGroupRemark(ownerDid: string, groupDid: string): boolean
 
   close(): void
 }

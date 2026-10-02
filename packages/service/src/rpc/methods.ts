@@ -108,6 +108,15 @@ import {
   validateContactRemoveBody,
   validateContactsListBody,
 } from './contacts'
+import {
+  GROUP_REMARKS_LIST,
+  GROUP_REMARKS_PROFILE,
+  GROUP_REMARKS_PUT,
+  GROUP_REMARKS_REMOVE,
+  validateGroupRemarkPutBody,
+  validateGroupRemarkRemoveBody,
+  validateGroupRemarksListBody,
+} from './groupRemarks'
 import { STREAM_ACK, STREAM_AUTH, STREAM_PROFILE, validateStreamAckBody, validateStreamAuthBody } from './stream'
 import { validatePayloadBody } from './payload'
 
@@ -336,6 +345,35 @@ const CONTACTS_REMOVE_SPEC = extensionSpec(
   CONTACTS_PROFILE,
   validateContactRemoveBody,
   selfScope(CONTACTS_REMOVE),
+)
+
+/**
+ * 群备注（TODO6 §4.2，C14 的另一半）。
+ *
+ * 与通讯录同形，理由也同形：目标是**自己**（`self-addressed`），所以 `owner_did` 永远是
+ * 验过签的签名者，A 给群起的名字 C 看不见；`list` 不改状态所以没有 `targetScope`，
+ * `put` / `remove` 各自进幂等台账。
+ *
+ * 与通讯录**不同**的是 Profile（`x_agentx.group_remarks.v1`）——一本是"我给这些人起的
+ * 名字"，一本是"我给这些群起的名字"，P1 §6.2.2 L277 说 Profile 是本次请求的唯一解释，
+ * 两件事不能共用一个解释。
+ */
+const GROUP_REMARKS_LIST_SPEC = extensionSpec(
+  GROUP_REMARKS_LIST,
+  GROUP_REMARKS_PROFILE,
+  validateGroupRemarksListBody,
+)
+const GROUP_REMARKS_PUT_SPEC = extensionSpec(
+  GROUP_REMARKS_PUT,
+  GROUP_REMARKS_PROFILE,
+  validateGroupRemarkPutBody,
+  selfScope(GROUP_REMARKS_PUT),
+)
+const GROUP_REMARKS_REMOVE_SPEC = extensionSpec(
+  GROUP_REMARKS_REMOVE,
+  GROUP_REMARKS_PROFILE,
+  validateGroupRemarkRemoveBody,
+  selfScope(GROUP_REMARKS_REMOVE),
 )
 
 /**
@@ -922,6 +960,9 @@ const METHODS: readonly MethodSpec[] = [
   CONTACTS_LIST_SPEC,
   CONTACTS_PUT_SPEC,
   CONTACTS_REMOVE_SPEC,
+  GROUP_REMARKS_LIST_SPEC,
+  GROUP_REMARKS_PUT_SPEC,
+  GROUP_REMARKS_REMOVE_SPEC,
 ]
 
 /** 方法表里 `group.*` 那一族。分发与测试都从这里问"哪些是群方法"，不再各写一份名单。 */

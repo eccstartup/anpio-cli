@@ -683,12 +683,13 @@ message.get_batch
 扩展方法在线上必须给出一个能解释它的 Profile 值，而这个值不可能是任何一个规范 Profile
 （那才是对客户端撒谎）。取值就是**扩展自己的标识符**，`x_` 前缀正是 P1 §12 给扩展留的命名空间。
 
-**这个扩展面今天有**三**个 Profile**：取件面 `x_agentx.inbox.v1`（本节所写）、
+**这个扩展面今天有**四**个 Profile**：取件面 `x_agentx.inbox.v1`（本节所写）、
 订阅握手 `x_agentx.stream.v1`（§9.3 末段与 [realtime.md](realtime.md) §4）、
-通讯录 `x_agentx.contacts.v1`（§9.4）。**按方法**取 Profile，不是一个面一个——
-P1 §6.2.2 那句"唯一解释"要求 Profile 能把这条方法解释清楚，一个 Profile 罩住互不相干
-的几组方法就做不到这一点。三条共用的形状（`meta.profile`、目标建模、`origin_proof`、
-不进 `profiles[]`）在本节写一次，§9.4 与 [realtime.md](realtime.md) 只写各自不同的那部分。
+通讯录 `x_agentx.contacts.v1`（§9.4）、群备注 `x_agentx.group_remarks.v1`（§9.5）。
+**按方法**取 Profile，不是一个面一个——P1 §6.2.2 那句"唯一解释"要求 Profile 能把这条方法
+解释清楚，一个 Profile 罩住互不相干的几组方法就做不到这一点。四条共用的形状（`meta.profile`、
+目标建模、`origin_proof`、不进 `profiles[]`）在本节写一次，§9.4 / §9.5 与
+[realtime.md](realtime.md) 只写各自不同的那部分。
 
 于是同一条扩展方法在线上长这样：
 
@@ -927,6 +928,51 @@ subjectOf(did)     // did:wba → 去掉变化的那一段（钥指纹），其�
 是两件事，把它们绑起来会让"对方主机挂了"变成"我不能给他加备注"。可达性由
 `msg send` 那一刻的发现去答。
 
+### 9.5 群备注扩展面：`x_agentx.group_remarks.v1`
+
+**第四个扩展 Profile**，答的是 §9.4 那个问题的另一半：**"我给这个群起了什么名"**。
+群自己的名字协议里**有**——`group_profile.display_name`，住在群的 Host 上，由
+`group.update_profile` 改，**每个成员看到的都是它**（P4 §7.4）。所以这不是一份缺失的
+信息，而是一件**相反**的东西：只有我看得见的那个称呼。TODO6 §4.2 把它与
+`group members` 的名字（§4.2 ②，改名册里那串 DID）并列为两件事。
+
+**为什么另起一本，不并进 `contacts`。** 通讯录那本键的另一头是一个 **agent**——
+`msg send --to` 能发的那种（`target.kind: "agent"`）。群是 P4 的 `group` 寻址，
+是另一种东西。并成一本的后果是可推的：`contacts list` 会把群当人列出来，
+`contacts resolve <名字>` 会返回一个群 DID，`msg send --to <那个名字>` 于是走上一条
+通往群的 `direct.send`——而**群读不了那条消息**（协议里没有"群的信箱"，
+服务端会落一行 `deliveries.owner_did` 是群 DID、永远不被取走的投递记录）。
+两本书、两个含义，各自有各自的 Profile。
+
+**键是 `group_did` 本身，这里与 §9.4 不同，而不同是有理由的。** §9.4 键 `subject`
+是因为 agent 的 DID 内嵌钥指纹、`did update` 会把它挪走；群 DID 是 Host 自己命名空间里的
+`did:web:…:g:<id>`，不含指纹、搬不动，`subjectOf` 对它是个恒等变换。给一个不会动的名字
+套一层 `subjectOf`，只会让读者去核一个恒等变换。分行方式与可见范围则与 §9.4 完全一致：
+`owner_did` 是**已验证签名者**，一个身份起的群名对另一个身份不可见。
+
+**目标建模与 §9.1 同规**：`meta.target = {kind: "agent", did: <owner_did>}`，
+与 `meta.sender_did` 同值，违反回 **1014 `anp.invalid_target_binding`**。认证走
+`origin_proof`（§9.2），**不得**出现在 `profiles[]` 里（§13）。
+
+| 方法 | `body` | 结果 |
+|---|---|---|
+| `group_remarks.list` | `{}` | `{group_remarks: [{group_did, remark, created_at, updated_at}]}` |
+| `group_remarks.put` | `{group_did, remark}` | `{group_remark: {...}, created: bool}` |
+| `group_remarks.remove` | `{group_did}` | `{group_did, removed: bool}` |
+
+`group_remarks.put` **是幂等的 upsert**，键是 `(owner_did, group_did)`，
+`created_at` 保持不动（同 §9.4）。
+
+**`remark` 在这里是必填，与 `contacts.put` 不同。** 通讯录里缺席的 `remark` 是
+"我见过这个人、还没给他起名"这个**正常状态**（写入路径 ② 每天在造没有名字的行），
+而这张表**没有别的写入路径**——只有"我给这个群起了个名字"才会产生一行。缺了它这次调用
+什么都没说，所以它是 `anp.invalid_params_shape`；要清掉名字用 `group_remarks.remove`。
+存储层因此也没有 `rememberGroupRemark` 那样的第二个写入方法。
+
+**服务端不校验这个群住不住在本服务**（同 §9.4 末尾那条）。存的是**我的**名字，不是群的
+事实；群在联邦另一侧时（本服务不是它的 Host），一本本地名册照样该能记下它。要"先问群在
+不在"就得往它的 Host 发一次 `group.get_info`，而那是 `group info` 的事，不是起名的事。
+
 ## 10. 联邦（P8）
 
 **没有中继协议。** P8 §3.1 明确：发送方域**直接复用原业务方法**，不新增 Relay 方法。
@@ -1068,8 +1114,10 @@ Profile 名），以及分属它们的方法：
 ```json
 {
   "x_agentx": {
-    "profiles": ["x_agentx.contacts.v1", "x_agentx.inbox.v1", "x_agentx.stream.v1"],
+    "profiles": ["x_agentx.contacts.v1", "x_agentx.group_remarks.v1",
+                 "x_agentx.inbox.v1", "x_agentx.stream.v1"],
     "methods": ["contacts.list", "contacts.put", "contacts.remove",
+                "group_remarks.list", "group_remarks.put", "group_remarks.remove",
                 "inbox.get", "inbox.mark_read", "message.get_batch",
                 "stream.ack", "stream.auth", "sync.delta"]
   }

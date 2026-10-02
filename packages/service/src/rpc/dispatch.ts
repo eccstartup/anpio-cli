@@ -96,6 +96,14 @@ import {
   readContacts,
   removeContact,
 } from './contacts'
+import {
+  GROUP_REMARKS_LIST,
+  GROUP_REMARKS_PUT,
+  GROUP_REMARKS_REMOVE,
+  putGroupRemark,
+  readGroupRemarks,
+  removeGroupRemark,
+} from './groupRemarks'
 import { errorResponse, failureId, noResponse, parseRequestText, successResponse } from './envelope'
 
 /** 目标就是本服务（§3.3）。一个共享的常量：它没有内容，没必要每次现造一个。 */
@@ -322,6 +330,13 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
         return putContact(deps.storage, meta, body, input.acceptedAt)
       case CONTACTS_REMOVE:
         return removeContact(deps.storage, meta, body)
+      // TODO6 §4.2 的群备注：通讯录那半的另一半，三条同样同形。
+      case GROUP_REMARKS_LIST:
+        return readGroupRemarks(deps.storage, meta)
+      case GROUP_REMARKS_PUT:
+        return putGroupRemark(deps.storage, meta, body, input.acceptedAt)
+      case GROUP_REMARKS_REMOVE:
+        return removeGroupRemark(deps.storage, meta, body)
       default: {
         // `group.*` 与 `attachment.*` 两族都不在这里逐个枚举：它们的处理器按方法名查
         // （`groups.ts` / `attachments.ts`），因为同族的方法在这一层完全同形，逐个写一个

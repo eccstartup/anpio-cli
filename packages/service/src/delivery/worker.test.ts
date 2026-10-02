@@ -398,6 +398,8 @@ describe('the schema the worker reads', () => {
     // to do with a retired outbox row. Checked, no action.
     // v12 added `contacts`, the address book (TODO6 §3) — keyed by the owner's own DID and
     // read only on the RPC path, so a retired outbox row never meets it. Checked, no action.
-    expect(SCHEMA_VERSION).toBe(12)
+    // v13 added `group_remarks`, the address book's other half (TODO6 §4.2) — same reasoning
+    // as v12 and the same table shape, one more Profile on the RPC path. Checked, no action.
+    expect(SCHEMA_VERSION).toBe(13)
   })
 })

@@ -1189,32 +1189,32 @@ describe('the pick-up extension surface (§9)', () => {
 // （规范里没有"备注"），是 TODO6 §3 定的，而它要挡住的具体事故有名字——换钥后备注消失。
 // 所以下面那条"同一主体、两把钥"的用例才是这一族里最重要的，其余是它的边界。
 
-describe('the address book extension surface (TODO6 §3)', () => {
-  /** 一次自签名的通讯录调用。`target` 默认是签名者自己，只有"地址绑定"那几条要改成别人。 */
-  async function selfCall(
-    h: Harness,
-    signer: AnpSigningIdentity,
-    method: string,
-    body: Record<string, unknown>,
-    overrides: Partial<AnpMeta> = {},
-  ): Promise<Outcome> {
-    return h.call(
-      await signed({
-        method,
-        meta: {
-          profile: 'x_agentx.contacts.v1',
-          security_profile: 'transport-protected',
-          sender_did: signer.did,
-          target: { kind: 'agent', did: signer.did },
-          operation_id: `op-${method}`,
-          ...overrides,
-        },
-        body,
-        signer,
-      }),
-    )
-  }
+/** 一次自签名的通讯录调用。`target` 默认是签名者自己，只有"地址绑定"那几条要改成别人。 */
+async function selfCall(
+  h: Harness,
+  signer: AnpSigningIdentity,
+  method: string,
+  body: Record<string, unknown>,
+  overrides: Partial<AnpMeta> = {},
+): Promise<Outcome> {
+  return h.call(
+    await signed({
+      method,
+      meta: {
+        profile: 'x_agentx.contacts.v1',
+        security_profile: 'transport-protected',
+        sender_did: signer.did,
+        target: { kind: 'agent', did: signer.did },
+        operation_id: `op-${method}`,
+        ...overrides,
+      },
+      body,
+      signer,
+    }),
+  )
+}
 
+describe('the address book extension surface (TODO6 §3)', () => {
   it('stores a row and hands it back with the subject it derived', async () => {
     const h = harness()
     const outcome = await selfCall(h, receiver, 'contacts.put', { did: second.did, remark: 'Bob' })
@@ -1372,6 +1372,190 @@ describe('the address book extension surface (TODO6 §3)', () => {
     // 键是 subject，所以第二封落回同一行，不是第二个 Alice。
     const listed = await selfCall(h, receiver, 'contacts.list', {})
     expect(listed.json?.result?.contacts).toHaveLength(1)
+  })
+})
+
+// ---- 群备注扩展面（TODO6 §4.2）-------------------------------------------------
+//
+// 通讯录那半的另一半，形状与它逐条同构；这里要咬住的是**两者不混**——一本是"我能
+// `msg send` 给谁"，一本是"我给哪个群起了什么名"。用户裁定这两套名字不能互相污染，
+// 所以下面那条"两个书架"的用例是这一族里最重要的，其余是它的边界。
+
+describe('the group-remark extension surface (TODO6 §4.2)', () => {
+  /** 一次自签名的群备注调用。Profile 是 `x_agentx.group_remarks.v1`，与 `selfCall` 只差这一处。 */
+  async function remarkCall(
+    h: Harness,
+    signer: AnpSigningIdentity,
+    method: string,
+    body: Record<string, unknown>,
+    overrides: Partial<AnpMeta> = {},
+  ): Promise<Outcome> {
+    return h.call(
+      await signed({
+        method,
+        meta: {
+          profile: 'x_agentx.group_remarks.v1',
+          security_profile: 'transport-protected',
+          sender_did: signer.did,
+          target: { kind: 'agent', did: signer.did },
+          operation_id: `op-${method}`,
+          ...overrides,
+        },
+        body,
+        signer,
+      }),
+    )
+  }
+
+  it('stores a name for a group and hands the row back', async () => {
+    const h = harness()
+    const groupDid = await mintGroup(h)
+    const outcome = await remarkCall(h, receiver, 'group_remarks.put', {
+      group_did: groupDid,
+      remark: 'Team',
+    })
+
+    expect(outcome.json?.error).toBeUndefined()
+    expect(outcome.json?.result).toEqual({
+      group_remark: {
+        group_did: groupDid,
+        remark: 'Team',
+        created_at: NOW.toISOString(),
+        updated_at: NOW.toISOString(),
+      },
+      created: true,
+    })
+
+    const listed = await remarkCall(h, receiver, 'group_remarks.list', {})
+    expect(listed.json?.result?.group_remarks).toHaveLength(1)
+  })
+
+  it('renames a group in place, keeping the first created_at', async () => {
+    const h = harness()
+    const groupDid = await mintGroup(h)
+    await remarkCall(h, receiver, 'group_remarks.put', { group_did: groupDid, remark: 'Team' })
+    const again = await remarkCall(
+      h,
+      receiver,
+      'group_remarks.put',
+      { group_did: groupDid, remark: 'Work' },
+      { operation_id: 'op-again' },
+    )
+
+    // 键是 `group_did`，所以改的是同一行，不是第二个名字。
+    expect(again.json?.result?.created).toBe(false)
+    expect(again.json?.result?.group_remark).toMatchObject({
+      remark: 'Work',
+      created_at: NOW.toISOString(),
+    })
+    const listed = await remarkCall(h, receiver, 'group_remarks.list', {})
+    expect(listed.json?.result?.group_remarks).toHaveLength(1)
+  })
+
+  it('lets a group live elsewhere: the name is mine, not the group host business', async () => {
+    // 本服务**没有**这个群，名字照样存得下——群在 P8 的跨域那一侧时，这正是一本本地名册
+    // 该有的行为。要"先问群在不在"就得先去它的 Host 问一次，而那是 `group info` 的事，
+    // 不是起名的事。
+    const h = harness()
+    const outcome = await remarkCall(h, receiver, 'group_remarks.put', {
+      group_did: 'did:web:groups.example:g:REMOTE',
+      remark: 'Their team',
+    })
+    expect(outcome.json?.result?.created).toBe(true)
+  })
+
+  it('keeps the two books apart: a group name is not a contact, and a contact is not a group name', async () => {
+    const h = harness()
+    const groupDid = await mintGroup(h)
+    // `contacts` 那一本记的是**能 `msg send` 的人**；群是 `group` 寻址，另一种东西。并成
+    // 一本会让 `contacts resolve <名字>` 返回一个群 DID，再让 `msg send --to` 走上一条
+    // 通往群的 `direct.send`——而群读不了那条消息。
+    await remarkCall(h, receiver, 'group_remarks.put', { group_did: groupDid, remark: 'Team' })
+    await selfCall(h, receiver, 'contacts.put', { did: groupDid, remark: 'Team' })
+
+    const groups = await remarkCall(h, receiver, 'group_remarks.list', {})
+    expect(groups.json?.result?.group_remarks).toHaveLength(1)
+    const people = await selfCall(h, receiver, 'contacts.list', {})
+    expect(people.json?.result?.contacts).toHaveLength(1)
+
+    // 删掉群名，人的那一行不动（两条路走的是两张表，不是一行的两种写法）。
+    await remarkCall(h, receiver, 'group_remarks.remove', { group_did: groupDid })
+    const after = await selfCall(h, receiver, 'contacts.list', {})
+    expect(after.json?.result?.contacts).toHaveLength(1)
+  })
+
+  it('keeps one owner out of another owner group book', async () => {
+    const h = harness()
+    const groupDid = await mintGroup(h)
+    await remarkCall(h, receiver, 'group_remarks.put', { group_did: groupDid, remark: 'Team' })
+
+    // `owner_did` 来自验过签的 `sender_did`，不是请求里某个可改的字段。
+    const other = await remarkCall(h, sender, 'group_remarks.list', {})
+    expect(other.json?.result?.group_remarks).toEqual([])
+  })
+
+  it('removes by group did and says whether there was anything to remove', async () => {
+    const h = harness()
+    const groupDid = await mintGroup(h)
+    await remarkCall(h, receiver, 'group_remarks.put', { group_did: groupDid, remark: 'Team' })
+
+    const removed = await remarkCall(h, receiver, 'group_remarks.remove', { group_did: groupDid })
+    expect(removed.json?.result).toEqual({ group_did: groupDid, removed: true })
+
+    const again = await remarkCall(
+      h,
+      receiver,
+      'group_remarks.remove',
+      { group_did: groupDid },
+      { operation_id: 'op-again' },
+    )
+    expect(again.json?.result?.removed).toBe(false)
+  })
+
+  it('refuses a target that is not the signer, with 1014', async () => {
+    const h = harness()
+    const outcome = await remarkCall(
+      h,
+      receiver,
+      'group_remarks.put',
+      { group_did: `${SERVICE_DID}:g:x`, remark: 'Team' },
+      { target: { kind: 'agent', did: second.did } },
+    )
+    expect(outcome.json?.error?.code).toBe(1014)
+    expect(outcome.json?.error?.data?.anp_code).toBe('anp.invalid_target_binding')
+  })
+
+  it('refuses a body field it does not know, an empty group did, and a put without a remark', async () => {
+    const h = harness()
+    expect((await remarkCall(h, receiver, 'group_remarks.list', { extra: 1 })).json?.error?.code).toBe(1003)
+
+    const empty = await remarkCall(h, receiver, 'group_remarks.put', { group_did: '', remark: 'Team' })
+    expect(empty.json?.error?.data?.anp_code).toBe('anp.invalid_params_shape')
+
+    // 与 `contacts.put` 不同：那边缺席的 `remark` 是"没有名字"这个正常状态，这边缺席就是
+    // 什么都没说——这一族没有"先记下群、还没起名"的路径。
+    const unnamed = await remarkCall(
+      h,
+      receiver,
+      'group_remarks.put',
+      { group_did: `${SERVICE_DID}:g:x` },
+      { operation_id: 'op-unnamed' },
+    )
+    expect(unnamed.json?.error?.data?.anp_code).toBe('anp.invalid_params_shape')
+  })
+
+  it('replays a put under the same operation id instead of naming the group twice', async () => {
+    const h = harness()
+    const groupDid = await mintGroup(h)
+    const body = { group_did: groupDid, remark: 'Team' }
+    await remarkCall(h, receiver, 'group_remarks.put', body, { operation_id: 'op-p1' })
+    const replay = await remarkCall(h, receiver, 'group_remarks.put', body, { operation_id: 'op-p1' })
+
+    // 台账里的那份答复原样还回来。这一条真正咬住的是 `targetScope` 接上了：没有它，第二次
+    // 会**真的执行**一遍，`created` 就会是 `false`（那一行已经在了）。
+    expect(replay.json?.result?.created).toBe(true)
+    const listed = await remarkCall(h, receiver, 'group_remarks.list', {})
+    expect(listed.json?.result?.group_remarks).toHaveLength(1)
   })
 })
 
