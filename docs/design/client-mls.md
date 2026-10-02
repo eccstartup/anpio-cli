@@ -52,9 +52,31 @@ Host 判不了的 `delta` 对不对、Commit 是不是正确，全部落在这�
 `pending_commit_id` 就是那条关联句柄。**服务端早就是这个形状，客户端库天然接得上**——这是这份
 方案里唯一一处不用设计的接缝。
 
-状态那一侧同样对得上：`storage.rs` 的 `ImCoreSqliteGroupMlsStore` 就是**一个调用方指定的
-sqlite 路径**加一把 fs2 文件锁（`StateLock`），单进程。正是 [e2ee-direct.md](e2ee-direct.md)
-§9.1 定下的"一处落盘、客户端进程"。
+### 2.1 在 1.0.5 上重核（2026-10-02，TODO5 落地时）
+
+上面那张表是在 **0.9.0** 的检出上核的。pin 定了 **1.0.5** 之后，在
+`origin/release/0929`（那一支的 `rust/Cargo.toml` 才是 `version = "1.0.5"`；`origin/master`
+反而停在 `1.0.4-rc.1`）上重核，结论：**上面每一行都还在**，另有三处要按 1.0.5 补：
+
+- **KeyPackage 的发布多了一层"签名"两段式。** 0.9.0 只有一次性 `generate_key_package_v2`；
+  1.0.5 在它之外给了 `prepare_or_resume_key_package_publish_signing_v2` →
+  `complete_key_package_publish_signing_v2` → `prepare_or_resume_key_package_publish_v2` →
+  `accept_key_package_publish_v2`。**第一个生成的公开包会落盘、重试时逐字节复用**——这正是
+  §2 说的"耐久 pending"在 KeyPackage 这一侧的对应物。
+- **解密有两个入口**：`decrypt_v2` 与 `decrypt_received_v2`。
+- **另有四个只有 1.0.5 有的**：`mark_local_group_terminal_intent_v2`（`leave_prepare` 那条
+  本地终态）、`list_local_group_member_endpoints_v2`、`recover_finalized_transition_welcome_v2`、
+  `add_member_prepare_for_did_transition_v2`——后两个是 **DID 迁移**（`authentication::did_transition`，
+  1.0.5 新增模块，对应本仓库 core 的 `did/chain.ts`）接进群 E2EE 的地方。
+
+**1.0.5 还新增了两个模块**：`authentication::did_web` 与 `authentication::did_transition`；
+`sealed_handoff` 也成了顶层模块。
+
+状态那一侧同样对得上（1.0.5 核过）：`storage.rs` 的 `ImCoreSqliteGroupMlsStore` 有
+`from_local_state_sqlite_path` / `new_scoped_state_db` / `with_nonblocking_lock`，
+作用域是 `GroupMlsOwnerScope { owner_identity_id, owner_did, device_id }`，锁是
+`StateLock::try_acquire`（fs2），单进程。正是 [e2ee-direct.md](e2ee-direct.md) §9.1 定下的
+"一处落盘、客户端进程"。
 
 **官方自己的位置**（`rust/README.md`）：MLS **是库调用，不是 `anp-mls` 子进程调用**；"MLS state
 is kept behind `anp::group_e2ee::storage` store implementations **rather than a subprocess or
@@ -145,15 +167,15 @@ MLS，只搬运。
 **等着开的代价也写清楚**：服务端 P6 继续只有合成输入，而 MLS 那半边——最容易出错的那一半——
 到真开工时才开始积累。
 
-## 8. 动手前必须先做的三件事
+## 8. 动手前必须先做的三件事 ~~（2026-10-02 已做完，TODO5 落地时）~~
 
-1. **fetch。** 本机 `/Users/eccstartup/code/github/anp` 停在 **0.9.0**、落后 origin/master
-   **93 个提交**；而 crates.io 上 `anp` 已经是 **1.0.5**（2026-09-24）。本文 §2 的函数名是在那
-   份 0.9.0 检出上核的。
-2. **在 1.x 上重核签名。** docs.rs 确认 1.0.5 里 `group_e2ee` / `operations` / `storage` 都还在
-   （`operations` 的描述是 "Real OpenMLS group E2EE operations"，仍挂在 `mls` feature 后），
-   1.x 还多了 `v2_origin`、`sealed_handoff` 与 update/recover 那几个模型。**但 §2 那张表的函数
-   签名必须在 pin 定的版本上逐个核一遍再动手。**
-3. **定 pin。** 选一个明确版本写进 crate 的 `Cargo.toml` 与 README。注意这与 `awiki-open-server`
-   钉 `anp==1.0.3`（Python）**没有关系**：两边不共享进程，也不共享 crate 版本——线上那条约定
-   是 Profile，不是 SDK 版本。
+1. **fetch。** ✔ 已 `git fetch origin --tags`。本机 `/Users/eccstartup/code/github/anp` 的工作
+   分支仍在 `master`（`16298fd`，落后 origin/master **93 个提交**），但**没有 checkout**——
+   1.0.5 的源码用 `git show origin/release/0929:rust/...` 读，不打扰那份检出。
+   **新发现**：crates.io 的 1.0.5 对应的是 **`origin/release/0929`** 分支（`release-20260929`
+   标签附近），而 **`origin/master` 的 `rust/Cargo.toml` 反而写着 `1.0.4-rc.1`**——所以
+   "master 最新"是错的，读源码要认 release 分支。
+2. **在 1.0.5 上重核签名。** ✔ 见 §2.1。§2 那张表的每一行都还在，另有三处 1.0.5 的补充。
+3. **定 pin。** ✔ **`anp = "1.0.5"`**，写在 [`rust/Cargo.toml`](../../rust/Cargo.toml) 的
+   workspace 依赖里。这与 `awiki-open-server` 钉 `anp==1.0.3`（Python）**没有关系**：两边不共享
+   进程，也不共享 crate 版本——线上那条约定是 Profile，不是 SDK 版本。

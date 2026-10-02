@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = ["crates/agentx-cli"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.88.0"
+
+# The Rust client (`agentx-cli`) is a separate thing from the TS service and the
+# TS CLI (TODO5 §0). It talks to the official `anp` crate, pinned (TODO5 §0.1 #4).
+[workspace.dependencies]
+anp = "1.0.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+anyhow = "1"
+thiserror = "1"
+chrono = "0.4"
+# The HTTP hop to the service. Same feature set the `anp` crate pulls in for its own
+# DID resolution, so this introduces no second TLS stack.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# The DID document's `proofValue` is base58-btc multibase (ANP-03 §2.5.5), while the
+# `anp` crate's `complete_w3c_proof` writes base64url. Both crates are already in
+# `anp`'s tree, so re-encoding the proof introduces no new dependency stack.
+bs58 = "0.5"
+base64 = "0.22"
+# The device keys the P6 manifest binds (TODO5 §8-J). The `anp` crate only mints keys as
+# part of a DID document — and its own pair is the older single-device layout — so this
+# client makes its own. Both crates are already in `anp`'s tree; the versions are pinned
+# to the ones it resolves, because `PrivateKeyMaterial` holds these exact types.
+ed25519-dalek = { version = "=2.1.1", features = ["rand_core"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+rand = "0.8"

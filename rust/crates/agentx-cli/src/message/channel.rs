@@ -1,0 +1,604 @@
+//! The client half of ANP-09, shared by `msg` (and later `group`): who this run signs as,
+//! which message service answers for a given DID, and one signed call placed on it.
+//!
+//! The port of `packages/cli/src/commands/channel.ts`. It exists as its own module for the
+//! same reason it does there: the parts that must happen **exactly once** are the parts that
+//! break in the hardest way when they are copied. Three laws hold here.
+//!
+//! 1. [`crate::message::envelope::build_message_request`] assembles the envelope.
+//! 2. The `anp` crate's `generate_rfc9421_origin_proof` canonicalises for the proof.
+//! 3. The **same** `meta` goes to the signer and to the envelope builder, so neither can
+//!    sign one thing and send another.
+
+use anp::proof::{generate_rfc9421_origin_proof, Rfc9421OriginProofGenerationOptions};
+use anp::PrivateKeyMaterial;
+use chrono::{SecondsFormat, Utc};
+use reqwest::Url;
+use serde_json::{Map, Value};
+
+use crate::error::{AgentxError, Result};
+use crate::identity::Identity;
+
+use super::discovery::{discover_message_service, AnpCapabilities, MessageServiceTarget};
+use super::envelope::{
+    build_message_request, AnpAuth, AnpMeta, AnpOriginProof, AnpTarget, TargetKind,
+    ORIGIN_PROOF_SCHEME,
+};
+use super::resolve::{did_host, is_loopback_host_name, ResolvePolicy};
+use super::rpc::{post_message, AnpResponse};
+
+pub const TRANSPORT_PROTECTED: &str = "transport-protected";
+
+/// JSON-RPC "no such method".
+pub const METHOD_NOT_FOUND: i64 = -32601;
+/// P1 §10.3: 1001 `anp.unsupported_profile`. On an `x_agentx.*` profile this says the same
+/// thing `-32601` does — the peer does not implement this extension.
+pub const UNSUPPORTED_PROFILE: &str = "anp.unsupported_profile";
+/// P1 §10.3: the peer refuses a DID that has a successor, and MUST NOT retarget on its own.
+/// The sender is the one that has to verify the migration and retry (P3 §5.5).
+pub const DID_SUPERSEDED: &str = "anp.did_superseded";
+
+/// P3 §7.1.2: the three fixed values of a `direct.send`.
+pub const DIRECT_SEND: &str = "direct.send";
+pub const DIRECT_PROFILE: &str = "anp.direct.base.v1";
+
+/// P1 §8.2.1: a capabilities probe explains itself under the core binding.
+pub const GET_CAPABILITIES: &str = "anp.get_capabilities";
+pub const CORE_BINDING: &str = "anp.core.binding.v1";
+
+/// message-service.md §9.3: the three extension methods the read commands call.
+pub const INBOX_GET: &str = "inbox.get";
+pub const INBOX_MARK_READ: &str = "inbox.mark_read";
+pub const MESSAGE_GET_BATCH: &str = "message.get_batch";
+
+/// The extension surface's own Profile. P1 §6.2.2 makes `meta.profile` MUST and calls it
+/// "the single Profile this request is to be read under", so a read request has to name one
+/// — and no normative Profile interprets `inbox.get`. The `x_` prefix is the namespace P1
+/// §12 leaves for extensions, and it is what keeps this value out of the `profiles[]` a
+/// service advertises as its specification conformance.
+pub const EXTENSION_PROFILE: &str = "x_agentx.inbox.v1";
+
+// ---- the outbound network policy ---------------------------------------------
+
+/// The hosts a run may treat as its own machine: those named in `--allow-private-host`,
+/// plus every **loopback** name among `hosts`.
+///
+/// A loopback spelling needs no second flag. `--allow-private-host` stays for a host that
+/// is local *without* being spelled that way (a LAN address, a name resolving inward).
+///
+/// The two relaxations travel together because a host declared local is a development
+/// server: ANP-02's TLS requirement is about real deployments, and plain `http` on this
+/// machine is the case `allowInsecureTransport` exists for.
+pub fn relaxed_hosts(hosts: &[String], allow_private_hosts: &[String]) -> Vec<String> {
+    let mut relaxed = allow_private_hosts.to_vec();
+    for host in hosts {
+        if is_loopback_host_name(host) && !relaxed.iter().any(|listed| listed == host) {
+            relaxed.push(host.clone());
+        }
+    }
+    relaxed
+}
+
+/// The policy for a fetch whose host is DERIVED rather than typed.
+///
+/// `did resolve` makes the caller name `--allow-host`, because there the host *is* the
+/// thing being asked about. Here it comes from a DID: it *is* the peer, and a second flag
+/// repeating it would only be one more way to get it wrong. What the caller still controls
+/// is the private-address gate, because a message service on this machine is a development
+/// setup (`--allow-private-host`).
+pub fn policy_for(hosts: &[String], allow_private_hosts: &[String]) -> ResolvePolicy {
+    let mut allowed_hosts: Vec<String> = Vec::new();
+    for host in hosts {
+        if !allowed_hosts.iter().any(|listed| listed == host) {
+            allowed_hosts.push(host.clone());
+        }
+    }
+    let relaxed = relaxed_hosts(&allowed_hosts, allow_private_hosts);
+    ResolvePolicy {
+        allowed_hosts,
+        allow_private_hosts: relaxed.clone(),
+        allow_insecure_transport: relaxed,
+    }
+}
+
+fn endpoint_host(endpoint: &str) -> Option<String> {
+    Url::parse(endpoint)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+}
+
+/// One discovered ingress, plus the policy its POST hop must satisfy.
+pub struct Endpoint {
+    pub target: MessageServiceTarget,
+    pub policy: ResolvePolicy,
+}
+
+/// P2 §9.1 for an agent and for a group are the same two steps: resolve the target's
+/// document, take its one ANPMessageService. A group DID's document carries its own entry
+/// exactly as an agent's does, so there is no group-specific lookup to write.
+///
+/// Two policies come out of this, not one. The document fetch may reach only the host the
+/// DID itself names; the message POST may additionally reach the endpoint host, which the
+/// **peer** chose by writing it into the document.
+pub async fn discover(
+    client: &reqwest::Client,
+    identity: &str,
+    allow_private_hosts: &[String],
+) -> Result<Endpoint> {
+    let document_host = did_host(identity)?;
+    let document_policy = policy_for(std::slice::from_ref(&document_host), allow_private_hosts);
+    let target = discover_message_service(client, identity, &document_policy).await?;
+
+    let mut hosts = vec![document_host];
+    if let Some(host) = endpoint_host(&target.endpoint) {
+        hosts.push(host);
+    }
+    let policy = policy_for(&hosts, allow_private_hosts);
+    Ok(Endpoint { target, policy })
+}
+
+// ---- the sender --------------------------------------------------------------
+
+/// The identity this run signs as.
+///
+/// `agent` / `profile` travel with it rather than being looked up again, because they are
+/// what `msg listen` derives its default `device_id` from (realtime.md §5.4).
+pub struct Sender {
+    pub did: String,
+    pub keyid: String,
+    pub agent: String,
+    pub profile: String,
+    signing_key: PrivateKeyMaterial,
+}
+
+impl Sender {
+    /// The signing half of an already-loaded identity.
+    ///
+    /// A message carries `meta.sender_did` (P3 §7.1.2) and the recipient resolves that DID
+    /// back to an ingress to answer on. An identity that only exists on this machine has no
+    /// ingress, so a send signed by one could not be answered — which is why `did create`
+    /// publishes as part of creating, and why a keyless identity is refused here rather than
+    /// surfacing later as a network problem.
+    ///
+    /// The identity is passed in rather than loaded here on purpose: reading the store is
+    /// the command face's job, and it reports its failures with its own error type. This
+    /// layer only ever sees a value that already exists.
+    pub fn from_identity(identity: &Identity) -> Result<Self> {
+        let fragment = "key-1";
+        let key = identity.keys.get(fragment).ok_or_else(|| {
+            AgentxError::MessageInvalid(format!(
+                "{} has no {fragment}; re-run: agentx-cli did create",
+                identity.did
+            ))
+        })?;
+        let signing_key = PrivateKeyMaterial::from_pem(&key.private_key_pem).map_err(|err| {
+            AgentxError::MessageInvalid(format!("cannot read {fragment} from the store: {err}"))
+        })?;
+        Ok(Self {
+            did: identity.did.clone(),
+            keyid: format!("{}#key-1", identity.did),
+            agent: identity.agent.clone(),
+            profile: identity.profile.clone(),
+            signing_key,
+        })
+    }
+}
+
+/// A read is addressed to the caller's OWN message service. There is no `--to`: the owner
+/// of the inbox is `meta.sender_did`, so the DID whose document has to be fetched for the
+/// service entry is the one we sign as.
+pub struct Channel {
+    pub sender: Sender,
+    pub endpoint: Endpoint,
+}
+
+/// One channel resolution and one signer. Exported for `msg listen`, which authenticates
+/// the same way over a socket instead of a POST (realtime.md §3).
+pub async fn open_channel(
+    client: &reqwest::Client,
+    identity: &Identity,
+    allow_private_hosts: &[String],
+) -> Result<Channel> {
+    let sender = Sender::from_identity(identity)?;
+    let endpoint = discover(client, &sender.did, allow_private_hosts).await?;
+    Ok(Channel { sender, endpoint })
+}
+
+// ---- one signed call ---------------------------------------------------------
+
+/// What one call puts on the wire, minus the envelope and the signature.
+///
+/// `target` is a parameter rather than a constant because P4 gives two answers within one
+/// family: `group.create` names the SERVICE it is asking to make a group, every other group
+/// method names the GROUP. `meta.target` is part of the Signed Request Object, so this is a
+/// signed decision, not a routing hint.
+pub struct CallRequest {
+    pub method: String,
+    pub profile: String,
+    pub target: AnpTarget,
+    pub body: Map<String, Value>,
+    /// P1 §6.2.7: a message-bearing operation MUST carry it. Set by `direct.send` and
+    /// `group.send`, absent on a state change.
+    pub message_id: Option<String>,
+    /// P1 §6.2.10 / P4 §7.6: likewise.
+    pub content_type: Option<String>,
+    /// P1 §6.2.6: MUST for every state-changing operation. Caller-supplied when a retry has
+    /// to reuse it, otherwise fresh.
+    pub operation_id: Option<String>,
+}
+
+/// POST one signed request. The response is returned as it arrived — success and refusal
+/// are both answers, and only the caller knows which of them it can act on.
+///
+/// `sender` and `endpoint` come in separately rather than as a [`Channel`] because the two
+/// halves are chosen independently: `msg send` signs with the identity in use and posts to
+/// the **recipient's** ingress, while `msg inbox` posts to its own. A type that assumed they
+/// belonged together would have to be taken apart again for the send case.
+pub async fn call(
+    client: &reqwest::Client,
+    sender: &Sender,
+    endpoint: &Endpoint,
+    request: CallRequest,
+) -> Result<AnpResponse> {
+    let meta = AnpMeta {
+        profile: request.profile,
+        security_profile: TRANSPORT_PROTECTED.to_string(),
+        sender_did: Some(sender.did.clone()),
+        target: Some(request.target),
+        operation_id: Some(request.operation_id.unwrap_or_else(uuid_v4)),
+        created_at: Some(now_rfc3339()),
+        message_id: request.message_id,
+        content_type: request.content_type,
+        ..Default::default()
+    };
+
+    // P1 appendix A.3: the Signed Request Object is `{method, meta, body}`, so the SAME two
+    // values go to the signer and to the envelope builder. The signer takes `meta` as JSON,
+    // exactly as the builder will serialise it, so neither can sign one thing and send
+    // another. (`request_meta_is_what_gets_signed` pins that down.)
+    let meta_value = serde_json::to_value(&meta)?;
+    let body_value = Value::Object(request.body.clone());
+    let proof = generate_rfc9421_origin_proof(
+        &request.method,
+        &meta_value,
+        &body_value,
+        &sender.signing_key,
+        &sender.keyid,
+        Rfc9421OriginProofGenerationOptions::default(),
+    )
+    .map_err(|err| AgentxError::MessageInvalid(format!("signing {}: {err}", request.method)))?;
+
+    let auth = AnpAuth {
+        scheme: ORIGIN_PROOF_SCHEME.to_string(),
+        origin_proof: AnpOriginProof {
+            content_digest: proof.content_digest,
+            signature_input: proof.signature_input,
+            signature: proof.signature,
+        },
+    };
+
+    // A fresh `id` per exchange: `id` pairs one request with one response, while
+    // `operation_id` is what makes the business operation idempotent.
+    let envelope = build_message_request(
+        &uuid_v4(),
+        &request.method,
+        meta,
+        Some(body_value),
+        Some(auth),
+    )?;
+
+    // The endpoint is the peer's, so `post_message` applies the hop policy itself rather
+    // than trusting this call site to have done it.
+    post_message(
+        client,
+        &endpoint.target.endpoint,
+        &envelope,
+        &endpoint.policy,
+        &endpoint.target.identity,
+    )
+    .await
+}
+
+/// One extension call. Authenticated exactly like `direct.send` — an `origin_proof` over
+/// `{method, meta, body}`, no bearer token — because this client does not hold one and the
+/// proof is the stronger answer anyway.
+///
+/// `meta.target` is the mailbox owner, i.e. the identity in use. That is not a formality:
+/// P1 appendix A.4 requires `meta.target` whenever a method carries an `origin_proof`, and
+/// the same appendix requires an endpoint-local method to have its target modelling written
+/// down by its Profile — which is message-service.md §9.1.1. Reading one's own inbox is
+/// addressed to oneself, so `target.did` and `sender_did` are the same DID.
+pub async fn call_extension(
+    client: &reqwest::Client,
+    channel: &Channel,
+    method: &str,
+    body: Map<String, Value>,
+) -> Result<Value> {
+    let response = call(
+        client,
+        &channel.sender,
+        &channel.endpoint,
+        CallRequest {
+            method: method.to_string(),
+            profile: EXTENSION_PROFILE.to_string(),
+            target: AnpTarget {
+                kind: TargetKind::Agent,
+                did: channel.sender.did.clone(),
+            },
+            body,
+            message_id: None,
+            content_type: None,
+            operation_id: None,
+        },
+    )
+    .await?;
+
+    match response {
+        AnpResponse::Success { result, .. } => Ok(result),
+        AnpResponse::Error { error, .. } => Err(extension_rejection(
+            method,
+            &channel.sender.did,
+            error.code,
+            error.data.as_ref().and_then(|data| data.anp_code.as_deref()),
+            &error.message,
+        )),
+    }
+}
+
+// ---- the payload -------------------------------------------------------------
+
+/// A `direct.send` / `group.send` payload, already paired with the content type that
+/// describes it.
+pub struct Payload {
+    pub body: Map<String, Value>,
+    pub content_type: String,
+}
+
+/// Of `text` / `payload` / `payload_b64u` **exactly one** MUST be present, and the two
+/// fixed content types each pin which one. So the command takes a payload as text or as a
+/// JSON object, and refuses the two combinations the Profiles have no body shape for.
+///
+/// Written once because P3 §6.2.4 / §6.2.5 and P4 §7.6 state the same three-way rule for
+/// `direct.send` and `group.send`: the citations differ, the constraint does not, and two
+/// copies of it would be two chances to drift.
+pub fn payload_of(
+    text: Option<&str>,
+    raw_json: Option<&str>,
+    content_type: Option<&str>,
+) -> Result<Payload> {
+    match (text, raw_json) {
+        (Some(_), Some(_)) => {
+            return Err(AgentxError::MessageInvalid(
+                "--text and --body are two spellings of the same thing; pass one".to_string(),
+            ))
+        }
+        (None, None) => {
+            return Err(AgentxError::MessageInvalid(
+                "missing required option --text or --body".to_string(),
+            ))
+        }
+        _ => {}
+    }
+
+    if let Some(text) = text {
+        let content_type = content_type.unwrap_or("text/plain").to_string();
+        if content_type == "application/json" {
+            return Err(AgentxError::MessageInvalid(
+                "--text is sent as `text`, which content_type application/json does not have a \
+                 body shape for (P3 §6.2.5 / P4 §7.6); pass --body instead"
+                    .to_string(),
+            ));
+        }
+        let mut body = Map::new();
+        body.insert("text".to_string(), Value::String(text.to_string()));
+        return Ok(Payload { body, content_type });
+    }
+
+    let raw = raw_json.unwrap_or_default();
+    let parsed: Value = serde_json::from_str(raw).map_err(|_| {
+        AgentxError::MessageInvalid(format!(
+            "--body must be JSON (got {})",
+            serde_json::to_string(raw).unwrap_or_else(|_| format!("{raw:?}"))
+        ))
+    })?;
+    if !parsed.is_object() {
+        return Err(AgentxError::MessageInvalid(
+            "--body must be a JSON object, which is the only shape `payload` has (P3 §6.2.5 / \
+             P4 §7.6); use --text for a plain string"
+                .to_string(),
+        ));
+    }
+    let content_type = content_type.unwrap_or("application/json").to_string();
+    if content_type == "text/plain" {
+        return Err(AgentxError::MessageInvalid(
+            "--body is sent as `payload`, which content_type text/plain does not have a body \
+             shape for (P3 §6.2.4 / P4 §7.6); pass --text instead"
+                .to_string(),
+        ));
+    }
+    let mut body = Map::new();
+    body.insert("payload".to_string(), parsed);
+    Ok(Payload { body, content_type })
+}
+
+// ---- reporting ---------------------------------------------------------------
+
+pub fn is_error(response: &AnpResponse) -> bool {
+    matches!(response, AnpResponse::Error { .. })
+}
+
+/// A peer's refusal. The peer's own `anp_code` goes on the message line so a script can
+/// branch on it without `--json`.
+pub fn rejection(
+    method: &str,
+    identity: &str,
+    code: i64,
+    anp_code: Option<&str>,
+    message: &str,
+) -> AgentxError {
+    let named = anp_code.map(str::to_string).unwrap_or_else(|| format!("JSON-RPC error {code}"));
+    AgentxError::MessageSendFailed(format!(
+        "{identity} rejected {method}: {named}: {message}"
+    ))
+}
+
+/// A peer that has no extension surface is not a failure — it is an answer, and a specific
+/// one. Both codes say "I do not have this": `-32601` is what a JSON-RPC service returns for
+/// a method it does not implement, and `1001` is what a service returns for a Profile it
+/// does not know.
+///
+/// No capabilities probe is made first: an extension Profile is not supposed to be in
+/// `profiles[]` (message-service.md §13), so the probe could only ever confirm the absence,
+/// at the price of a second round trip.
+pub fn extension_rejection(
+    method: &str,
+    identity: &str,
+    code: i64,
+    anp_code: Option<&str>,
+    message: &str,
+) -> AgentxError {
+    if code != METHOD_NOT_FOUND && anp_code != Some(UNSUPPORTED_PROFILE) {
+        return rejection(method, identity, code, anp_code, message);
+    }
+    let named = anp_code.map(str::to_string).unwrap_or_else(|| format!("JSON-RPC error {code}"));
+    AgentxError::MessageInvalid(format!(
+        "{identity} does not implement {method} ({named}): the inbox / history / read-state \
+         methods are an implementation extension, not defined by the ANP message specification"
+    ))
+}
+
+/// The capabilities this run negotiated, or the static hint when the service answered
+/// nothing usable. Kept as one call so the "runtime beats hint" rule is applied in one
+/// place.
+pub fn negotiated(
+    target: &MessageServiceTarget,
+    runtime: Option<&AnpCapabilities>,
+) -> (Vec<String>, Vec<String>, &'static str) {
+    super::discovery::negotiate_profiles(
+        &target.hinted_profiles,
+        &target.hinted_security_profiles,
+        runtime,
+    )
+}
+
+/// Now, spelled the way the TS client spells it (`new Date().toISOString()`): millisecond
+/// precision and a `Z` offset. §6.2.8 asks for RFC 3339 and both spellings satisfy it, but a
+/// peer that already logs the TS client's timestamps does not need a second format.
+pub fn now_rfc3339() -> String {
+    Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+/// A UUID v4, so `operation_id` and request `id` read like the TS client's `randomUUID()`.
+/// The spec fixes no format (P1 §6.2.6 only says it must be a string), but interop with a
+/// peer that logs them is easier when both clients spell them the same way.
+pub fn uuid_v4() -> String {    let mut bytes = rand::random::<[u8; 16]>();
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn text_and_body_are_two_spellings_of_one_payload() {
+        assert!(payload_of(Some("hi"), Some("{}"), None).is_err());
+        assert!(payload_of(None, None, None).is_err());
+    }
+
+    #[test]
+    fn text_pins_text_plain_and_body_pins_json() {
+        let payload = payload_of(Some("hello"), None, None).unwrap();
+        assert_eq!(payload.content_type, "text/plain");
+        assert_eq!(Value::Object(payload.body), json!({"text": "hello"}));
+
+        let payload = payload_of(None, Some(r#"{"k":1}"#), None).unwrap();
+        assert_eq!(payload.content_type, "application/json");
+        assert_eq!(Value::Object(payload.body), json!({"payload": {"k": 1}}));
+    }
+
+    #[test]
+    fn the_two_combinations_without_a_body_shape_are_refused() {
+        assert!(payload_of(Some("hi"), None, Some("application/json")).is_err());
+        assert!(payload_of(None, Some("{}"), Some("text/plain")).is_err());
+    }
+
+    #[test]
+    fn body_must_be_a_json_object() {
+        assert!(payload_of(None, Some("[1,2]"), None).is_err());
+        assert!(payload_of(None, Some("null"), None).is_err());
+        assert!(payload_of(None, Some("not json"), None).is_err());
+        assert!(payload_of(None, Some(r#""s""#), None).is_err());
+    }
+
+    #[test]
+    fn a_loopback_host_relaxes_both_gates_without_a_flag() {
+        let policy = policy_for(&["localhost".to_string()], &[]);
+        assert_eq!(policy.allowed_hosts, ["localhost"]);
+        assert_eq!(policy.allow_private_hosts, ["localhost"]);
+        assert_eq!(policy.allow_insecure_transport, ["localhost"]);
+
+        let policy = policy_for(&["example.com".to_string()], &[]);
+        assert!(policy.allow_private_hosts.is_empty());
+        assert!(policy.allow_insecure_transport.is_empty());
+    }
+
+    #[test]
+    fn the_flag_is_what_extends_the_relaxation_to_a_lan_host() {
+        let policy = policy_for(&["192.168.1.5".to_string()], &["192.168.1.5".to_string()]);
+        assert_eq!(policy.allow_private_hosts, ["192.168.1.5"]);
+        assert_eq!(policy.allow_insecure_transport, ["192.168.1.5"]);
+        // The allowlist is still exactly the hosts derived from the DID.
+        assert_eq!(policy.allowed_hosts, ["192.168.1.5"]);
+    }
+
+    #[test]
+    fn duplicates_are_collapsed_and_a_second_host_widens_the_allowlist() {
+        let policy = policy_for(
+            &["example.com".to_string(), "example.com".to_string(), "svc.example.com".to_string()],
+            &[],
+        );
+        assert_eq!(policy.allowed_hosts, ["example.com", "svc.example.com"]);
+    }
+
+    #[test]
+    fn a_uuid_looks_like_one() {
+        let id = uuid_v4();
+        assert_eq!(id.len(), 36);
+        assert_eq!(id.chars().filter(|c| *c == '-').count(), 4);
+        assert_eq!(&id[14..15], "4");
+        assert_ne!(id, uuid_v4());
+    }
+
+    /// The law this module exists to keep: what the signer canonicalised is exactly what
+    /// the envelope carries. `call` serialises `meta` once and signs that value; this is
+    /// the same struct going through both paths.
+    #[test]
+    fn request_meta_is_what_gets_signed() {
+        let meta = AnpMeta {
+            profile: "anp.direct.base.v1".to_string(),
+            security_profile: TRANSPORT_PROTECTED.to_string(),
+            sender_did: Some("did:wba:example.com:user:a".to_string()),
+            target: Some(AnpTarget {
+                kind: TargetKind::Agent,
+                did: "did:wba:example.com:user:b".to_string(),
+            }),
+            operation_id: Some("op".to_string()),
+            created_at: Some("2026-10-02T00:00:00Z".to_string()),
+            ..Default::default()
+        };
+        let as_signed = serde_json::to_value(&meta).unwrap();
+        let request = build_message_request("id", "direct.send", meta, None, None).unwrap();
+        assert_eq!(serde_json::to_value(&request.params.meta).unwrap(), as_signed);
+    }
+}
