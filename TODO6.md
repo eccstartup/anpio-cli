@@ -245,9 +245,9 @@ ANP 的定址单位是 **DID**，`msg send --to` 只吃 DID。
 
 | 档 | 含义 | 今天 |
 | --- | --- | --- |
-| **一** | 单测全绿 | ✅ 147 个库侧 + 6 个命令面（`tests/cli_surface.rs`） |
-| **二** | 一个人照文档能手工跑完一条链路 | ⚠️ 能跑，但配方只存在于本次对话和 TODO5 §6 的散文里 |
-| **三** | **一条命令**跑完全链路，并且 CI 每次 push 都跑 | ❌ 没有 |
+| **一** | 单测全绿 | ✅ 150 个库侧 + 7 个命令面（`tests/cli_surface.rs`） |
+| **二** | 一个人照文档能手工跑完一条链路 | ✅ `scripts/e2e.sh` 一条命令跑完（`4245d9e`），不再是只有散文的配方 |
+| **三** | **一条命令**跑完全链路，并且 CI 每次 push 都跑 | ⚠️ 命令有了，**CI 还没接**（§5.3 下一条） |
 
 用户那句"至少我要能跑通吧"要的是**二**，但只有做到**三**，二才不会随时间烂掉
 （文档里的手工步骤是最先过时的那一类东西）。
@@ -286,6 +286,18 @@ msg * / group * / group e2ee *  ──►  packages/service（本仓，:8787 之
 > 乙那条路（让 `packages/service` 也当 DID host）**没被否决，只是没选**——
 > 它要的那次语义裁定（本仓 service 能不能声明一份自己并不持有的身份文档）还没做。
 
+> **2026-10-02 补记（做 §5.3 的第一条时撞到的）。** 裁定之后发现两件事，都会影响乙的估价：
+>
+> 1. **乙不只是语义裁定，还得改客户端。** `identity/host.rs::fetch_host_service` 把主机文档的
+>    `id` **同时**当作 `serviceDid` 与身份 DID 的 `authority`，而 `authority` 又要求
+>    以 `did:wba:` 开头。给 `packages/service` 加一份 `id = did:web:127.0.0.1%3A8787` 的
+>    `/.well-known/did.json`，这条客户端路径**第一步就会拒**（"the host's DID is not a
+>    did:wba DID"）；就算把前缀放宽，`authority` 会变成 `127.0.0.1%3A8787`，而
+>    `create_did_wba_document` 拒收 IP 当主机名。所以乙要连着改三处，不是加一条路由。
+> 2. **"主机即消息服务"是这个客户端的结构假设，不只是 awiki 的配置。** 服务自己的
+>    `did:web:` 与主机的 `did:wba:` 天生是两个方法，除非服务能被声明成别的权威——
+>    而 `AGENTX_SERVICE_DID` 正是那个开关。§5.3 的玩具主机就是用它把两者接上的。
+
 ### 5.3 计划
 
 - [x] **进 CI 的最小一步：`cargo test` + `cargo clippy`。** 与 5.2 无关，可以立刻做。
@@ -293,9 +305,33 @@ msg * / group * / group e2ee *  ──►  packages/service（本仓，:8787 之
       —— 2026-10-02 做了：`.github/workflows/ci.yml` 新增 `rust` job，跑
       `cargo test --all-targets` 与 `cargo clippy -- -D warnings`；顺手修掉唯一那条
       `needless_question_mark`（`message/client.rs`）。`cargo fmt --check` 未加（见原文）。
-- [ ] **一个可复跑的 e2e 配方**（先是一份 `scripts/e2e.sh`，不是测试框架）：
+- [x] **一个可复跑的 e2e 配方**（先是一份 `scripts/e2e.sh`，不是测试框架）：
       起 host → 起 service → 走完整条链路 → 断言。今天这条链路是**手工走过一遍**的
       （见 §6），把它写成脚本的第一版就是把 5.1 第二档钉住。
+      —— **2026-10-02 落地（`4245d9e`）**。`scripts/e2e.sh` 起一台 DID 主机 +
+      本仓 `packages/service`，用**真二进制**走完 `did create|show|publish`、
+      `me set|show`、`msg send`、`contacts add|resolve`、`group create|info|members|
+      set-remark`、`group e2ee publish|create`，逐条断言，非 0 退出，失败时把两份日志的
+      尾部一并打出来。两条**必须在联网前发生的拒绝**也在里面（`me set` 空参、
+      删掉 `session.json` 后的 `did publish`）。
+      **DID 主机那里有一处与 §5.2 的字面不同的做法，说清楚**：脚本自带一台玩具主机
+      （`scripts/e2e/did_host.py`），所以整条链路**不需要 awiki**，一条命令、一个仓库就能跑。
+      理由不是省事：`msg` / `group` / `group e2ee` 要打的是**本仓的服务**，而身份文档里的
+      `serviceDid` 是**主机**在它的 `/.well-known/did.json` 里说了算的
+      （`identity/host.rs::fetch_host_service` 读主机文档的 `id`），awiki 只肯发端点指向**它
+      自己**的文档——拿它当主机，恰恰**测不到**"对端服务在别处"。`packages/e2e/src/harness.ts`
+      起玩具主机的理由与此**逐字相同**（那里写的原话是"拿它当主机就测不到对端服务在别处"），
+      所以这不是本脚发明的东西，是本仓既有的那个决定。玩具主机只做主机该做的那几件事，
+      **没有一处签名逻辑**（文档全由客户端造再 `register`，主机只按 DID 存、按 DID 发），
+      并把 `/g/<id>/did.json` 让给服务（`groups.md` §2.2：群文档归服务）。
+      它对外宣告的身份就是服务的身份（`AGENTX_SERVICE_DID` 设成同一个值），于是
+      awiki 那套"主机即消息服务"的关系照旧成立，只是消息服务换成了我们的。
+      **awiki 的角色因此被收窄到它唯一能演的那半截**，并且是**开关打开才有**：
+      `./scripts/e2e.sh --with-awiki` 对真主机 :8765 跑 `did create` / `did publish`
+      （先 no-op，改一笔后真的走 awiki 的 CAS 推 `version: 1 -> 2`）/ `me set`。
+      这一遍会在那台 awiki 上**留下一条身份**（`register` 没有删除、handle 唯一），
+      所以 handle 带时间戳、默认不开——前置条件（含起动命令）写在脚本头部，不假装自足。
+      **两半都实跑过**：玩具那半全绿；awiki 那半（本机 8765 在跑）全绿，版本 1→2 是真的。
 - [ ] **把配方升成 `rust/crates/agentx-cli/tests/` 里的集成测试**，读 `AGENTXCLI_HOME`
       指向的临时目录，自己起服务、自己收尾。这一步之后第三档才成立。
 - [ ] **覆盖要跟命令面走，不是跟"写过的测试"走。** 132 个单测长在库侧
@@ -313,6 +349,11 @@ msg * / group * / group e2ee *  ──►  packages/service（本仓，:8787 之
 ---
 
 ## 6. 今天手工跑通的那条链路（写进脚本的原料）
+
+> **2026-10-02 后记**：这一节现在是**历史**——它已经被 `scripts/e2e.sh` 收进去了
+> （§5.3 第一条），脚本跑的就是这里的命令与断言。留着的理由有两条：README 与 §5 一直在
+> 指它，以及它记的是**当初为什么这么走**（比如"手工在 `identity.json` 里加一条
+> verificationMethod"这个动作，在脚本里是那几行 python）。要跑就请跑脚本，不要照这里抄。
 
 2026-10-02 实跑过一遍，命令与观察到的输出如下。这是 5.3 第二档的直接原料。
 
