@@ -49,7 +49,7 @@ KeyPackage 的 `did_wba_binding` Object Proof 由设备自签，验证侧从**�
   的 profile、过渡态的 deactivated 文档、不带 fragment（按位选方法而非按名）的 keyid、
   以及证明钥自己——一律保持严格整体绑定。）
 
-- **A2 设备 profile 集合两边对不上。**
+- ~~**A2 设备 profile 集合两边对不上。**
   `packages/service/src/rpc/groupE2ee.ts:144` 的 `GROUP_E2EE_DEVICE` 要
   `[core.binding.v1, identity.discovery.v1, group.base.v2, group.e2ee.v2]`——与规范 §4.2
   （spec 第 10 行、256–258 行）**逐字一致**。但 SDK 的 Manifest builder 只肯发布"全 v1 基础
@@ -57,7 +57,18 @@ KeyPackage 的 `did_wba_binding` Object Proof 由设备自签，验证侧从**�
   服务器拒绝发布）。实测两个方向都试过：交 v1 组 → 服务器收、我方拒（缺 `anp.group.base.v2`）；
   交全 v2 组 → 服务器收、我方拒（缺两个 v1）。**服务器今天发不出任何一份能过我方资格门的
   文档。** 选项：(i) 我方迁就 SDK 改成 `group.base.v1`（与规范字面不符）；(ii) 推 SDK 侧让
-  v2 基础 profile 可发布。**建议 (ii)**——(i) 是让实现去迁就一个上游的临时限制。
+  v2 基础 profile 可发布。**建议 (ii)**——(i) 是让实现去迁就一个上游的临时限制。~~
+  （2026-10-02 按 (ii) 结案：**上游已经自己做了这件事，我方一行都不用改。** SDK 1.0.x 线里
+  `_P6_CURRENT_DEPENDENCIES` 正好就是上面那四个 id，`anp.group.base.v2` 也从
+  `_LEGACY_DRAFT_FOUNDATION_PROFILES` 里移出去了。同一份文档、同一个 profile 数组，
+  **anp 1.0.3 拒**（`P6 device profile dependencies are incomplete`——1.0.3 的 `_P6_DEPENDENCIES`
+  仍要 `group.base.v1`，且把 `group.base.v2` 当只读草案），**anp 1.0.5 收**；实测过这一对。
+  `origin/master`（1.0.4rc1）与已发布的 1.0.5 都带着这个修法。故 `GROUP_E2EE_DEVICE` 保持
+  规范口径不变——它本来就对，要动的是上游版本。**残留（不是本条的事了）**：这只证明"SDK 发得
+  出来"，不等于"眼前这台服务器发得出来"。`awiki-open-server` 在 `anp_adapter.py` 里硬断言必须
+  恰好 anp 1.0.3（加载别的版本直接 `RuntimeError`），它那段 profile 改写补偿正是为 1.0.3 写的、
+  今天仍不可少（删掉即 2 例失败）；它何时挪到发得出这份清单的版本，与 A7 是同一件事，归服务器
+  侧定。）
 
 - **A3 对端身份状态的同步（换设备、换 DID、DID 服务器已更新而我们没同步）。**
   用户 2026-10-02 裁定：**换 DID 与绑定新设备都必须支持**——新绑的设备能收群消息，被取代的
@@ -173,6 +184,9 @@ KeyPackage 的 `did_wba_binding` Object Proof 由设备自签，验证侧从**�
   放开——需要你去跟那边定。
 
 **A1 与 A2 是前置**：这两个不定，P6 在真实 DID 网里跑不起来，其余几条都只是能力边界。
+（2026-10-02：**两条都清了**——A1 按 (i) 落地（`7028711`），A2 结在上游 1.0.x，我方不改代码。
+所以"P6 在我方这一侧跑不起来"这个前置已经不存在；接着挡路的是服务器侧的口径——A7 的端点绑定，
+以及 awiki 锁在 anp 1.0.3，两者都不在本仓库里。）
 
 ---
 
