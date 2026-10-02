@@ -182,6 +182,18 @@ KeyPackage 的 `did_wba_binding` Object Proof 由设备自签，验证侧从**�
   `signed_did_document_service_endpoint_mismatch` / `..._service_did_mismatch`。所以一份指向
   我们服务的、带 P6 能力的文档，今天**没法在那个服务器上发布**。要真实部署落地，这条得服务器侧
   放开——需要你去跟那边定。
+  （2026-10-02 把要谈的东西定到行：判定在
+  `awiki-open-server/src/awiki_open_server/user_compat/core.py:336-345`，收的是**签名**文档里
+  那**唯一一条** `ANPMessageService` 服务项，两条硬相等——`serviceEndpoint` 必须等于
+  `settings.anp_service_endpoint`、`serviceDid` 必须等于 `settings.service_did`。而这两项就是
+  服务器自己（`app/settings.py:28,81`）。**没签名的那条路更彻底**：`core.py:347` 起直接把
+  对端声明的服务项**替换成**服务器自己的模板，所以"不带证明"也绕不过去。今天唯一相关的开关是
+  `AWIKI_ALLOW_UNSIGNED_PEER_DEV`（`app/settings.py:33`），它只放宽"要不要证明"，不放宽"端点
+  归谁"。另有两点顺带记下：服务器自己广告的 profile 集
+  （`protocol/registry.py:10` 的 `STANDARD_PROFILES`）里有 `anp.group.base.v1` 和
+  `anp.group.base.v2`，**没有 `anp.group.e2ee.v2`**——即它今天不对外声明 P6 能力；以及它的 SDK
+  锁在 anp 1.0.3（见 A2 残留）。要谈的就是一句：**让服务器接受一份由对端签名、端点指向别处
+  的 `ANPMessageService` 文档**，放开后面这些都会跟着动。）
 
 **A1 与 A2 是前置**：这两个不定，P6 在真实 DID 网里跑不起来，其余几条都只是能力边界。
 （2026-10-02：**两条都清了**——A1 按 (i) 落地（`7028711`），A2 结在上游 1.0.x，我方不改代码。
