@@ -194,6 +194,78 @@ describe('resolveVerificationKey — path-type DID fingerprint binding (ANP-2026
     await expect(resolveVerificationKey(keyid, doc)).rejects.toThrow(/not listed in the document's authentication/)
   })
 
+  it('resolves a device signing key that differs from the fingerprint-bound root key', async () => {
+    // A multi-device `did:wba` document (ANP 1.2 P2/P6): the `e1_` segment commits to
+    // the ROOT key that signs the document's own proof, while a device entry's
+    // `signing_key_id` is deliberately a DIFFERENT key. Requiring every keyid to
+    // reproduce the fingerprint rejected every compliant device and made its origin
+    // proof unverifiable. The proof key still carries the binding.
+    const rootPriv = ed25519.utils.randomSecretKey()
+    const rootPub = ed25519.getPublicKey(rootPriv)
+    const devPriv = ed25519.utils.randomSecretKey()
+    const devPub = ed25519.getPublicKey(devPriv)
+    const did = `did:wba:example.com:user:alice:${didFingerprint('ed25519', rootPub)}`
+    const rootKeyid = `${did}#root`
+    const devKeyid = `${did}#dev-signing`
+    const doc: Record<string, unknown> = {
+      ...buildBaseDidDocument({ did, keyid: rootKeyid, publicKeyMultibase: encodeMultibaseEd25519(rootPub) }),
+      verificationMethod: [
+        { id: rootKeyid, type: 'Multikey', controller: did, publicKeyMultibase: encodeMultibaseEd25519(rootPub) },
+        { id: devKeyid, type: 'Multikey', controller: did, publicKeyMultibase: encodeMultibaseEd25519(devPub) },
+      ],
+      authentication: [rootKeyid, devKeyid],
+      assertionMethod: [rootKeyid, devKeyid],
+    }
+    doc.proof = signDidDocumentProofSync(doc, rootKeyid, rootPriv)
+
+    await expect(resolveVerificationKey(rootKeyid, doc)).resolves.toMatchObject({ bytes: rootPub })
+    await expect(resolveVerificationKey(devKeyid, doc)).resolves.toMatchObject({ bytes: devPub })
+  })
+
+  it('keeps the strict binding when a keyid names no method (no fragment)', async () => {
+    // A keyid with no fragment selects a method POSITIONALLY, so it must not inherit
+    // the device-key exemption. Here the first method is the device key, which does
+    // not reproduce the fingerprint, so a bare-DID keyid is still refused.
+    const rootPriv = ed25519.utils.randomSecretKey()
+    const rootPub = ed25519.getPublicKey(rootPriv)
+    const devPub = ed25519.getPublicKey(ed25519.utils.randomSecretKey())
+    const did = `did:wba:example.com:user:alice:${didFingerprint('ed25519', rootPub)}`
+    const rootKeyid = `${did}#root`
+    const devKeyid = `${did}#dev-signing`
+    const doc: Record<string, unknown> = {
+      ...buildBaseDidDocument({ did, keyid: rootKeyid, publicKeyMultibase: encodeMultibaseEd25519(rootPub) }),
+      verificationMethod: [
+        { id: devKeyid, type: 'Multikey', controller: did, publicKeyMultibase: encodeMultibaseEd25519(devPub) },
+        { id: rootKeyid, type: 'Multikey', controller: did, publicKeyMultibase: encodeMultibaseEd25519(rootPub) },
+      ],
+      authentication: [devKeyid, rootKeyid],
+      assertionMethod: [devKeyid, rootKeyid],
+    }
+    doc.proof = signDidDocumentProofSync(doc, rootKeyid, rootPriv)
+    await expect(resolveVerificationKey(did, doc)).rejects.toThrow(/fingerprint/)
+  })
+
+  it('keeps the strict binding for a k1_ document even when another method is present', async () => {
+    // A k1_ document's proof is optional and its cryptosuite is one the SDK does not
+    // implement, so the document-level guarantee does NOT hold — the fingerprint
+    // binding must stay on for every keyid, device methods included.
+    const { secp256k1 } = await import('@noble/curves/secp256k1.js')
+    const good = new Uint8Array(Array.from({ length: 32 }, (_, i) => i + 1))
+    const bad = new Uint8Array(Array.from({ length: 32 }, (_, i) => 200 - i))
+    const did = `did:wba:example.com:user:alice:${didFingerprint('secp256k1', secp256k1.getPublicKey(good, true))}`
+    const rootKeyid = `${did}#root`
+    const devKeyid = `${did}#dev-signing`
+    const doc: Record<string, unknown> = {
+      id: did,
+      verificationMethod: [
+        { id: rootKeyid, type: 'Multikey', controller: did, publicKeyMultibase: encodeMultibaseSecp256k1(secp256k1.getPublicKey(good, true)) },
+        { id: devKeyid, type: 'Multikey', controller: did, publicKeyMultibase: encodeMultibaseSecp256k1(secp256k1.getPublicKey(bad, true)) },
+      ],
+      authentication: [rootKeyid, devKeyid],
+    }
+    await expect(resolveVerificationKey(devKeyid, doc)).rejects.toThrow(/fingerprint/)
+  })
+
   it('treats compressed and uncompressed secp256k1 keys as the same k1_ fingerprint', async () => {
     const { secp256k1 } = await import('@noble/curves/secp256k1.js')
     const priv = new Uint8Array(Array.from({ length: 32 }, () => 0x11))

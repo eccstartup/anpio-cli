@@ -1097,8 +1097,48 @@ export async function resolveVerificationKey(
   else if (vm.publicKeyJwk) key = { ...keyFromJwk(vm.publicKeyJwk), docUrl }
   else throw new ConnectxError('did_resolve_not_found', 'Verification method has no usable public key')
 
-  assertFingerprintBinding(did, key)
+  // ANP-2026-09-11-01 ties the document to its identifier through the key that signs
+  // the document's OWN proof: that key MUST reproduce the path fingerprint. Applying
+  // the same requirement to EVERY resolved keyid is too broad for a multi-device
+  // `did:wba` document — a device entry's `#dev-signing` key is deliberately a
+  // DIFFERENT key from the root the `e1_` segment commits to, so the broad check
+  // rejects every compliant device and makes its origin proof unverifiable (P6 §6.4).
+  //
+  // What carries the binding instead is the document-level guarantee already in force:
+  // for an ACTIVE e1_ document `assertDocumentProof` (run by `verifyDidDocument` above)
+  // REQUIRES the proof and verifies it against the fingerprint-bound key. A method
+  // reached after that belongs to a now-authenticated document, and
+  // `assertAuthenticationAuthorized` confines it to `authentication`. So binding the
+  // fingerprint to the PROOF key alone is sound. Every case where that guarantee does
+  // NOT hold keeps the strict whole-document binding: a `k1_` or unknown profile whose
+  // proof this layer cannot verify, and a deactivated transition document (whose proof
+  // may legitimately be absent or a recovery proof).
+  if (!fingerprintCarriedByProofKey(doc, did, keyid, options.documentProof ?? 'lenient')) {
+    assertFingerprintBinding(did, key)
+  }
   return key
+}
+
+// Whether the fingerprint check may be waived for this keyid because the DID's binding
+// is carried by the document's own proof key instead (see the call site). Only for an
+// ACTIVE e1_ document whose proof policy is `required` — the case `assertDocumentProof`
+// has just verified — and only for a keyid that NAMES A METHOD other than that proof
+// key. A keyid with no fragment selects a method by position, not by identity, so it
+// keeps the strict binding; so does the proof key itself.
+function fingerprintCarriedByProofKey(
+  doc: DidDocument,
+  did: string,
+  keyid: string,
+  mode: 'lenient' | 'strict',
+): boolean {
+  if (!keyid.includes('#')) return false
+  if (documentProofPolicy(doc, did, mode) !== 'required') return false
+  const raw = doc as Record<string, unknown>
+  const proofKeyId = documentProofKeyId(raw)
+  if (proofKeyId === undefined) return false
+  const wanted = canonicalDidUrl(raw.id, keyid)
+  const proof = canonicalDidUrl(raw.id, proofKeyId)
+  return wanted !== undefined && proof !== undefined && wanted !== proof
 }
 
 /** The Data Integrity cryptosuites this SDK can verify. `eddsa-jcs-2022` is the
@@ -1233,6 +1273,10 @@ function assertAuthenticationAuthorized(doc: DidDocument, vm: VerificationMethod
 // ANP-2026-09-11-01). The method prefix is matched case-sensitively: only lowercase
 // `did:wba:` is treated as fingerprint-bound, so a mixed-case spelling cannot skip
 // the check.
+//
+// Not applied to every keyid: when an active e1_ document's own proof already binds
+// the fingerprint (see `fingerprintCarriedByProofKey`), a keyid naming a DIFFERENT
+// authorized method is exempt.
 function assertFingerprintBinding(did: string, key: ResolvedKey): void {
   if (!did.startsWith('did:wba:')) return
   const segment = did.slice(did.lastIndexOf(':') + 1)
