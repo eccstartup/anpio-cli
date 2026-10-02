@@ -9,7 +9,9 @@
 //! Method names and Profiles are in [`crate::message`] with the rest of the wire vocabulary;
 //! what is here is the policy that goes in the bodies.
 
-use anp::group_e2ee::v2_models::{V2GroupAddBody, V2GroupCreateBody, V2GroupKeyPackage};
+use anp::group_e2ee::v2_models::{
+    V2GroupAddBody, V2GroupCreateBody, V2GroupKeyPackage, V2GroupRemoveBody,
+};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
@@ -53,6 +55,16 @@ pub fn create_body(body: &V2GroupCreateBody) -> Result<Map<String, Value>> {
 /// the crate can know.
 pub fn add_body(body: &V2GroupAddBody) -> Result<Map<String, Value>> {
     object_of(body, "a group.e2ee.add body")
+}
+
+/// The body of `group.e2ee.remove` (P6 §9.4.3) — the crate's own six fields, unchanged.
+///
+/// Six rather than `add`'s nine because a removal invites nobody: §9.4.3 names the pair, the
+/// state ref, the crypto group id, the epoch and one MLS object (`commit_b64u`). The
+/// `welcome_b64u` / `ratchet_tree_b64u` / `group_key_package` of `add` have no counterpart,
+/// and the crate refuses a removal that produced a Welcome at all.
+pub fn remove_body(body: &V2GroupRemoveBody) -> Result<Map<String, Value>> {
+    object_of(body, "a group.e2ee.remove body")
 }
 
 /// A crate model as a request body: the object form, or an error naming what could not be
@@ -270,6 +282,49 @@ mod tests {
             body["epoch"],
             Value::String("1".to_string()),
             "§9.3.3's `epoch` is the one *after* the add, so it is the crate's value"
+        );
+    }
+
+    /// §9.4.3's six fields, again exactly as the crate built them.
+    ///
+    /// The point of the assertion is the count: `add`'s nine carries three objects a removal
+    /// has no use for, and the service refuses an unknown shape — so a body that still held
+    /// `welcome_b64u` from a copied `add` would be caught here rather than there.
+    #[test]
+    fn a_remove_body_is_the_crates_six_fields_unchanged() {
+        let body = remove_body(&V2GroupRemoveBody {
+            member_did: "did:wba:example.com:user:peer:e1_x".to_string(),
+            member_device_id: "peer/default".to_string(),
+            group_state_ref: V2GroupStateRef {
+                group_did: "did:web:svc.example:g:team".to_string(),
+                group_state_version: "7".to_string(),
+                policy_hash: None,
+                roster_hash: None,
+            },
+            crypto_group_id_b64u: "Z3JvdXA".to_string(),
+            epoch: "2".to_string(),
+            commit_b64u: "Y29tbWl0".to_string(),
+        })
+        .unwrap();
+
+        let mut keys: Vec<&str> = body.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "commit_b64u",
+                "crypto_group_id_b64u",
+                "epoch",
+                "group_state_ref",
+                "member_device_id",
+                "member_did",
+            ],
+            "§9.4.3 has no welcome, no ratchet tree and no package"
+        );
+        assert_eq!(
+            body["epoch"],
+            Value::String("2".to_string()),
+            "§9.4.3's `epoch` is the one *after* the remove, so it is the crate's value"
         );
     }
 

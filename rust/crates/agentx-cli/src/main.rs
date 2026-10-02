@@ -11,25 +11,26 @@ use serde_json::{json, Map, Value};
 use std::sync::Arc;
 
 use agentx::group::{group_target, policy_of, service_target};
-use agentx::group_e2ee::{add_body, create_body, get_key_package_body, publish_body};
+use agentx::group_e2ee::{add_body, create_body, get_key_package_body, publish_body, remove_body};
 use agentx::identity::{
     create_identity, fetch_host_service, register_identity, CreateIdentityInput, Identity,
     IdentityLocation,
 };
 use agentx::message::{
-    build_message_request, call, call_device, call_extension, call_group, device_of, discover,
-    document_in_crate_form, group_e2ee_security_profile, http_client, now_rfc3339, open_channel,
-    open_channel_for, parse_capabilities, payload_of, policy_for, post_message,
+    build_message_request, call, call_device, call_extension, call_group, device_of, did_host,
+    discover, document_in_crate_form, group_e2ee_security_profile, http_client, now_rfc3339,
+    open_channel, open_channel_for, parse_capabilities, payload_of, policy_for, post_message,
     resolve_did_document, rejection, run_listen, uuid_v4, view_for, websocket_connect, AnpMeta,
     AnpResponse, AnpTarget, CallRequest, Channel, ConnectFn, ListenArgs, ListenDeps, ResolvePolicy,
     Sender, TargetKind, CORE_BINDING, DIRECT_PROFILE, DIRECT_SEND, DID_SUPERSEDED,
     GET_CAPABILITIES, GET_KEY_PACKAGE, GROUP_CREATE, GROUP_E2EE_ADD, GROUP_E2EE_CREATE,
-    GROUP_E2EE_PROFILE, GROUP_GET_INFO, GROUP_JOIN, GROUP_LEAVE, GROUP_PROFILE, GROUP_SEND,
-    INBOX_GET, INBOX_MARK_READ, MESSAGE_GET_BATCH, PUBLISH_KEY_PACKAGE, TRANSPORT_PROTECTED,
+    GROUP_E2EE_PROFILE, GROUP_E2EE_REMOVE, GROUP_GET_INFO, GROUP_JOIN, GROUP_LEAVE, GROUP_PROFILE,
+    GROUP_SEND, INBOX_GET, INBOX_MARK_READ, MESSAGE_GET_BATCH, PUBLISH_KEY_PACKAGE,
+    TRANSPORT_PROTECTED,
 };
 use agentx::mls::{
     abort_commit, finalize_commit, generate_key_package, new_key_package_id, prepare_add,
-    prepare_create, AddInput, CreateInput, KEY_PACKAGE_VALID_DAYS,
+    prepare_create, prepare_remove, AddInput, CreateInput, KEY_PACKAGE_VALID_DAYS, RemoveInput,
 };
 use anp::group_e2ee::v2_models::V2GroupKeyPackage;
 
@@ -457,6 +458,35 @@ enum GroupE2eeCommand {
         #[command(flatten)]
         own: OwnIdentity,
     },
+    /// Remove one device's leaf from the encrypted group (P6 `group.e2ee.remove`).
+    ///
+    /// §9.4.3 keys the removal on the exact `(member_did, member_device_id)` leaf, so the
+    /// target is named rather than invited — there is no package to read it off, which is why
+    /// this names both halves where `add` names only the DID. The removed device need not be
+    /// eligible (losing eligibility is one reason to remove it), so the target's own service
+    /// is never contacted; only its DID document is read, and only to prove the leaf's
+    /// identity.
+    ///
+    /// Like `add`, this is group-addressed (§4.4.2) and so goes to the group's service. This
+    /// device cannot remove itself: the crate refuses that leaf (`controller_required`) —
+    /// that is `group leave`.
+    Remove {
+        #[arg(value_name = "GROUP_DID")]
+        group_did: String,
+        /// The DID whose device to remove.
+        #[arg(long = "member-did", value_name = "DID")]
+        member_did: String,
+        /// That DID's device to remove — the other half of the exact pair §9.4.3 keys on.
+        #[arg(long = "member-device", value_name = "ID")]
+        member_device: String,
+        /// Reuse an operation id, as on `create` and `add`.
+        #[arg(long = "operation-id", value_name = "UUID")]
+        operation_id: Option<String>,
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        own: OwnIdentity,
+    },
 }
 
 /// How many unread ids `msg read --all` asks for at a time.
@@ -659,6 +689,25 @@ async fn main() -> anyhow::Result<()> {
                     own,
                 } => {
                     cmd_group_e2ee_add(
+                        &own,
+                        &group_did,
+                        &member_did,
+                        &member_device,
+                        operation_id,
+                        json,
+                        &allow_private,
+                    )
+                    .await
+                }
+                GroupE2eeCommand::Remove {
+                    group_did,
+                    member_did,
+                    member_device,
+                    operation_id,
+                    json,
+                    own,
+                } => {
+                    cmd_group_e2ee_remove(
                         &own,
                         &group_did,
                         &member_did,
@@ -1853,6 +1902,143 @@ async fn cmd_group_e2ee_add(
 fn report_group_e2ee_added(result: &Value) -> anyhow::Result<()> {
     if result.get("accepted").and_then(Value::as_bool) != Some(true) {
         anyhow::bail!("group.e2ee.add did not report `accepted: true` (P6 §9.3.4)")
+    }
+    field("group:", result.get("group_did"));
+    field("member:", result.get("member_did"));
+    field("device:", result.get("member_device_id"));
+    field("epoch:", result.get("epoch"));
+    field("accepted at:", result.get("accepted_at"));
+    Ok(())
+}
+
+/// `group e2ee remove` (P6 §9.4) — `add`'s mirror, with one channel instead of two.
+///
+/// Where `add` reads the member's document *and* fetches from the member's service, this
+/// reads only the document: the removal names the exact leaf (§9.4.3), so there is no package
+/// to fetch, and the target device is deliberately not required to be eligible — losing
+/// eligibility is one reason to remove it (the service's `deviceAddressed` names only the
+/// sender for the same reason). The document is still read, because the crate's leaf lookup
+/// takes it as evidence that the pair names the leaf being removed.
+///
+/// The policy for that one fetch is built straight from the member's DID host rather than by
+/// opening a channel: `channel::discover`'s document half is exactly this, and removing a
+/// device should not require its owner to still expose a live ANPMessageService entry.
+async fn cmd_group_e2ee_remove(
+    own: &OwnIdentity,
+    group_did: &str,
+    member_did: &str,
+    member_device: &str,
+    operation_id: Option<String>,
+    json: bool,
+    allow_private: &[String],
+) -> anyhow::Result<()> {
+    let location = IdentityLocation::new(&own.agent, &own.profile);
+    let identity = Identity::load(&location)?;
+    let client = http_client()?;
+
+    // The group's document names the service holding this group, as on `add` and `create`.
+    let group_channel = open_channel_for(
+        &client,
+        Sender::from_identity(&identity)?,
+        group_did,
+        allow_private,
+    )
+    .await?;
+    let info = call_group(
+        &client,
+        &group_channel,
+        GROUP_GET_INFO,
+        group_target(group_did),
+        Map::new(),
+        group_did,
+    )
+    .await?;
+    let group_state_version = text_of(info.get("group_state_version")).ok_or_else(|| {
+        anyhow::anyhow!("group.get_info answered without a group_state_version (P4 §8.2.3)")
+    })?;
+
+    // The target's document, fetched through the one host its DID names — the same policy
+    // `discover` uses for its document half, because that is all this needs. No service entry
+    // is read, so a member whose Host is gone can still be removed as long as its document
+    // still answers; and if even that is unreachable, the removal cannot prove which leaf it
+    // means, so failing here is the honest outcome.
+    let member_policy = policy_for(&[did_host(member_did)?], allow_private);
+    let member_document = resolve_did_document(&client, member_did, &member_policy).await?;
+    let member_did_document = document_in_crate_form(&member_document).ok_or_else(|| {
+        anyhow::anyhow!("{member_did}'s document does not bind in a form this crate accepts")
+    })?;
+
+    let operation_id = operation_id.unwrap_or_else(uuid_v4);
+    let prepared = prepare_remove(
+        &location,
+        &identity,
+        RemoveInput {
+            group_did,
+            group_state_version,
+            member_did,
+            member_device_id: member_device,
+            member_did_document,
+            operation_id: &operation_id,
+        },
+    )?;
+
+    let response = call(
+        &client,
+        &group_channel.sender,
+        &group_channel.endpoint,
+        CallRequest {
+            method: GROUP_E2EE_REMOVE.to_string(),
+            profile: GROUP_E2EE_PROFILE.to_string(),
+            // §4.4.2: group-addressed, as on `add`.
+            target: group_target(group_did),
+            body: remove_body(&prepared.body)?,
+            sender_device_id: Some(group_channel.sender.device_id.clone()),
+            security_profile: Some(group_e2ee_security_profile(GROUP_E2EE_REMOVE).to_string()),
+            // §9.4.3 names neither: a removal carries no application message.
+            message_id: None,
+            content_type: None,
+            operation_id: Some(operation_id),
+        },
+    )
+    .await?;
+
+    // Matched rather than run through `call_device`, for the reason spelled out in
+    // `cmd_group_e2ee_create`: only a *refusal* proves the service did not take the commit.
+    let result = match response {
+        AnpResponse::Success { result, .. } => {
+            finalize_commit(&location, &identity, &prepared.pending_commit_id)?;
+            result
+        }
+        AnpResponse::Error { error, .. } => {
+            if let Err(err) = abort_commit(&location, &identity, &prepared.pending_commit_id) {
+                eprintln!("warning: rolling back the local commit failed: {err}");
+            }
+            return Err(rejection(
+                GROUP_E2EE_REMOVE,
+                group_did,
+                error.code,
+                error.data.as_ref().and_then(|data| data.anp_code.as_deref()),
+                &error.message,
+            )
+            .into());
+        }
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+    report_group_e2ee_removed(&result)
+}
+
+/// §9.4.4's success fields — the same shape as `add`'s, minus nothing.
+///
+/// `accepted: true` is checked first for the same reason: the local commit was just finalized
+/// on the strength of this response, so a service that omitted it did not report state this
+/// device can go on to send in.
+fn report_group_e2ee_removed(result: &Value) -> anyhow::Result<()> {
+    if result.get("accepted").and_then(Value::as_bool) != Some(true) {
+        anyhow::bail!("group.e2ee.remove did not report `accepted: true` (P6 §9.4.4)")
     }
     field("group:", result.get("group_did"));
     field("member:", result.get("member_did"));

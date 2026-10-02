@@ -18,13 +18,15 @@ use std::path::PathBuf;
 
 use anp::group_e2ee::operations::v2::{
     abort_commit_v2, add_member_prepare_v2, create_group_prepare_v2, finalize_commit_v2,
-    generate_key_package_v2, V2AddMemberInput, V2CreateGroupInput, V2FinalizeInput,
-    V2GenerateKeyPackageInput, V2PreparedAdd, V2PreparedCreate,
+    generate_key_package_v2, remove_member_prepare_v2, V2AddMemberInput, V2CreateGroupInput,
+    V2FinalizeInput, V2GenerateKeyPackageInput, V2PreparedAdd, V2PreparedCreate, V2PreparedRemove,
+    V2RemoveMemberInput,
 };
 use anp::group_e2ee::storage::ImCoreSqliteGroupMlsStore;
 use anp::group_e2ee::v2_models::{
-    V2GroupAddBody, V2GroupControlMetadata, V2GroupCreateBody, V2GroupKeyPackage, V2GroupStateRef,
-    V2ServiceMetadata, V2Target, GROUP_E2EE_PROFILE_V2, GROUP_E2EE_SECURITY_PROFILE_V2,
+    V2GroupAddBody, V2GroupControlMetadata, V2GroupCreateBody, V2GroupKeyPackage, V2GroupRemoveBody,
+    V2GroupStateRef, V2ServiceMetadata, V2Target, GROUP_E2EE_PROFILE_V2,
+    GROUP_E2EE_SECURITY_PROFILE_V2,
 };
 use anp::PrivateKeyMaterial;
 use chrono::{Duration, Utc};
@@ -327,6 +329,86 @@ pub fn prepare_add(
     .map_err(|err| AgentxError::MessageInvalid(format!("preparing group.e2ee.add: {err}")))?;
 
     Ok(PreparedAdd {
+        pending_commit_id,
+        body: prepared.body,
+    })
+}
+
+/// What `remove` needs from the caller (P6 §9.4).
+///
+/// Unlike [`AddInput`], the pair is here: §9.4.3 keys the removal on the exact
+/// `(member_did, member_device_id)` leaf, and there is no package to read it off — the target
+/// is named rather than invited. `member_did_document` is still evidence, but of a weaker kind
+/// than on `add`: the crate's leaf lookup uses it today only to check the document's `id`
+/// equals `member_did` (`find_exact_accepted_leaf`), so it is handed over in the same verified
+/// form anyway, because a document going into the crate travels in one shape regardless of
+/// which of its checks reads it ([`crate::message::document_in_crate_form`]).
+pub struct RemoveInput<'a> {
+    pub group_did: &'a str,
+    /// The group's current P4 version, read the same way `create` and `add` read it.
+    pub group_state_version: &'a str,
+    pub member_did: &'a str,
+    pub member_device_id: &'a str,
+    pub member_did_document: Value,
+    pub operation_id: &'a str,
+}
+
+/// A prepared `group.e2ee.remove`: the wire body, plus the local handle that finishes it.
+pub struct PreparedRemove {
+    pub pending_commit_id: String,
+    pub body: V2GroupRemoveBody,
+}
+
+/// Phase one of `remove`, the same shape and order as [`prepare_create`] and [`prepare_add`].
+///
+/// Group-addressed for the same reason as `add` (§4.4.2), and it commits to the *retained*
+/// leaves exactly as `add` does — the crate asserts the commit produced no Welcome, because a
+/// removal adds nobody. The one check worth knowing before the network is asked: the crate
+/// refuses a controller removing its own exact leaf (`group.e2ee.controller_required`), so
+/// this device cannot kick *this device*; leaving is `group leave`, a different family.
+pub fn prepare_remove(
+    location: &IdentityLocation,
+    identity: &Identity,
+    input: RemoveInput<'_>,
+) -> Result<PreparedRemove> {
+    let store = store_for(location, identity)?;
+    let pending_commit_id = new_pending_commit_id();
+    let now = Utc::now().to_rfc3339();
+
+    let prepared: V2PreparedRemove = remove_member_prepare_v2(
+        &store,
+        V2RemoveMemberInput {
+            meta: V2GroupControlMetadata {
+                anp_version: None,
+                profile: GROUP_E2EE_PROFILE_V2.to_string(),
+                security_profile: GROUP_E2EE_SECURITY_PROFILE_V2.to_string(),
+                sender_did: identity.did.clone(),
+                sender_device_id: identity.device_id.clone(),
+                target: V2Target {
+                    kind: "group".to_string(),
+                    did: input.group_did.to_string(),
+                },
+                operation_id: input.operation_id.to_string(),
+                created_at: Some(now.clone()),
+            },
+            group_state_ref: V2GroupStateRef {
+                group_did: input.group_did.to_string(),
+                group_state_version: input.group_state_version.to_string(),
+                policy_hash: None,
+                roster_hash: None,
+            },
+            member_did: input.member_did.to_string(),
+            member_device_id: input.member_device_id.to_string(),
+            member_did_document: input.member_did_document,
+            now,
+            draft_extension_negotiated: true,
+            pending_commit_id: pending_commit_id.clone(),
+            request_id: uuid_v4(),
+        },
+    )
+    .map_err(|err| AgentxError::MessageInvalid(format!("preparing group.e2ee.remove: {err}")))?;
+
+    Ok(PreparedRemove {
         pending_commit_id,
         body: prepared.body,
     })
