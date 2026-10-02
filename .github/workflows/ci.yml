@@ -83,3 +83,39 @@ jobs:
       # a baseline warning is a reason to tolerate the next one.
       - name: Clippy
         run: cargo clippy --manifest-path rust/Cargo.toml --all-targets -- -D warnings
+
+  # The chain the two jobs above cannot see: the Rust client talking to a real
+  # `packages/service` across a real socket, with a DID host in between. `cargo test`
+  # covers the library and `npm test` covers the service, and both stay green while
+  # the two together are broken — which is what TODO6 §5 exists for, and why this is
+  # its own job rather than a line in either of them.
+  #
+  # The DID host is `scripts/e2e/did_host.py`, a fixture in this repository, so this
+  # job needs no second checkout. awiki's half is opt-in (`--with-awiki`) and stays
+  # off here: it leaves a handle behind on whatever host it runs against.
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      # The script builds the Rust binary itself; this keeps the cargo registry warm
+      # so its `cargo build` is not a cold compile inside a step that times out.
+      - name: Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rust/Cargo.lock') }}
+
+      - name: End to end
+        run: ./scripts/e2e.sh

@@ -168,8 +168,11 @@ wait_for_port() {
 if [ "$BUILD" = 1 ]; then
   section "build"
   ( cd "$ROOT/rust" && cargo build -q )
-  ( cd "$ROOT" && npm run build --workspace @agentx/service >/dev/null )
-  echo "    ok   rust binary + service dist"
+  # core 也要建：服务按**包名**引 `@agentx/core`，而那个名字解析到 `packages/core/dist`
+  # （`core/package.json` 的 `exports`）。全新 clone 上只建服务，服务就起不来，
+  # 且那样子像是"服务坏了"而不是"少建了一步"（CI 的注释里记的是同一件事）。
+  ( cd "$ROOT" && npm run build:core >/dev/null && npm run build:service >/dev/null )
+  echo "    ok   rust binary + core + service dist"
 fi
 
 CLI="$ROOT/rust/target/debug/agentx-cli"
