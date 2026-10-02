@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { createServer as createHttpServer, type Server } from 'node:http'
 import { connect, type AddressInfo, type Socket } from 'node:net'
 import type { Duplex } from 'node:stream'
+import { PassThrough } from 'node:stream'
 import { acceptKey, isWebSocketUpgrade, upgrade, type WebSocketConnection } from './ws'
 
 interface Harness {
@@ -369,6 +370,34 @@ describe('text frames', () => {
     expect(raw.frames[0]?.opcode).toBe(0x8)
     expect(raw.frames[0]?.payload.readUInt16BE(0)).toBe(1000)
     await until(() => h.closed() === 1)
+  })
+
+  it('keeps an error listener on a socket it has already finished with', () => {
+    // A peer that vanishes makes Node read an `ECONNRESET` *after* the connection was torn
+    // down, and Node emits that as an `error` event a tick later. An `error` event with no
+    // listener is fatal by design, so a listener left in place is the whole difference
+    // between "a client disconnected abruptly" and "the service exited" — which is what a
+    // `finish` that stripped `error` along with `data` and `close` used to turn it into.
+    const socket = new PassThrough()
+    const connection = upgrade(
+      {
+        method: 'GET',
+        headers: {
+          upgrade: 'websocket',
+          connection: 'Upgrade',
+          'sec-websocket-version': '13',
+          'sec-websocket-key': 'dGhlIHNhbXBsZSBub25jZQ==',
+        },
+      } as never,
+      socket,
+      Buffer.alloc(0),
+      () => ({ onMessage: () => {}, onClose: () => {} }),
+    )
+    expect(connection).toBeDefined()
+    connection?.destroy()
+
+    expect(socket.listenerCount('error')).toBeGreaterThan(0)
+    expect(() => socket.emit('error', new Error('read ECONNRESET'))).not.toThrow()
   })
 })
 

@@ -268,7 +268,12 @@ export function upgrade(
     closed = true
     socket.removeAllListeners('data')
     socket.removeAllListeners('close')
-    socket.removeAllListeners('error')
+    // The `error` listener deliberately stays. `finish` runs on the way out — from a close
+    // frame, from `destroy()`, from the first error — and tearing the socket down is what
+    // provokes the *next* one: a peer that vanished gets its RST read a tick later, and Node
+    // emits that as an `error` event. An `error` event with no listener is fatal by design,
+    // so removing this one turns "a client disconnected abruptly" into "the service exits".
+    // `finish` is already idempotent through `closed`, which is what makes leaving it on safe.
     handlers.onClose()
   }
 
