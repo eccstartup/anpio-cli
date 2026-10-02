@@ -14,7 +14,7 @@ mod update;
 pub use chain::{
     describe_status, document_is_superseded, resolve_chain, snake_case_name, ChainError, ChainResolution,
 };
-pub use did::{create_identity, load_stored_key, retirement_document, successor_of, CreateIdentityInput};
+pub use did::{create_identity, load_stored_key, retirement_document, subject_of, successor_of, CreateIdentityInput};
 pub use host::{fetch_host_service, register_identity, HostService};
 pub use store::{
     assert_segment, current_agent_path, list_identities, read_current_agent, resolve_agent_id,
@@ -22,3 +22,9 @@ pub use store::{
     IdentityLocation, StoredIdentitySummary, StoredKeyPair, AGENT_ENV, HOME_ENV, PROFILE_ENV, SUCCESSOR_FILE,
 };
 pub use update::{deliver, Accepted, Hop, UpdateError};
+
+/// The identity fixture other modules' tests build an identity from, without a store on
+/// disk. It lives with the code that mints identities so a change to what an identity is
+/// cannot leave the fixture describing yesterday's shape.
+#[cfg(test)]
+pub(crate) use did::test_support;

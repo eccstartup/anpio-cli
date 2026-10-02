@@ -209,7 +209,7 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 | --- | --- | --- |
 | `did` | `create` / `show` / `register` | ~~做完~~（对 awiki host 真跑通） |
 | `did` | `resolve` / `restore` | ~~做完~~（`resolve` 带 `--chain`；`restore` 是**明说的拒绝**，见 §6） |
-| `did` | `update` | 还没（写的那半，见 §6） |
+| `did` | `update` | ~~做完~~（写的那半：`--target` / `--resume`；对真 rig 跑通，见 §6） |
 | — | `discover` | ~~做完~~ |
 | `msg` | `send` / `caps` / `inbox` / `show` / `read` | ~~做完~~（`send` 真阳性；`inbox` 一族对 awiki 为负是**正确**结果） |
 | `msg` | `listen` | ~~做完~~（realtime.md 那条常驻契约） |
@@ -220,9 +220,10 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 | `group e2ee` | `remove` | ~~做完~~（对真服务跑通；群寻址，目标 leaf 转 terminal） |
 | `group e2ee` | `send` | ~~做完~~（对真服务跑通；群寻址，收件进设备队列，只推 `group_event_seq`） |
 | `group e2ee` | 收包路径（`process_notice_v2` / `decrypt_received_v2`） | ~~做完~~（`msg listen` 投递驱动，对真服务跑通 commit/welcome/final-notice 与 `group.incoming`） |
-| `anp` | `show` / `login` / `sign` | 还没 |
+| `anp` | `show` / `sign` | ~~做完~~（离线一半：本地记录 + 一份能过 crate 验签的 ANP-02 请求） |
+| `anp` | `login` | 还没（要网络：401 挑战重签、token 会话缓存、409 走链重试） |
 | `agent` | `show` / `use` / `list` | ~~做完~~（含 `--agent` 的解析链） |
-| — | `version` | 还没 |
+| — | `version` | ~~做完~~（词形，与 `--version` 同一事实） |
 | 身份 | 换钥 / 换设备 / `update_document` | 还没 |
 | 库侧 | 信封 / 那一跳 HTTP / SSRF 逐跳 / 身份存储 / MLS store | ~~做完~~ |
 | 库侧 | 消息库 `messages.db`（§4、Phase 2） | 还没 |
@@ -578,6 +579,20 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
   而这一跳必须**铸一个新 DID**，所以 rig 里那个 `127.0.0.1%3A9001` 的身份根本没法用来跑 update——
   只能另切一份 `localhost%3A9001` 的（`build.py` 那套重写+旧式签名的机械照搬）。这不是缺口：
   真实 DID 主机是域名。
+- **`anp show` / `anp sign` 与 `version` 已落（2026-10-02）**。三点：
+  （a）**ANP-02 的那份字节只造一次。** `anp/request.rs` 是身兼两职的同一个模块：body（`nonce` /
+  `did` / `didDocument` 三字段，端点附加字段**先摊开**，所以协议自己的名字赢）与 RFC 9421 签名
+  头，`anp sign` 与 `did update` 那一跳都调它。理由不是复用好看，而是**签名的字节就是安全属性**：
+  谁在第二个地方拼 body，谁就给了代理一个可编辑的请求。库侧那条不变量（"发出去的正是签过的"）
+  落在这里。
+  （b）**离线的意思是不发，不是不求验证。** `anp sign` 一行网络字节都不出，所以它是核一个 target
+  契约（或一个 peer）的工具；但"我签的东西得有人认"不能自己证明，于是有一条单测把打印出来的
+  body+headers 递给 **crate 自己的** `verify_http_message_signature`，要求通过——两端都是自己写的
+  验签等于没验。
+  （c）**`anp show` 存在的唯一理由是那对名字。** 一次换钥搬动 `did` 而不动 `subject`，所以把会话
+  挂在 `did` 上的依赖方会在换钥时丢账号、挂在 `subject` 上的不会（`did show` 不摊开这一点）。
+  它同时打出 `keyid`（`{did}#key-1`，peer 要找的那个）与 key 文件的权限，因为那份文件是私钥。
+  文档面（`didDocument`）跟着打出来，不额外取网络——`anp show` 与 `anp sign` 都**不连网**。
 - **与 TS `connectx` 并存**，`CONNECTX_HOME` 的处理见 §8-F。
 
 **Phase 2 —— 消息库**（还没动）
@@ -599,9 +614,11 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
   `restore` 是明说的拒绝。见 §6）
 - [x] ~~`did update`（写的那半：`--target` / `--resume`，与本机钥的生命周期一起）~~（2026-10-02；
   后继钥先暂存后投递，失败分 Settled / Ambiguous 两型决定暂存钥的生死，`--resume` 靠走链结清。见 §6）
-- [ ] `anp` 一族：`show` / `login` / `sign`
+- [x] ~~`anp` 一族的离线一半：`show` / `sign`~~（2026-10-02；共用一份 ANP-02 字节，`sign`
+  的产出过 crate 自己的验签。见 §6）
+- [ ] `anp login`（要网络的那一半：401 挑战重签、token 会话缓存、409 走链重试）
 - [x] ~~`agent` 一族：`show` / `use` / `list`~~（2026-10-02；含 `--agent` 的解析链，见 §6）
-- [ ] `version`
+- [x] ~~`version`~~（2026-10-02；词形与 `--version` 同一事实，见 §6）
 
 **Phase 4 —— 覆盖与收束**（还没动）
 - [ ] 新客户端自己的端到端（Rust 侧，或驱动二进制的 TS 侧——今天的 `packages/e2e` **不覆盖它**，
@@ -626,8 +643,9 @@ Phase 1 到此收口：`msg listen` 与 `group` 一族都已落地（见 §6）�
 `create` / `add` / `remove` / `send`）已落并对真服务跑通
 （见 §6），收包路径（`process_notice_v2` / `decrypt_received_v2`，由 `msg listen` 投递驱动）
 也已落并对真服务跑通，然后是剩下的身份工作（换钥 / 换设备 / `update_document`）与
-`did` / `anp` 三族。`agent` 一族、`did resolve` / `did restore` 与写的那半 `did update`
-都已落（2026-10-02，见 §6）；`anp` 一族与 `version` 未动。
+`did` / `anp` 三族。`agent` 一族、`did resolve` / `did restore`、写的那半 `did update`、
+`anp` 的离线一半（`show` / `sign`）与 `version` 都已落（2026-10-02，见 §6）；
+剩下 `anp login`（要网络的那一半）与身份工作（换钥 / 换设备 / `update_document`）。
 
 ---
 

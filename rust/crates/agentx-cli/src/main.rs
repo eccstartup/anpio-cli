@@ -19,7 +19,7 @@ use agentx::identity::{
     create_identity, current_agent_path, deliver, describe_status, document_is_superseded, fetch_host_service,
     list_identities, load_stored_key, read_current_agent, register_identity, resolve_agent_id,
     resolve_agent_id_with_source, resolve_chain, retirement_document, select_current_agent, snake_case_name,
-    successor_of, Accepted, ChainError, ChainResolution, CreateIdentityInput, Hop, Identity,
+    successor_of, subject_of, Accepted, ChainError, ChainResolution, CreateIdentityInput, Hop, Identity,
     IdentityLocation, UpdateError,
 };
 use agentx::message::{
@@ -107,6 +107,59 @@ enum Command {
     Group {
         #[command(subcommand)]
         command: GroupCommand,
+    },
+    /// The application layer: the credential a peer is asked to accept.
+    ///
+    /// `did` is the pair of commands that talk to the server hosting the DID; this is the
+    /// identity as a relying party sees it, which is a different question with a different
+    /// answer — the stable *subject* outlives the *DID* that a key update replaces.
+    Anp {
+        #[command(subcommand)]
+        command: AnpCommand,
+    },
+    /// The version of this binary.
+    ///
+    /// The word form, next to `--version` / `-V`: a script that runs `agentx-cli version`
+    /// should not have to know which of the two this client spells.
+    Version {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum AnpCommand {
+    /// Show this identity as the application layer sees it.
+    ///
+    /// Contacts nothing: this is the store's own record. What it adds over `did show` is the
+    /// pair of names a key update separates — the stable `subject` and the current `did` —
+    /// plus the keyid a signature would be made under, which is what a peer will look for.
+    Show {
+        /// Print the whole record, DID document included.
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        own: OwnIdentity,
+    },
+    /// Sign one ANP-02 request and print it, without sending anything.
+    ///
+    /// The output is the whole request: the flat ANP-02 body, the RFC 9421 headers that sign
+    /// it, and the DID document the peer will verify against. It is the offline answer to
+    /// "what would this identity put on the wire" — the body is what the signature covers,
+    /// so anything a target adds to it is a target-specific field, not this client's.
+    Sign {
+        /// The full URL of the endpoint being signed for, e.g.
+        /// `https://site.example/api/anp/verify`.
+        #[arg(long, value_name = "URI")]
+        target: String,
+        /// The HTTP method the signature covers.
+        #[arg(long, value_name = "VERB", default_value = "POST")]
+        method: String,
+        /// A server-issued one-time nonce. Empty asks the target to challenge instead.
+        #[arg(long, default_value = "")]
+        nonce: String,
+        #[command(flatten)]
+        own: OwnIdentity,
     },
 }
 
@@ -923,6 +976,28 @@ async fn main() -> anyhow::Result<()> {
                 }
             },
         },
+        Command::Anp { command } => match command {
+            AnpCommand::Show { json, own } => cmd_anp_show(&own, json),
+            AnpCommand::Sign {
+                target,
+                method,
+                nonce,
+                own,
+            } => cmd_anp_sign(&own, &target, &method, &nonce),
+        },
+        // `--version` is answered by clap before dispatch, so reaching here means the word
+        // was typed. Same string either way: the two spellings are one fact.
+        Command::Version { json } => {
+            println!(
+                "{}",
+                if json {
+                    json!({ "version": env!("CARGO_PKG_VERSION") }).to_string()
+                } else {
+                    env!("CARGO_PKG_VERSION").to_string()
+                }
+            );
+            Ok(())
+        }
     }
 }
 
@@ -1036,6 +1111,90 @@ async fn cmd_did_create(
         }
     }
     println!("next:    agentx-cli did show --agent {}", location.agent);
+    Ok(())
+}
+
+/// `anp show` — this identity as the application layer sees it.
+///
+/// The one fact this page exists for is the pair `subject` / `did`: a key update moves the
+/// DID and leaves the subject where it was, so a relying party that keyed a session on the
+/// former would lose the account and one that keyed it on the latter would not.
+fn cmd_anp_show(own: &OwnIdentity, json: bool) -> anyhow::Result<()> {
+    let location = own.location()?;
+    let identity = Identity::load(&location)?;
+    let subject = subject_of(&identity.did);
+    let keyid = format!("{}#key-1", identity.did);
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "agent": location.agent,
+                "profile": location.profile,
+                "subject": subject,
+                "did": identity.did,
+                "keyid": keyid,
+                "handle": identity.handle,
+                "didHost": identity.did_host,
+                "deviceId": identity.device_id,
+                "createdAt": identity.created_at,
+                "identityFile": location.identity_path(),
+                "keys": identity.keys.keys().cloned().collect::<Vec<_>>(),
+                "didDocument": identity.did_document,
+            }))?
+        );
+        return Ok(());
+    }
+
+    let line = |label: &str, value: &str| field(label, Some(&Value::String(value.to_string())));
+
+    line("agent:", &format!("{}/{}", location.agent, location.profile));
+    line("subject:", &subject);
+    line("did:", &identity.did);
+    line("keyid:", &keyid);
+    line("handle:", &identity.handle);
+    line("device:", &identity.device_id);
+    line(
+        "keys:",
+        &identity.keys.keys().cloned().collect::<Vec<_>>().join(", "),
+    );
+    line(
+        "store:",
+        &format!(
+            "{} ({})",
+            location.identity_path().display(),
+            if Identity::permissions_are_private(&location) {
+                "mode 600"
+            } else {
+                "readable by others — it holds private keys; chmod 600"
+            }
+        ),
+    );
+    println!();
+    println!("subject is the stable identity and survives a key update; did is the");
+    println!("current wire credential and changes with the key.");
+    println!();
+    println!("{}", serde_json::to_string_pretty(&identity.did_document)?);
+    Ok(())
+}
+
+/// `anp sign` — sign one ANP-02 request and print it. Nothing is sent.
+///
+/// The target is a URL and the signature covers it, so where the request is aimed is part
+/// of the proof: `--target` is not decoration, and a signature made here is only usable
+/// against that exact URL and method.
+fn cmd_anp_sign(own: &OwnIdentity, target: &str, method: &str, nonce: &str) -> anyhow::Result<()> {
+    let location = own.location()?;
+    let identity = Identity::load(&location)?;
+    let key = load_stored_key(identity.keys.get("key-1").ok_or_else(|| {
+        anyhow::anyhow!(
+            "{} has no key-1 in the store; the binding key is what signs an ANP-02 request",
+            location.identity_path().display()
+        )
+    })?)?;
+
+    let signed = agentx::anp::sign(&identity, &key, target, method, nonce)?;
+    println!("{}", serde_json::to_string_pretty(&signed)?);
     Ok(())
 }
 

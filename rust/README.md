@@ -40,7 +40,7 @@ pin 为准**，源码阅读用 `git show origin/release/0929:rust/...`。
 
 store 根是 `AGENTXCLI_HOME`（缺省 `~/.agentx-cli`），一条身份由 `--agent` / `--profile`
 命名——两个都可以不写：`--agent` > `$AGENTXCLI_AGENT` > 当前 agent（`agent use` 选的）>
-`default`，`--profile` > `$AGENTXCLI_PROFILE` > `default`。`cargo test` 全绿（116 个单测）。
+`default`，`--profile` > `$AGENTXCLI_PROFILE` > `default`。`cargo test` 全绿（120 个单测）。
 
 - **`did create | show | register`** —— 身份存储 + DID 文档。
 - **`did resolve | restore`** —— `resolve` 是解析面：不给 `--chain` 就取那一份文档
@@ -57,6 +57,14 @@ store 根是 `AGENTXCLI_HOME`（缺省 `~/.agentx-cli`），一条身份由 `--a
   服务器"现在服务的是哪个 DID"：是暂存的继任者就提升，还是旧的就没落地、丢掉，是第三个
   就什么都不动——这是那种"一个字都可能把唯一一份钥弄丢"的地方。`--target` 必须点名：
   §2.5.3 没有定义管理接口，往哪投是服务器自己的契约。
+- **`anp show | sign`** —— 应用层看这份身份的两个角度，都**不连网**。
+  `show` 摊开一次换钥会分开的那对名字：稳定的 `subject` 与当前的 `did`（把会话挂在 `did`
+  上的依赖方会在换钥时丢账号），外加 peer 要找的 `keyid` 与 key 文件的权限。
+  `sign` 打出这个身份**会**放上线的整条 ANP-02 请求（body + RFC 9421 头 + DID 文档），
+  一行都不发——所以它是核一个 target 契约的工具。`anp/request.rs` 是那条字节的唯一出处，
+  与 `did update` 那一跳共用；单测把它的产出递给 crate 自己的 `verify_http_message_signature`
+  验，因为两端都自己的验签等于没验。
+- **`version`** —— 词形的版本号（`--json` 给 `{"version": …}`），与 `--version` 是同一个事实。
 - **`agent show | use | list`** —— 本机现在是谁（当前 agent 存在 store 根的一个文件里，
   所以是整机范围而不是单进程）。`use` 允许点名一个还没存身份的 agent——先选 agent、
   再造它的钥，正是一个新 agent 出生的顺序——但会说出来。
@@ -113,5 +121,5 @@ cargo run --manifest-path rust/Cargo.toml --example phase0_key_package -- /tmp/a
 
 ## 还没有
 
-`did` 剩下的写那半（`update`）、`anp` 一族（`show` / `login` / `sign`）、`version`，
+`anp login`（要网络的那一半：401 挑战重签、token 会话缓存、409 走链重试），
 以及身份这块的换钥 / 换设备 / `update_document`。顺序见 TODO5 §6 的 Phase 3。

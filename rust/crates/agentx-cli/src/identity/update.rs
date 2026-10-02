@@ -24,12 +24,12 @@
 
 use std::collections::BTreeMap;
 
-use anp::authentication::http_signatures::{generate_http_signature_headers, HttpSignatureOptions};
 use anp::PrivateKeyMaterial;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use reqwest::Url;
 use serde_json::{json, Value};
 
+use crate::anp::request as anp_request;
 use crate::message::resolve::{assert_allowed_host, ResolvePolicy};
 
 /// What the DID server's acceptance amounts to.
@@ -127,7 +127,7 @@ pub async fn deliver(
 
         let response = client
             .post(url.clone())
-            .headers(header_map(&headers).map_err(UpdateError::Settled)?)
+            .headers(anp_request::header_map(&headers).map_err(UpdateError::Settled)?)
             .body(body)
             .send()
             .await
@@ -138,7 +138,7 @@ pub async fn deliver(
             // A challenge is worth exactly one answer, and only when it names a nonce we are
             // not already using: a server that challenges with the nonce we sent is refusing,
             // not asking.
-            let challenged = nonce_from_challenge(
+            let challenged = anp_request::nonce_from_challenge(
                 response
                     .headers()
                     .get("www-authenticate")
@@ -154,7 +154,7 @@ pub async fn deliver(
         }
 
         if status.is_success() {
-            assert_not_web_page(&response, target).map_err(UpdateError::Settled)?;
+            anp_request::assert_not_web_page(&response, target).map_err(UpdateError::Settled)?;
             return Ok(Accepted {
                 retiring_did: hop.retiring_did.to_string(),
                 successor_did: hop.successor_did.to_string(),
@@ -176,6 +176,10 @@ pub async fn deliver(
 }
 
 /// The delivery body: a plain ANP-02 request, plus the two documents the hop is about.
+///
+/// The two documents are the hop's own fields — they are what makes this request an update
+/// rather than a login — while the protocol's three names come from
+/// [`anp_request::body`], which is the one place that builds an ANP-02 body.
 pub fn request_body(
     retiring_did: &str,
     retirement_document: &Value,
@@ -183,14 +187,15 @@ pub fn request_body(
     successor_document: &Value,
     nonce: &str,
 ) -> Result<Vec<u8>> {
-    let body = json!({
-        "nonce": nonce,
-        "did": retiring_did,
-        "didDocument": retirement_document,
-        "successorDid": successor_did,
-        "successorDocument": successor_document,
-    });
-    Ok(serde_json::to_vec(&body)?)
+    anp_request::body(
+        retiring_did,
+        retirement_document,
+        nonce,
+        Some(json!({
+            "successorDid": successor_did,
+            "successorDocument": successor_document,
+        })),
+    )
 }
 
 /// Sign one request over the exact body bytes, with the retiring DID's key-1.
@@ -205,113 +210,7 @@ pub fn signature_headers(
     key1: &PrivateKeyMaterial,
     keyid: &str,
 ) -> Result<BTreeMap<String, String>> {
-    generate_http_signature_headers(
-        retirement_document,
-        url,
-        "POST",
-        key1,
-        None,
-        Some(body),
-        HttpSignatureOptions {
-            keyid: Some(keyid.to_string()),
-            ..Default::default()
-        },
-    )
-    .map_err(|err| anyhow!("signing the update request: {err}"))
-}
-
-fn header_map(headers: &BTreeMap<String, String>) -> Result<reqwest::header::HeaderMap> {
-    let mut map = reqwest::header::HeaderMap::new();
-    map.insert(
-        reqwest::header::CONTENT_TYPE,
-        reqwest::header::HeaderValue::from_static("application/json"),
-    );
-    for (name, value) in headers {
-        let name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
-            .with_context(|| format!("{name} is not a header name"))?;
-        let value = reqwest::header::HeaderValue::from_str(value)
-            .with_context(|| format!("{name} has a value that cannot go on the wire"))?;
-        map.insert(name, value);
-    }
-    Ok(map)
-}
-
-/// Refuse a 2xx that came back as a web page.
-///
-/// A 2xx is not by itself an answer from a DID server, and nothing about the acceptance is
-/// read back — so a page that answers 200 would be reported as a delivered hop. The likely
-/// cause is a `--target` aimed at a site origin instead of at the update endpoint, which is
-/// the mistake a caller cannot detect afterwards. Only HTML is refused: a real peer's body is
-/// genuinely optional, so requiring a shape would break servers that omit it.
-fn assert_not_web_page(response: &reqwest::Response, target: &str) -> Result<()> {
-    let mime = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default()
-        .split(';')
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase();
-    if mime != "text/html" && mime != "application/xhtml+xml" {
-        return Ok(());
-    }
-    Err(anyhow!(
-        "invalid_argument: POST {target} answered {} {mime}: that is a web page, not a DID server's update endpoint",
-        response.status()
-    ))
-}
-
-/// The `nonce` out of a `WWW-Authenticate` challenge, if it names one.
-///
-/// A deliberate subset of RFC 9110's `param=value` list: the scheme is skipped, and the
-/// parameters are split on commas outside quotes. That is the whole contract here — the
-/// nonce is the only parameter this client acts on, so parsing the rest would be inventing
-/// work.
-pub fn nonce_from_challenge(header: Option<&str>) -> Option<String> {
-    let text = header?.trim();
-    let space = text.find(char::is_whitespace)?;
-    let params = &text[space + 1..];
-    for param in split_params(params) {
-        let (name, value) = param.split_once('=')?;
-        if name.trim().eq_ignore_ascii_case("nonce") {
-            let value = unquote(value.trim());
-            if !value.is_empty() {
-                return Some(value);
-            }
-        }
-    }
-    None
-}
-
-/// Split `a="1,2", b=3` on the commas that are not inside quotes.
-fn split_params(params: &str) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut current = String::new();
-    let mut quoted = false;
-    for ch in params.chars() {
-        match ch {
-            '"' => {
-                quoted = !quoted;
-                current.push(ch);
-            }
-            ',' if !quoted => {
-                parts.push(std::mem::take(&mut current));
-            }
-            _ => current.push(ch),
-        }
-    }
-    parts.push(current);
-    parts
-}
-
-fn unquote(value: &str) -> String {
-    value
-        .strip_prefix('"')
-        .and_then(|rest| rest.strip_suffix('"'))
-        .unwrap_or(value)
-        .to_string()
+    anp_request::sign_headers(retirement_document, url, "POST", key1, keyid, Some(body))
 }
 
 #[cfg(test)]
@@ -338,30 +237,6 @@ mod tests {
         assert_eq!(parsed["did"], "did:wba:h:user:alice:e1_old");
         assert_eq!(parsed["successorDid"], "did:wba:h:user:alice:e1_new");
         assert_eq!(parsed["nonce"], "n-1");
-    }
-
-    #[test]
-    fn a_challenge_nonce_is_read_quoted_or_bare() {
-        assert_eq!(
-            nonce_from_challenge(Some("ANP realm=\"did\", nonce=\"abc123\"")).as_deref(),
-            Some("abc123")
-        );
-        assert_eq!(nonce_from_challenge(Some("ANP nonce=abc123")).as_deref(), Some("abc123"));
-        // A quoted value may contain a comma; splitting on every comma would truncate it.
-        assert_eq!(
-            nonce_from_challenge(Some("ANP realm=\"a,b\", nonce=\"x,y\"")).as_deref(),
-            Some("x,y")
-        );
-    }
-
-    #[test]
-    fn a_challenge_with_no_nonce_is_not_one() {
-        assert_eq!(nonce_from_challenge(None), None);
-        assert_eq!(nonce_from_challenge(Some("")), None);
-        assert_eq!(nonce_from_challenge(Some("ANP realm=\"did\"")), None);
-        assert_eq!(nonce_from_challenge(Some("ANP nonce=\"\"")), None);
-        // A scheme with no parameters at all: there is no space to split on.
-        assert_eq!(nonce_from_challenge(Some("ANP")), None);
     }
 
     #[test]

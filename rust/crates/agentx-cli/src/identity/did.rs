@@ -191,6 +191,27 @@ fn base_document(did: &str, built: &Value) -> Value {
     Value::Object(base)
 }
 
+/// The **stable subject** of a DID: the identity that survives a key update.
+///
+/// A `did:wba` E1 DID embeds key-1's fingerprint (`e1_…`), which moves with every hop — so
+/// the subject is that identifier with the fingerprint segment taken off, and the DID is the
+/// wire credential that changes underneath it. A session keyed on the subject therefore
+/// survives a key update, and one keyed on the DID does not (this is why `login` reports
+/// both).
+///
+/// A DID with no fingerprint is already stable and is returned unchanged. That is `did:web`'s
+/// definition, not a fallback: its identifier carries nothing about the key — the tie is the
+/// domain's TLS certificate plus the document it serves — so demanding a WBA fingerprint of
+/// it is a MUST NOT (ANP-05 App. B B.1 L477).
+pub fn subject_of(did: &str) -> String {
+    match parse_did_wba_e1(did) {
+        // `stable_subject_path` already includes the authority (`localhost%3A9001:user:carol`),
+        // so the prefix is the whole of what is added back.
+        Ok(profile) => format!("did:wba:{}", profile.stable_subject_path),
+        Err(_) => did.to_string(),
+    }
+}
+
 /// Mint the successor half of an update hop: a fresh key for the **same** subject.
 ///
 /// Everything that makes the identity *this* identity is carried over — the host, the path,
@@ -459,21 +480,7 @@ mod tests {
 
     use super::*;
     use crate::message::resolve::document_in_crate_form;
-
-    /// An identity with no host and no network behind it: every input `create_identity` wants
-    /// is a string, so the whole successor/retirement pair can be exercised offline.
-    fn mint(agent: &str) -> Identity {
-        create_identity(CreateIdentityInput {
-            authority: "did.example.com".to_string(),
-            agent: agent.to_string(),
-            profile: "default".to_string(),
-            handle: agent.to_string(),
-            did_host_url: "https://did.example.com".to_string(),
-            service_endpoint: "https://svc.example.com/anp".to_string(),
-            service_did: "did:wba:svc.example.com".to_string(),
-        })
-        .unwrap()
-    }
+    use crate::identity::did::test_support::mint;
 
     #[test]
     fn a_successor_moves_the_fingerprint_and_nothing_else() {
@@ -572,5 +579,29 @@ mod tests {
         // Signed by key-1, the key whose fingerprint is the DID: `verified`, not the
         // `provider_asserted` a proof-less retirement would fall back to.
         assert_eq!(result.hops[0].assurance, TransitionAssurance::Verified);
+    }
+}
+
+/// Test-only fixtures other modules' tests need.
+///
+/// An identity with no host and no network behind it: every input `create_identity` wants is
+/// a string, so a successor/retirement pair — or a signed ANP-02 request — can be exercised
+/// offline. Shared rather than copied, because a second `mint` would be a second idea of
+/// what a well-formed identity looks like.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+
+    pub(crate) fn mint(agent: &str) -> Identity {
+        create_identity(CreateIdentityInput {
+            authority: "did.example.com".to_string(),
+            agent: agent.to_string(),
+            profile: "default".to_string(),
+            handle: agent.to_string(),
+            did_host_url: "https://did.example.com".to_string(),
+            service_endpoint: "https://svc.example.com/anp".to_string(),
+            service_did: "did:wba:svc.example.com".to_string(),
+        })
+        .unwrap()
     }
 }

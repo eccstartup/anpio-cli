@@ -9,6 +9,7 @@
 //! object*, and stops there. The HTTP hop and this service's extension surface are ours.
 //! That is what `message` is.
 
+pub mod anp;
 pub mod error;
 pub mod group;
 pub mod group_e2ee;
