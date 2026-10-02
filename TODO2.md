@@ -79,12 +79,13 @@ KeyPackage 的 `did_wba_binding` Object Proof 由设备自签，验证侧从**�
     一次网络抖动不该丢掉一整条队列。**残留边界**已记进 [e2ee-group.md](docs/design/e2ee-group.md)
     §6.2：撤销与 `remove` 之间正好入队、又还没轮到的信封，会在 `remove` 把 leaf 转成 `terminal`
     后落进"按序投完"的例外。收窄它要在 `remove` 的受理路径上也读一次文档。）
-  - **A3c 换 DID。** 今天完全没有：`member_did` 在 `group_members` / `group_leaves` 的**主键**
-    里，成员的 DID 改不了（只能删一行加一行）；P4 §8.12 的 `member-did-updated` 本服务的 P4
-    （C9）没有接受，`group_did_updates` 因此没有写入者。换 DID 的验证侧 core 已经写好
-    （`packages/core/src/did/chain.ts` 走完转移链并给出四档保证），服务端缺的是调用它、按保证
+  - ~~**A3c 换 DID。**~~
+    （2026-10-02 落地。原本一条都没有：`member_did` 在 `group_members` / `group_leaves` 的**主键**
+    里，成员的 DID 改不了（只能删一行加一行）；P4 §8.12 的 `member-did-updated` 本服务的 P4（C9）
+    没有接受，`group_did_updates` 因此没有写入者。验证侧 core 早就写好
+    （`packages/core/src/did/chain.ts` 走完转移链并给出四档保证），服务端补上的是调用它、按保证
     档位决定接受，再按 P6 §10.5 编排（暂停 → 逐设备 add 新 DID → 逐设备 remove 旧 DID → 恢复）。
-    分四段，A3c-1 已落地：
+    分四段，四条都已落地：）
 
     - ~~**A3c-1 请求触发。**~~
       （2026-10-02 落地：`rpc/memberDidUpdate.ts` 走 §8.12 受理前的第 1–3 条（从记录里当前
@@ -98,9 +99,20 @@ KeyPackage 的 `did_wba_binding` Object Proof 由设备自签，验证侧从**�
       即"另一条触发路已经做过了"；操作标识是 `group_did + 旧 + 新` 的确定性摘要。
       **`group_leaves` 一行都不动**（2026-10-02 更正：早先那版让 leaf 跟着搬，是错的——见 A3c-3
       与 `applyMemberDidUpdate` 的注释）。**§8.12 本身只覆盖了"新 DID 来办事"这一路**，
-      另外三路见下面三段。）
-    - **A3c-2 投递触发。** 往旧 DID 投递时发现合规后继 → 先改完名册，再往**当前** DID 生成新的
+      另外两条触发路见下面两段。）
+    - ~~**A3c-2 投递触发。**~~ 往旧 DID 投递时发现合规后继 → 先改完名册，再往**当前** DID 生成新的
       `group.incoming`。
+      （2026-10-02 落地，`9beb201`：挂在设备队列**投递尝试前的资格复核**里（`delivery/deviceQueue.ts`
+      的 `deliver()`，在 `checkDevice` 之前），那是唯一说得通的位置——§8.12 第 1 条要求起点恰好是
+      一条 current DID 就是这个旧 DID 的 active 记录，而只有走到资格复核才知道收件人还是 active
+      成员；那次链解析又与紧接着的设备复核共用同一份文档缓存（A3a），所以热路径上没有多出来的
+      往返。采纳走的是**同一个** `applyMemberDidUpdate`，于是投递触发的改名一样会开 §10.5 的编排
+      行、一样会暂停群；采纳之后这条路就停手，已入队的信封留在队里**不重排**（它等的不是时间、
+      是一次控制动作，重排会把"等"记成"失败"），之后走 §12.3 的例外按序投完。档位低于策略、或
+      后继已经是另一个 active 成员 → 拒绝，与请求触发同口径。**已知覆盖缺口**：一份被取代的 DID
+      文档若仍留着 `deviceManifest`，`checkDevice` 会放行、信封会照旧投给旧地址——规范把投递触发
+      写成 MAY，这条缺口由 A3c-4 兜住。测试见 `delivery/deviceQueue.test.ts` 的 "adopting a member
+      DID change on the delivery path (§8.12)"（5 例）。）
     - **A3c-3 P6 §10.5 编排（Host 一侧已落地）。** ~~给 `group_did_updates` 一个写入者。~~
       （2026-10-02 落地：`applyMemberDidUpdate` 在"这次更新还留着旧 DID 的 leaf 要退役"时开一行
       `group_did_updates`，`expected` = 那批旧 leaf、进度 `add-pending`；`groupControl.ts` 的
@@ -115,9 +127,25 @@ KeyPackage 的 `did_wba_binding` Object Proof 由设备自签，验证侧从**�
 
       校验与端到端测试在 `rpc/groupControl.test.ts` 的 "orchestrating the MLS side of a DID
       change (§10.5)"：开行/暂停、无关 Add 被拒、无关 Remove 被拒、匹配 Remove 收尾并恢复发送。
-      **A3c-2 的投递侧与 A3c-4 的定时扫描仍未做**——前者是"往旧 DID 投递时触发更新"，后者是兜底。
-    - **A3c-4 定时刷新。** 用户裁定的低负载周期扫描，兜住"对端 DID 服务器已更新、而我们还没被
+      三条触发路至此齐了——请求触发（A3c-1）、投递触发（A3c-2）、定时刷新（A3c-4）——都收敛到
+      这一个改名，所以任一触发路发现的换 DID 都得到同一套编排与暂停。
+    - ~~**A3c-4 定时刷新。**~~ 用户裁定的低负载周期扫描，兜住"对端 DID 服务器已更新、而我们还没被
       任何请求或投递碰到"这一档。
+      （2026-10-02 落地，`6b56868`：`refresh/memberDidRefresh.ts` 只是钟，判定在
+      `rpc/memberDidUpdate.ts` 的 `refreshMemberDids`，与投递触发共用 `adoptSuccessorOfRosterDid`
+      ——§8.12 受理前那五条因此只有一份实现。**低负载由取行方式保证，不由承诺保证**：一轮只取
+      `batch` 行、且最久没看过的最先（`groupMembersDueForDidCheck` 的排序），于是每轮开销是个常数
+      （托管多少群、群多大都一样），而所有人仍按同一周期轮转，把 N 个成员轮一遍要 `ceil(N/batch)`
+      轮。游标是 `group_members.last_did_checked_at`（schema v10，`addColumnIfMissing`）：它记的是
+      "看过"不是"没问题"，解析失败也盖章，否则一个暂时不可达的对端会永远卡在队头，把所有人挡住。
+      `staleAfterMs` 取 `intervalMs`，所以那个间隔是每个成员的**最短**复查周期。两个数是部署档位：
+      `AGENTX_DID_REFRESH_INTERVAL_MS`（缺省 6h）与 `AGENTX_DID_REFRESH_BATCH`（缺省 20）——一个
+      1000 成员的部署按缺省约 12 天轮一遍，每轮仍是 20 次解析。启动时**不**立刻扫一轮：刚起来的
+      进程正忙着开端口装订阅，几十次解析压在那个时刻没有好处。它单开一个 worker 是因为节奏与设备
+      队列差四个数量级。测试：`refresh/memberDidRefresh.test.ts` 8 例（采纳并开编排行、无 leaf 的
+      安静成员也能改、看过就出批、按最久未看轮转、低档位拒绝仍盖章、解析失败仍盖章、后继已是
+      active 成员则不并、非 active 不入批）+ `storage/sqlite.test.ts` 的游标三条与 v9→v10 迁移
+      一条。**这一层只负责"看一眼"**：退役旧 leaf 仍要 owner 按 §10.5 编排。）
 
 - **A4 同 DID 的 Remove 分支 v1 不做，回 5003。**
   理由写在 `packages/service/src/rpc/groupControl.ts:52`：该分支的前置是

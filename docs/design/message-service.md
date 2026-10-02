@@ -447,10 +447,11 @@ CREATE TABLE groups (
   created_at TEXT NOT NULL, creator_did TEXT NOT NULL
 );
 -- joined_at / added_by 是 P4 §7.2 L379–380 的 `group_member` 字段，v3 随 C9 补上
+-- last_did_checked_at 是 v10 随 A3c-4 补上的定时刷新游标（见 §14）
 CREATE TABLE group_members (
   group_did TEXT NOT NULL, member_did TEXT NOT NULL, role TEXT NOT NULL,
   membership_status TEXT NOT NULL, state_version INTEGER NOT NULL,
-  joined_at TEXT, added_by TEXT,
+  joined_at TEXT, added_by TEXT, last_did_checked_at TEXT,
   PRIMARY KEY (group_did, member_did)
 );
 CREATE TABLE group_events (          -- group.state_changed 的可重放来源
@@ -499,7 +500,10 @@ CREATE TABLE outbox (
 **版本**：版本号记在 SQLite 自己的 `user_version` 上（`SCHEMA_VERSION`），**比本构建新
 的文件直接拒开**——本构建会读到它认识的表、静默忽略新版本依赖的列。上表是 v3；v2→v3
 只是给 `group_members` 加两个可空列（`ALTER TABLE ADD COLUMN` 才是 SQLite 原位能做的
-那一种），没有数据搬运。从 v1
+那一种），没有数据搬运。此后每加一列都是同一条路：`addColumnIfMissing` 与版本号一起前进
+（v4 的 `joined_at` / `added_by`、v10 的 `last_did_checked_at`），新表则由 `SCHEMA` 的
+`IF NOT EXISTS` 补建——但因为 `applySchema` 见到相同版本号就早退，**新表也照样要让版本号
+前进**，否则旧文件永远补不上它。从 v1
 （`messages` 单列主键 + `outbox.endpoint_uri`）升级的两步都是 SQLite 无法原位改的，
 所以走一次迁移：主键变宽是**严格超集**，行照抄不会撞；`outbox` 只有重试状态，直接丢弃
 重建。两个 `IF NOT EXISTS` 之外的语句与 `user_version` 落在同一个事务里，成功之后才盖章。
@@ -964,6 +968,8 @@ AGENTX_PREKEY_BURST       两条 Key 方法每个调用方的突发额度，默�
 AGENTX_PREKEY_PER_MINUTE  同上，每分钟补充的令牌数（持续速率），默认 60
 AGENTX_DEVICE_QUEUE_MAX_ATTEMPTS  一条 P6 设备信封最多尝试几次，默认 8（§12.6 有界保留）
 AGENTX_DEVICE_QUEUE_MAX_AGE_MS    一条 P6 设备信封最多在队里待多久，默认 24h（§12.6 有界保留）
+AGENTX_DID_REFRESH_INTERVAL_MS    定时刷新成员 DID 的间隔，默认 6h（A3c-4，见下）
+AGENTX_DID_REFRESH_BATCH          一轮最多查几个成员，默认 20（A3c-4，见下）
 ```
 
 **没有配置项能关掉 `origin_proof` 校验。** 要联调就配一个宽松的 DID 解析策略，
@@ -995,6 +1001,23 @@ AGENTX_DEVICE_QUEUE_MAX_AGE_MS    一条 P6 设备信封最多在队里待多久
 本身要求"用一把**停用之前**的文档授权过的恢复钥"来验——那份"停用之前的文档"只能是文档缓存里
 上一次解析留下的那一份。所以**恢复路只能在缓存 TTL 窗口内走通**：窗口外对端就得走一次
 `verified`。这是收窄不是放行，方向与 §8.12 一致，所以不额外加配置项。
+
+**换 DID 怎么被发现的**（A3c）。§8.12 的 `group.member_did_update` 是**宿主动作标识**，
+被调用 MUST 回 `-32601`——没有任何客户端能让它发生，所以只能由 Host 在别的事的路上顺手做完。
+本服务实现规范点名的全部三条：**请求触发**（一个可能的新 DID 来发 `group.send` /
+`group.leave` / `group.update_profile` / `group.update_policy`，或来读私有群的
+`group.get_info`，落 `rpc/memberDidUpdate.ts` 的 `adoptMemberDidForRequest`）、**投递触发**
+（正要投给一个名册里的旧 DID 时先看一眼它有没有合规后继，挂在设备队列投递前那次资格复核上）、
+以及**定时刷新**（`refresh/memberDidRefresh.ts`）。三条都收敛到同一个原子改名，靠 §8.12 那个
+确定性操作标识幂等。
+
+定时刷新是唯一能碰到**安静的成员**的一条：不请求、也收不到信封的成员，前两条永远不会经过它，
+名册就会一直认着一个已经不该被授权的旧 DID。它的节奏是部署档位（默认 6 小时一轮、一轮 20 行）：
+一轮的开销**恒为 20 次解析**，与群有多大无关；取行时**最久没看过的优先**，所以所有成员按同一
+周期轮转。把 N 个成员轮一遍要 `ceil(N/20)` 轮，一个 1000 成员的部署因此约 12 天，要更快就调大
+`AGENTX_DID_REFRESH_BATCH`。`group_members.last_did_checked_at` 是它的游标，记的是"看过"而不是
+"没问题"——一次解析失败也盖章，否则一个暂时不可达的对端会卡住整个队列。它与两条队列 worker 分开
+也是因为这个节奏差着四个数量级。
 
 ## 15. 实现顺序
 

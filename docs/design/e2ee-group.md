@@ -472,6 +472,15 @@ CREATE TABLE group_did_updates (
 标识符，不是 JSON-RPC 方法**（客户端调它 MUST 得 `-32601`）。行由 Host 自己执行改名的那一步
 （`applyMemberDidUpdate`）就地写下。验收见 `rpc/groupControl.test.ts` 的 §10.5 那一节。
 
+**那么谁会走到那一步**：§8.12 点名的三条触发路**都实现了**，且都收敛到同一个原子改名，所以
+任一条发现的换 DID 都得到同一套编排与同一次暂停——**请求触发**（一个可能的新 DID 来发
+`group.send` / `group.leave` / `group.update_profile` / `group.update_policy`，或来读私有群的
+`group.get_info`）、**投递触发**（正要投给名册里的一个旧 DID 时先看一眼它有没有合规后继，挂在
+设备队列投递前那次资格复核上）、**定时刷新**（`refresh/memberDidRefresh.ts`，低负载周期扫描，
+见 [message-service.md](message-service.md) §14）。第三条是唯一能碰到**安静的成员**的：不请求、
+也收不到信封的成员，前两条永远不会经过它。三条各自的取舍与界都记在
+`rpc/memberDidUpdate.ts` 的文件头。
+
 **设备级撤销那个例外不进入这个状态**：§10.4 L1074 说此时 Host **MUST NOT** 仅因该 leaf
 尚未移除就暂停其它合法 `group.e2ee.send`。所以暂停态只由**整个 P4 成员**的 DID 更新建立——
 投影现算只认"DID 已非 active 成员"这一条，编排行也只由换 DID 建行，单台设备被撤销两者都不触发。
@@ -589,9 +598,6 @@ Host 无法区分"第一次进群"与"重新加入"（§10.3 L1066 的触发条�
 - **自动 owner MLS 恢复**：§11.12 L1402 要求 fail closed，Host **MUST NOT** 下发
   当前或历史 epoch secret。
 - **`group_receipt.proof`**：同 C9 的结论（[groups.md](groups.md) §7），v1 不签。
-- **`group_did_updates` 编排的两条触发路**：请求触发（"新 DID 来办事"）已落地；**投递触发**
-  （往旧 DID 投递时发现合规后继）与**定时刷新**（兜底周期扫描）还没有。编排本身、暂停、串行化
-  都已实现并施加于 `add` / `remove` / `send`，见 [§8](#8-暂停与串行化host-状态机里唯一真状态)。
 
 ## 13. 挡住 v1 的
 
