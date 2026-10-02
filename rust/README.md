@@ -338,6 +338,62 @@ cargo run --manifest-path rust/Cargo.toml --example phase0_key_package -- /tmp/a
 
   名字在这一族里只走**非 `--json`** 那一档。
 
+### `contacts` / `me` / `anp` / `discover` / `version`
+
+这五族的旗标只剩共有的那几个：`--agent` / `--profile`（身份怎么选见上文）与 `--json`；
+`--allow-private-host` 也每条都在，不再逐行重复。
+
+| 命令 | 位置参数 | 旗标（默认值） |
+| --- | --- | --- |
+| `contacts list` | — | `--json` |
+| `contacts add` | `<DID>` | `--remark <NAME>`（缺席=保留原有备注）、`--clear-remark`、`--json` |
+| `contacts set-remark` | `<NAME> <REMARK>` | `--json` |
+| `contacts remove` | `<NAME>` | `--json` |
+| `contacts resolve` | `<NAME>` | `--json`（整行，含 `subject`，而不只是裸 DID） |
+| `me show` | — | `--json` |
+| `me set` | — | `--name <TEXT>` / `--bio <TEXT>` / `--avatar <URI>` / `--profile-url <URI>`（**至少给一个**）、`--json` |
+| `anp show` | — | `--json`（整条记录，含 DID 文档） |
+| `anp sign` | — | `--target <URI>`（**必填**）、`--method <VERB>`（`POST`）、`--nonce <NONCE>`（`""` = 请对端挑战） |
+| `anp login` | — | `--target <URI>`（**必填**）、`--nonce <NONCE>`（`""`）、`--session-ttl <SPEC>`（`7d` / `24h` / `30m` / 裸秒，**服务器自己的到期更短时以它为准**）、`--no-save-session`、`--json` |
+| `discover` | `<ENDPOINT>` | 无（裸主机自动补 `/anp-im/rpc`；也**不需要身份**） |
+| `version` | — | `--json` |
+
+失败时说什么：
+
+- **`contacts add` 收到的不是 DID**：退出 1，**在开身份之前**就拒——不读 store、不连网：
+
+  ```text
+  Error: message_invalid: "Alice" is not a DID: `contacts add` takes the DID, and the name goes in --remark (`agentx-cli contacts add did:wba:… --remark Alice`)
+  ```
+
+  不这么拦，`subject_of`（全函数）会把字面量 `Alice` 原样存成一个键，落一行永远发不出去、也永远
+  匹配不上任何 DID 的记录。
+- **名字对上了不止一个联系人**：退出 1，**逐个列出**候选（`DID\t备注` 一行一个），末尾点名
+  `contacts set-remark`。`msg send --to` 用的是同一个判定，所以同一处歧义在这里也照拒。
+- **名字不在册**：退出 1。读这句话的是被交代了"发给 Alice"的那个 agent，所以它给的是**能照做的
+  下一步**，不是一个解析成了空的字符串：
+
+  ```text
+  no contact named "Alice": add one with `agentx-cli contacts add <did> --remark Alice`, or use the DID directly
+  ```
+- **`contacts set-remark` / `remove` 的 `<name>` 收名字或 DID**，解名字的路子与 `msg send --to`
+  同一条（所以重名在这里也拒）。`remove` 一个册上没有的 DID：
+  `{did} was not in the book; nothing to remove`，退出 1。
+- **`contacts resolve` 收到 DID 形状的参数**：原样返回，**不读 store、不连网**，`--json` 里
+  `"source": "argument"` 把这件事说出来（从册里来的那档是 `"source": "contacts"`）。
+- **`me set` 一个字段都没点**：`nothing to set — pass at least one of --name, --bio, --avatar,
+  --profile-url`，退出 1。**只有点过名的字段才发出去**，所以改昵称不会顺手清掉头像。
+- **`anp login` 的 401 挑战只答一次**，而且只在服务器点了**另一个** nonce 时才重签——同一个
+  nonce 再挑战一次是在拒绝，不是要求再签一遍。**409 `did_superseded` 是一个结论**，不是一次
+  被拒的证明：它不走"登录失败"那条路，客户端拿**自己的**链（`resolve_chain`）说哪个 DID 才算数，
+  所以 `--target` 的 rig 说了谎也会被当场拆穿。token 从 `Authentication-Info` 或 body 里取，
+  缓存进 `session.json`，键是 **`host:port`**；**写失败只警告不失败**（`session not saved — the
+  token above is the only copy`），因为 token 已经在手里了。`--no-save-session` 打出来但不缓存。
+- **`anp sign` 一行都不发**：它打出这个身份**会**放上线的整条 ANP-02 请求（body + RFC 9421 头 +
+  DID 文档），是核一个 target 契约的工具。
+- **`discover`**：`anp.get_capabilities` 是唯一不需要 auth 的方法（P1 §8.2），所以它是最省的
+  "端点活着吗、说的是这个协议吗"检查。端点只给主机时自动补 `/anp-im/rpc`。
+
 ## 还没有
 
 Phase 2 的消息库（`messages.db`，TODO5 §4）；以及 Phase 4 的覆盖与收束——本仓的
