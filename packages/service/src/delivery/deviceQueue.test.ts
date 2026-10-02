@@ -2,8 +2,9 @@
 // 所以"这一轮到底发了几封、发给谁、发的是哪一份字节"全部可观测。
 
 import { describe, expect, it } from 'vitest'
-import type { LocateOptions, ServiceEntry, ServiceLocator } from '@agentx/core'
+import type { DeviceEntry, DeviceResolver, LocateOptions, ServiceEntry, ServiceLocator } from '@agentx/core'
 import { loadConfig } from '../config'
+import { GROUP_E2EE_DEVICE } from '../rpc/groupE2ee'
 import { openStorage } from '../storage/sqlite'
 import type { Storage, StoredDeviceEnvelope } from '../storage/types'
 import { createSubscriberRegistry } from '../stream/registry'
@@ -29,6 +30,30 @@ function locatorOf(entries: ServiceEntry[] | Error): ServiceLocator {
     async locate(): Promise<ServiceEntry[]> {
       if (entries instanceof Error) throw entries
       return entries
+    },
+  }
+}
+
+/**
+ * 投递前那层资格复核读的东西：对端的**当前** `deviceManifest`。
+ *
+ * `'missing'` 是"文档取回来了，里面没有这台设备"——一台被主人撤销的设备。`Error` 是"文档
+ * 根本没取回来"——两者在投递路径上的处置不同（丢弃 vs 记一次尝试退避重试），所以注入的假
+ * 解析器要能把它们分开。
+ */
+function deviceResolverOf(verdict: 'eligible' | 'missing', onCall?: (deviceId: string) => void): DeviceResolver {
+  return {
+    async resolveDevice(identity: string, deviceId: string) {
+      onCall?.(deviceId)
+      const entry: DeviceEntry = {
+        deviceId,
+        signingKeyId: `${identity}#dev-signing`,
+        e2eeKeyId: `${identity}#dev-e2ee`,
+        profiles: [...GROUP_E2EE_DEVICE.profiles],
+        signingAuthorizedBy: [GROUP_E2EE_DEVICE.signingRelationship],
+        e2eeAuthorizedBy: [GROUP_E2EE_DEVICE.e2eeRelationship],
+      }
+      return { document: {}, entries: verdict === 'eligible' ? [entry] : [] }
     },
   }
 }
@@ -97,6 +122,7 @@ interface Harness {
 function harness(
   overrides: {
     locator?: ServiceLocator
+    deviceResolver?: DeviceResolver
     locateOptions?: LocateOptions
     maxAttempts?: number
     maxQueueAgeMs?: number
@@ -113,6 +139,7 @@ function harness(
     storage,
     registry,
     locator: overrides.locator ?? locatorOf([PEER]),
+    deviceResolver: overrides.deviceResolver ?? deviceResolverOf('eligible'),
     locateOptions: overrides.locateOptions ?? policy(async () => new Response('', { status: 200 })),
     log: (line) => logs.push(line),
     now: () => new Date(clock),
@@ -346,6 +373,64 @@ describe('delivery is revalidated against current eligibility (§12.6 item 3)', 
     expect(posted).toEqual(['incoming', 'incoming'])
     expect(queued(h.storage)).toEqual([])
   })
+
+  it('drops the queue when the device is gone from the owner current manifest (§10.4 L1074)', async () => {
+    // 投影还说它是个 active leaf，而主人的文档里已经没有这台设备了。投影判不出这件事——设备
+    // 被撤销不经过任何我们看得见的控制动作——所以只有真去读一次文档才知道。
+    let posted = false
+    const h = harness({
+      deviceResolver: deviceResolverOf('missing'),
+      locateOptions: policy(async () => {
+        posted = true
+        return new Response('', { status: 200 })
+      }),
+    })
+    seedLeaf(h.storage, ALICE, ALICE_DEVICE)
+
+    h.enqueue(ALICE, ALICE_DEVICE)
+    h.enqueue(ALICE, ALICE_DEVICE)
+    await h.worker.runOnce()
+
+    // 一条都不发，整条队列清掉——不是"等我"，是"这台设备没有了"。
+    expect(posted).toBe(false)
+    expect(queued(h.storage)).toEqual([])
+    expect(h.logs.filter((line) => line.includes('no longer an eligible device'))).toHaveLength(2)
+  })
+
+  it('does not read the document at all for the §12.3 exception (a Removed leaf)', async () => {
+    // 被 Remove 过的 leaf 队列里躺着的信封要按序投完，最终通知压在最后。这一档是第 3 条点名
+    // 的例外，所以它连文档都不该去看——一条已经 Remove 的设备，看也是"不在清单里"。
+    const looked: string[] = []
+    const h = harness({ deviceResolver: deviceResolverOf('missing', (deviceId) => looked.push(deviceId)) })
+    seedLeaf(h.storage, ALICE, ALICE_DEVICE, 'terminal')
+    h.enqueue(ALICE, ALICE_DEVICE)
+
+    await h.worker.runOnce()
+
+    expect(looked).toEqual([])
+    expect(queued(h.storage)).toEqual([])
+  })
+
+  it('treats an unresolvable document as a delivery failure, not as a revocation', async () => {
+    // 对端 DID 服务器不可达不是"这台设备没了"。混为一谈的代价是：一次网络抖动就把整条队列
+    // 丢掉。所以那一档走的是既有的失败路径——记一次尝试、退避重试，直到有界保留收掉它。
+    const h = harness({
+      deviceResolver: {
+        async resolveDevice() {
+          throw new Error('dns: peer.example is unreachable')
+        },
+      },
+    })
+    seedLeaf(h.storage, ALICE, ALICE_DEVICE)
+    const seq = h.enqueue(ALICE, ALICE_DEVICE)
+
+    await h.worker.runOnce()
+
+    const [row] = queued(h.storage)
+    expect(row?.seq).toBe(seq)
+    expect(row?.attempts).toBe(1)
+    expect(h.logs.some((line) => line.includes('is unreachable'))).toBe(true)
+  })
 })
 
 describe('retention is bounded (§12.6)', () => {
@@ -398,6 +483,7 @@ describe('retention is bounded (§12.6)', () => {
         storage,
         registry: createSubscriberRegistry(),
         locator: locatorOf([PEER]),
+        deviceResolver: deviceResolverOf('eligible'),
         locateOptions,
         log: (line) => logs.push(line),
         now: () => new Date(clock),

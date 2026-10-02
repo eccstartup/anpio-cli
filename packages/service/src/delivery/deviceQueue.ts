@@ -12,9 +12,13 @@
 //      `dueDeviceEnvelopes` 已经把这条规则做进查询里（队头没到期的队列一行都不返回），这里
 //      只负责"这条失败之后别再碰它的后续行"。
 //   2. **投递前的资格复核**。§12.6 第 3 条：入队前与**每次投递尝试前**都要拿当前资格复核，
-//      让投递在一台不再是当前合格 leaf 的设备上停下。两个例外也在这里：§12.3 的最终 Remove
-//      通知（它生来就是发给一台已经不在群里的设备的），以及**已经被移除的那条 leaf 队列里
-//      已经入队的信封**（§12.3 选定的 SHOULD 那条：让它们按序投完，最终通知压在最后）。
+//      让投递在一台不再是当前合格 leaf 的设备上停下。两层：投影（`group_leaves` /
+//      `group_members`）判"它还是不是这个群当前的 leaf"，对方的**当前 DID 文档**判"它还是不是
+//      主人清单里的一台设备"。第二层非做不可——一台设备被主人从清单里删掉，不经过任何我们看得
+//      见的控制动作，只有再读一次文档才知道，而 P6 §10.4 L1074 要求 Host MUST NOT 继续向一台
+//      已撤销的设备投递新的服务数据。两个例外也在这里：§12.3 的最终 Remove 通知（它生来就是发
+//      给一台已经不在群里的设备的），以及**已经被移除的那条 leaf 队列里已经入队的信封**
+//      （§12.3 选定的 SHOULD 那条：让它们按序投完，最终通知压在最后）。
 //   3. **本地投递**。收件人就住在本服务上时不走 HTTP 回环（与 P4 worker 同一条理由），而是
 //      直接推给它自己那条 WebSocket 订阅——P6 的信封在 `deliveries` 里没有行，所以这里没有
 //      第二条路可走（[e2ee-group.md] §6 记了为什么不给它写行）。设备不在线不当成失败：推一次
@@ -33,14 +37,18 @@
 
 import {
   discoverMessageService,
+  DidDeviceResolver,
   DidServiceLocator,
   postNotification,
   type AnpNotification,
+  type DeviceResolver,
   type LocateOptions,
   type ServiceLocator,
 } from '@agentx/core'
 import type { Config } from '../config'
 import { isOurOwnIngress } from '../http/server'
+import { checkDevice, isRejection } from '../rpc/eligibility'
+import { GROUP_E2EE_DEVICE } from '../rpc/groupE2ee'
 import type { Storage, StoredDeviceEnvelope } from '../storage/types'
 import type { SubscriberRegistry } from '../stream/registry'
 
@@ -61,6 +69,9 @@ export interface DeviceQueueOptions {
   registry: SubscriberRegistry
   /** 默认 core 的 `DidServiceLocator`。可换，是为了让测试不必上网就能回答"对端的入口在哪"。 */
   locator?: ServiceLocator
+  /** 默认 core 的 `DidDeviceResolver`。与 {@link locator} 同一个理由可换：投递前的资格复核
+   *  要读对方的 `deviceManifest`，测试不该为此上网。 */
+  deviceResolver?: DeviceResolver
   locateOptions?: LocateOptions
   log?: (line: string) => void
   now?: () => Date
@@ -93,6 +104,7 @@ function queueKey(did: string, deviceId: string): string {
 export function createDeviceQueueWorker(options: DeviceQueueOptions): DeviceQueueWorker {
   const { config, storage, registry } = options
   const locator = options.locator ?? new DidServiceLocator()
+  const deviceResolver = options.deviceResolver ?? new DidDeviceResolver()
   const locateOptions = options.locateOptions ?? config.didResolution
   const log = options.log ?? ((line: string): void => void process.stderr.write(`${line}\n`))
   const now = options.now ?? ((): Date => new Date())
@@ -113,9 +125,7 @@ export function createDeviceQueueWorker(options: DeviceQueueOptions): DeviceQueu
   }
 
   /**
-   * §12.6 第 3 条的复核：这条信封现在还能不能投给这台设备。
-   *
-   * 判据只有两个来源，都在投影里：
+   * §12.6 第 3 条的复核，**第一层**：只读投影能得出的结论。
    *
    *   - leaf 行是 `terminal`（这台设备已经被 Remove 掉了）→ **能投**。这是第 3 条点名的第二个
    *     例外：§12.3 选定的那条路要求把已经入队的应用信封按序投完，最终通知压在最后；而"被移除
@@ -124,20 +134,20 @@ export function createDeviceQueueWorker(options: DeviceQueueOptions): DeviceQueu
    *   - leaf 行是 `active`，但它的 `member_did` 已经不是 P4 `active` 成员 → **不能投**，留在
    *     队里。这是 §10.4 L1074 / §10.5 L1094 的中间态：整个成员要在 MLS 那边收尾，中间的 epoch
    *     MUST NOT 承载应用消息。等 owner 把这条 leaf Remove 掉，上面的第一条就接管了。
-   *   - leaf 行是 `active`、成员也是 → **能投**。
+   *   - leaf 行是 `active`、成员也是 → **还要再问一层**（`'check'`），见 {@link deliver}。
    *
    * `final-notice` 直接放行：它生来就是发给一台已经不在群里的设备的，第 3 条把它列成第一个
    * 例外。
    */
-  function deliverable(row: StoredDeviceEnvelope): boolean {
-    if (row.kind === FINAL_NOTICE) return true
+  function projected(row: StoredDeviceEnvelope): 'deliver' | 'hold' | 'check' {
+    if (row.kind === FINAL_NOTICE) return 'deliver'
     // leaf 行不会被删（`upsertGroupLeaf` 的注释），所以查不到只可能是队列行与投影对不上——
     // 这种行没有投递对象，按不可投处理（下一轮由超龄闸门收掉）。
     const leaf = storage.groupLeaf(row.groupDid, row.recipientDid, row.recipientDeviceId)
-    if (leaf === undefined) return false
-    if (leaf.state === 'terminal') return true
+    if (leaf === undefined) return 'hold'
+    if (leaf.state === 'terminal') return 'deliver'
     const member = storage.groupMember(row.groupDid, row.recipientDid)
-    return member !== undefined && member.membershipStatus === 'active'
+    return member !== undefined && member.membershipStatus === 'active' ? 'check' : 'hold'
   }
 
   /**
@@ -160,13 +170,38 @@ export function createDeviceQueueWorker(options: DeviceQueueOptions): DeviceQueu
       return drop(`queued longer than the ${maxQueueAgeMs}ms retention bound`)
     }
 
-    if (!deliverable(row)) {
+    const step = projected(row)
+    if (step === 'hold') {
       // 不动它，也不重排：它是一个**临时**状态（成员要收尾），到期的那一天由 owner 的 Remove
       // 打开，或被保留上限收掉。重排反而会把"等我"记成"我失败了"。
       return false
     }
 
     try {
+      // 第二层：对方的**当前**文档里还有没有这台设备。投影说不了这件事——一台设备被主人从
+      // `deviceManifest` 里删掉，不经过任何我们看得见的控制动作，只有再读一次文档才知道。
+      // P6 §10.4 L1074 要的就是这个：Host MUST NOT 继续把新的服务数据投给一台已撤销的设备。
+      //
+      // 放在 `try` 里是有意的：**解析不到**（对端 DID 服务器不可达）不是"这台设备没了"，那是
+      // 一次投递失败，应当记一次尝试、退避重试。只有文档取回来了、而它里面没有这台设备
+      // （或它的钥引用不再被授权），才是一个**判定**。
+      if (step === 'check') {
+        const outcome = await checkDevice({
+          resolver: deviceResolver,
+          requirement: GROUP_E2EE_DEVICE,
+          identity: row.recipientDid,
+          deviceId: row.recipientDeviceId,
+          opts: locateOptions,
+        })
+        if (isRejection(outcome)) {
+          // 投影还说它是个 leaf，文档里已经没有它了：主人的清单比我们的投影新。留在队里没有
+          // 意义——它等的那一天不会来（`group.e2ee.remove` 只会把这条 leaf 转成 terminal，而
+          // 那是"按序投完再补一封最终通知"的待遇，不是发给一台已撤销设备的）。丢弃并记一笔，
+          // 与 §12.6 对每一种信封写明的丢弃处置一致。
+          return drop(`no longer an eligible device: ${outcome.message}`)
+        }
+      }
+
       const target = await discoverMessageService(row.recipientDid, { locator, ...locateOptions })
       if (isOurOwnIngress(config, target.endpoint)) {
         // P6 的信封在 `deliveries` 里没有行，所以不能像 P4 那样"已经在本机躺着了"就丢掉——
