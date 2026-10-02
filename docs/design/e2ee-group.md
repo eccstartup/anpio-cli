@@ -435,13 +435,17 @@ outbox 按 DID），所以那是两处"到限即弃"，不是一处。
 -- 每群至多一行。progress 记当前编排走到哪一步，不是协议字段
 CREATE TABLE group_did_updates (
   group_did        TEXT PRIMARY KEY,
-  event_ref_json   TEXT NOT NULL,   -- 被引用的 P4 member-did-updated 的 group_state_ref
+  event_ref_json   TEXT NOT NULL,   -- 这次 member-did-updated：group_state_ref + 两个 DID
   progress         TEXT NOT NULL,   -- add-pending | remove-pending
   expected_json    TEXT NOT NULL,   -- 待处理的确切 (did, device) 列表
   done_json        TEXT NOT NULL,   -- 已成功的
   started_at       TEXT NOT NULL
 );
 ```
+
+`event_ref_json` 里除了被引用事件的 `group_state_ref`，还存着 `previous_subject_did` /
+`subject_did` 两个 DID：编排每一步都要用到它们（新 DID 用来认出"这次更新的 Add"、旧 DID 用来
+拒掉瞄向别处的 Remove），而从 `group_state_ref` 再推一次没有意义。
 
 串行化不需要新机制：`BEGIN IMMEDIATE`（C4 已定）就是"同一时刻只有一个控制动作在改这个群"。
 §13.4 L1646 的"拒绝或延后无关的 Add/Remove"落成事务内的一个检查——
@@ -451,17 +455,30 @@ CREATE TABLE group_did_updates (
 `group.e2ee.state_not_ready`（5004）——§17 L1933 明确说 DID 更新编排"状态尚未就绪"时复用
 这个码，**不新增专属错误码**。
 
-**落地（2026-10-02）：判据从投影现算，不走 `group_did_updates`。** 投影里有一条 active
-leaf，它的 `member_did` 已经不是 P4 `active` 成员——那正是"整个 P4 成员变 `removed` /
-`left`，而 MLS 那边还没收尾"这句话的可观测形态（`create` / `add` / `remove` 建立 leaf 时
-那个 DID 是 active 的）。`group_did_updates` 的行语义对，但**它今天没有写入者**：编排由
-P4 的 `member-did-updated` 事件触发，而本服务的 P4（C9）没有接受这种事件。表与访问器留着，
-等那条事件存在时再把编排接到 `send` 前面；今天投影现算判的是同一件事，且不需要一行新状态。
+**落地（2026-10-02）：两个证人取或，编排行有写入者了。** 暂停由两处任一成立，`paused()`
+（`rpc/groupControl.ts`）：
+
+- **投影现算**。投影里有一条 active leaf，它的 `member_did` 已经不是 P4 `active` 成员——那
+  正是"整个 P4 成员变 `removed` / `left`，而 MLS 那边还没收尾"这句话的可观测形态
+  （`create` / `add` / `remove` 建立 leaf 时那个 DID 是 active 的）。§8.12 的改名**只换成员行、
+  不动 leaf**，所以旧 DID 的 leaf 从改名那一刻起就落进这句话里，直到最后一次 Remove 把它转成
+  `terminal`。这一条是**重建**出来的，重启后照样判得出来。
+- **编排行剩余工作**。`applyMemberDidUpdate`（`rpc/groups.ts`）在"这次更新还留着旧 DID 的 leaf
+  要退役"时开行，`expected` = 那批 leaf。它不是投影那条的替代而是补强：投影记的是"有一件没收尾
+  的事"，编排行记的是**哪一次**更新、还差哪些 leaf——`add` / `remove` 的受理要用到后者。
+  一行陈旧到没有剩余工作时不算数（读完还剩余为空的残留、或崩溃留下的），投影才是权威。
+
+写入者不是 P4 的 `member-did-updated` 事件：§8.12 那个 `group.member_did_update` 是**宿主动作
+标识符，不是 JSON-RPC 方法**（客户端调它 MUST 得 `-32601`）。行由 Host 自己执行改名的那一步
+（`applyMemberDidUpdate`）就地写下。验收见 `rpc/groupControl.test.ts` 的 §10.5 那一节。
 
 **设备级撤销那个例外不进入这个状态**：§10.4 L1074 说此时 Host **MUST NOT** 仅因该 leaf
 尚未移除就暂停其它合法 `group.e2ee.send`。所以暂停态只由**整个 P4 成员**的 DID 更新建立——
-`group_did_updates` 只由那条事件建行，投影现算也只认"DID 已非 active 成员"这一条，单台设备
-被撤销两者都不触发。
+投影现算只认"DID 已非 active 成员"这一条，编排行也只由换 DID 建行，单台设备被撤销两者都不触发。
+
+**串行化的边界**：§10.5 要"全部 Add 成功之后才有第一个 Remove"，而 Host 数不出 owner 一共选了
+几台新设备（那是 owner 按 §11.12 第 2 步自己枚举的）。所以第一次被接受的 Remove 被记成"Add
+阶段结束"，而不是"Host 核对过 Add 都成功了"——那行随之翻成 `remove-pending`。
 
 ## 9. `group.incoming` 要无损保存一份 proof
 
@@ -572,10 +589,9 @@ Host 无法区分"第一次进群"与"重新加入"（§10.3 L1066 的触发条�
 - **自动 owner MLS 恢复**：§11.12 L1402 要求 fail closed，Host **MUST NOT** 下发
   当前或历史 epoch secret。
 - **`group_receipt.proof`**：同 C9 的结论（[groups.md](groups.md) §7），v1 不签。
-- **`group_did_updates` 的编排**：表与访问器已在，但触发它的 P4 `member-did-updated`
-  事件还没进本服务的 P4（C9），所以编排没有写入者。今天 `send` 的 5004 判据从投影现算
-  （[§8](#8-暂停与串行化host-状态机里唯一真状态)），判的是同一件事。串行化不需要新机制，
-  但**也还没有施加对象**——没有那条事件，就没有"编到一半"的中间态。
+- **`group_did_updates` 编排的两条触发路**：请求触发（"新 DID 来办事"）已落地；**投递触发**
+  （往旧 DID 投递时发现合规后继）与**定时刷新**（兜底周期扫描）还没有。编排本身、暂停、串行化
+  都已实现并施加于 `add` / `remove` / `send`，见 [§8](#8-暂停与串行化host-状态机里唯一真状态)。
 
 ## 13. 挡住 v1 的
 

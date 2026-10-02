@@ -95,14 +95,27 @@ KeyPackage 的 `did_wba_binding` Object Proof 由设备自签，验证侧从**�
       `member-did-updated`（正文带 `previous_subject_did` / `subject_did`，§7.10.2 L590）。
       触发面是 §8.12 L946 逐字那五个：四个无条件，`group.get_info` 只在**私有群**触发。
       比较并交换做在 `renameGroupMember` 的 `UPDATE ... WHERE member_did = <旧>` 上，返回 false
-      即"另一条触发路已经做过了"；操作标识是 `group_did + 旧 + 新` 的确定性摘要。`group_leaves`
-      的行跟着搬，新 DID 已有行的设备不搬。**§8.12 本身只覆盖了"新 DID 来办事"这一路**，
+      即"另一条触发路已经做过了"；操作标识是 `group_did + 旧 + 新` 的确定性摘要。
+      **`group_leaves` 一行都不动**（2026-10-02 更正：早先那版让 leaf 跟着搬，是错的——见 A3c-3
+      与 `applyMemberDidUpdate` 的注释）。**§8.12 本身只覆盖了"新 DID 来办事"这一路**，
       另外三路见下面三段。）
     - **A3c-2 投递触发。** 往旧 DID 投递时发现合规后继 → 先改完名册，再往**当前** DID 生成新的
       `group.incoming`。
-    - **A3c-3 P6 §10.5 编排。** 给 `group_did_updates` 一个写入者：暂停 → 逐设备 add 新 DID →
-      逐设备 remove 旧 DID → 恢复。**这一半不做完，群会停在 §10.5 自己规定的暂停中间态里**，
-      所以不能只做前两半。
+    - **A3c-3 P6 §10.5 编排（Host 一侧已落地）。** ~~给 `group_did_updates` 一个写入者。~~
+      （2026-10-02 落地：`applyMemberDidUpdate` 在"这次更新还留着旧 DID 的 leaf 要退役"时开一行
+      `group_did_updates`，`expected` = 那批旧 leaf、进度 `add-pending`；`groupControl.ts` 的
+      `paused()` 用**投影**（有一条 active leaf 的 DID 已不是 active 成员——§8.12 不动 leaf 正是
+      为了让它自动成立，重启后照样判得出来）与**编排行剩余工作**两个证人取或，于是改名一落定群
+      就停收新的 `group.e2ee.send`。串行化：这次更新的 `group.e2ee.add` 只能加新 DID 的设备、
+      `group.e2ee.remove` 只能退役旧 DID 的 leaf，其余一律 5004（与暂停同码——对调用方是同一件
+      事）。**业主义务 Host 判不了**：§10.5 要"全部 Add 成功之后才有第一个 Remove"，而 Host
+      数不出 owner 选了几台新设备，所以第一次被接受的 Remove 就是"Add 阶段结束"的可观测信号，
+      那行随之翻成 `remove-pending`；最后一次 Remove 清掉该行、旧 leaf 转 `terminal`，投影与编排行
+      同时解除暂停。）
+
+      校验与端到端测试在 `rpc/groupControl.test.ts` 的 "orchestrating the MLS side of a DID
+      change (§10.5)"：开行/暂停、无关 Add 被拒、无关 Remove 被拒、匹配 Remove 收尾并恢复发送。
+      **A3c-2 的投递侧与 A3c-4 的定时扫描仍未做**——前者是"往旧 DID 投递时触发更新"，后者是兜底。
     - **A3c-4 定时刷新。** 用户裁定的低负载周期扫描，兜住"对端 DID 服务器已更新、而我们还没被
       任何请求或投递碰到"这一档。
 
