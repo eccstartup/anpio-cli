@@ -167,19 +167,6 @@ function keyLocationFacts(location: StoreLocation): {
   return { keyFile: location.keyFile, keyExists, keyMode }
 }
 
-/** Whether this identifier is a DID at all. A CAIP-10 account id (`eip155:1:0x…`) is
- *  not: it names an account, and there is no host to fetch a document from. `didHost`
- *  is the SDK's own edge for that — the same call `didToUrl` needs, and the same one
- *  `didChainOptions` reads to decide a chain cannot be walked. */
-function isDidIdentifier(did: string): boolean {
-  try {
-    didHost(did)
-    return true
-  } catch {
-    return false
-  }
-}
-
 /** The label/value a binding key prints as — in the representation the profile
  *  publishes, which is the one the DID document carries (`DidPublicKey`): a `Multikey`
  *  Ed25519 key shows its multibase, a secp256k1 key shows its JWK (Appendix A A.4). */
@@ -227,9 +214,13 @@ function currentLocation(v: Values): StoreLocation {
  *  local-key half of `anp show` — render through here, so they cannot describe one
  *  identity two ways.
  *
- *  `document` is false when the identifier is not a DID (see `isDidIdentifier`). Nothing
- *  is published at a resolvable URL for an account id, so printing a document there would
- *  assert a wire object no peer can fetch.
+ *  `document` says whether this identity has a document a peer could fetch, which decides
+ *  both the identifier's label and whether the document is printed at all (nothing is
+ *  published at a resolvable URL for an account id, so printing one there would assert a
+ *  wire object no peer can fetch). It is the CALLER's to state, from what it already
+ *  knows about the identity it built — the CLI must not re-derive an identifier's kind
+ *  from its string ([vendored-core.md] §6.3: that judgment lives in the locator, and
+ *  copying it here is what closes the gate for identities of other kinds).
  *
  *  The document is printed indented, on its own, the same way `did resolve` prints the
  *  one it fetches: it is a nested structure with a long `id`, and inlining it produces
@@ -334,7 +325,10 @@ async function runAnpShow(v: Values): Promise<void> {
       location,
       key,
       json: v.json === true,
-      document: isDidIdentifier(identity.did),
+      // The chain path's contract, not a reading of the string: `--wallet web3`
+      // requires `--address`/`--chain-id` (see `buildConnector`), so this identity is a
+      // CAIP-10 account id and nothing is published for a peer to fetch.
+      document: false,
     })
     return
   }

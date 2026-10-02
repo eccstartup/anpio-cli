@@ -106,13 +106,22 @@ KeyPackage 的 `did_wba_binding` Object Proof 由设备自签，验证侧从**�
 - **B2（= TODO1 E4，端到端）** `connectx msg send` → `AgentXAgent` → `connectx msg listen` 收到。
   今天 P4/P5/P6 都是**方法级**测过、**没串起来端到端跑过**。A1/A2 定了之后，这条应该顺带把
   P6 也串进去。
-- **B3（= TODO1 A7 尾）** `packages/service` 里不得直连 `resolveDidDocument`——消息定址一律走
+- ~~**B3（= TODO1 A7 尾）** `packages/service` 里不得直连 `resolveDidDocument`——消息定址一律走
   `ServiceLocator` / `KeyResolver`。core 里那 5 处与 CLI 那 2 处是 ANP-02/03/04 自己的解析，
-  **留着**，只有 service 这一侧要收敛（E3 的评审清单钉这条）。
+  **留着**，只有 service 这一侧要收敛（E3 的评审清单钉这条）。~~
+  （2026-10-02 核过：`packages/service/src` 里 `resolveDidDocument` / `resolveDidChain` **零处**，
+  全部经 `ServiceLocator` / `KeyResolver` / `DeviceResolver`。这条是早期收敛留下的结论，今天
+  不需要改动。）
 - **B4（= TODO1 E2 缺口）** `help.test.ts` 的第三条门禁读 `skill/connectx/SKILL.md`，而那份
   skill 没搬过来，已随删除记录。要搬 skill 就把它一起恢复。
-- **B5（= TODO1 E3）** 评审清单：CLI 与服务端里**不得出现 `isDid()` 之类的身份类型分支**
-  （[vendored-core.md](docs/design/vendored-core.md) §6.3）。
+- ~~**B5（= TODO1 E3）** 评审清单：CLI 与服务端里**不得出现 `isDid()` 之类的身份类型分支**
+  （[vendored-core.md](docs/design/vendored-core.md) §6.3）。~~
+  （2026-10-02 审过并修掉唯一一处：`packages/cli/src/commands/auth.ts` 的 `isDidIdentifier`
+  用 `didHost` 试一下再决定 `printIdentity` 印 `did:` 还是 `account:`，正是 §6.3 说的"在命令层
+  复制一份判断"——[locator.ts](packages/core/src/message/locator.ts) 的 `isDidIdentity` 注释
+  已写明那份判定"只在这里使用"。改法是**不由 CLI 判**：`--wallet web3` 这条路径的契约本就要求
+  `--address` / `--chain-id`（`buildConnector`），产出的必然是 CAIP-10 账户 id，所以 `document`
+  由调用点按自己已知的事实传 `false`，并删掉那个助手。service 侧 `isDid` 零处。）
 - **B6（= TODO1 CI）** 仓库里没有 `.github/workflows`，`gh run list` 为空——门禁目前只能在本地
   按 job 分组跑。要真正的 CI 得补 workflow（我可以写，但 `.github/` 那条路径和要不要跑在
   GitHub 上得你定）。
