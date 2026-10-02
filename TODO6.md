@@ -84,7 +84,7 @@
       页面顶部有一句"`connectx` 已冻结、其余指南仍是 connectx 写法、正在迁移"——站点对自己的
       过渡状态说实话，而不是自相矛盾。导航标签、站点描述与**八处**入站链接文本一并改名；
       `npx vitepress build` 全页渲染、无死链。
-- [ ] **文档站其余页面里的 `connectx` 例子还没换。** 参考页已指向 `agentx-cli`，但
+- [x] ~~**文档站其余页面里的 `connectx` 例子还没换。**~~ 参考页已指向 `agentx-cli`，但
       `quickstart.md`、`introduction.md`、`messages.md`、`realtime.md`、`groups.md`、`e2ee.md`、
       `deploy.md` 的**正文**仍在教 `npx connectx …`（各自 ×2 语言）。按 2.1 的裁定
       （`connectx`"不再是文档入口"）这些都该换，但那是一次跨十来页的正文改写，且 `quickstart`
@@ -95,10 +95,21 @@
       一句"a lifecycle CLI for AI coding agents"，2026-05-10 发的 0.1.0，唯一一版）。本仓库
       `rust/Cargo.toml` 的 `version = "0.0.0"`、从没发过。所以第一，**不许写
       `cargo install agentx-cli`**——那会装到别人家去；第二，甲案里 quickstart 的安装段只能
-      落成"从源码 build"（`git clone` + `cargo build --release -p agentx-cli`，二进制叫 `agentx`），
+      落成"从源码 build"（`cargo build --release --manifest-path rust/Cargo.toml`；**二进制叫
+      `agentx-cli`**，`agentx` 是同一个 crate 的 lib 名，别混），
       除非先决定改名或先决定发布。这两件都是独立决定，不在本条里顺带做。
-      —— **2026-10-03 裁定：甲**（用户："一三按建议"）。就是现在整体换。安装段照上一段
-      落成"从源码 build"，**不写 `cargo install`**。下面在做。
+      —— **2026-10-03 裁定：甲**（用户："一三按建议"）。就是现在整体换。
+      —— **2026-10-03 完成（`385fa8d`）**：站上 7 个指南页（quickstart / introduction /
+      messages / realtime / groups / e2ee / deploy）+ 首页 + 订阅页，**各 ×2 语言**的正文
+      全换成 `agentx-cli`；quickstart 的安装段落成"从源码 build"，参考页与快速开始各有一句
+      "crates.io 上那个 `agentx-cli` 是别的项目、别 `cargo install`"。`npx vitepress build`
+      全页渲染、无死链（vitepress 本就查死链）。顺带改掉两处**因为这次换才变成假话**的地方：
+      参考页顶部"其余指南仍是 connectx 写法、正在迁移"那半句，以及 `msg listen` 的长帮助里
+      那句 "Nothing is stored locally"（`3ff2084`）——后者是 messages.db 落地后留下的，
+      与这次换无关但同一类。
+      **故意留着**的 `connectx` 字样只有三类：参考页的"已冻结"横幅、`ConnectxError` 这个 TS
+      类名（服务端与 `@agentx/cli` 共用，重命名它不在本条的射程内）、以及"不碰旧
+      `~/.connectx/`"那句对照。
 - [x] **`skill/connectx/SKILL.md`：按 2.1 改名/重写，并**把 `help.test.ts` 的门禁跟着改**
       （它拿 skill 里逐字给出的调用去和命令面对账，命令面变了它就该红）。
       —— 2026-10-02 完成（`6063fd0`）：`skill/connectx/SKILL.md` → **`skill/agentx-cli/SKILL.md`**，
