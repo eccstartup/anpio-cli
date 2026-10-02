@@ -52,6 +52,27 @@ pub const GROUP_JOIN: &str = "group.join";
 pub const GROUP_LEAVE: &str = "group.leave";
 pub const GROUP_SEND: &str = "group.send";
 
+/// P6 §4.1: the group E2EE family's Profile and its six methods.
+///
+/// The six do not split the way P4's do. Three are addressed to the *service* — the two
+/// KeyPackage methods, whose cabinet lives there, and `group.e2ee.create`, which asks for a
+/// group that has no DID yet to address — and three (`add` / `remove` / `send`) are addressed
+/// to the *group*, so `meta.target` is a parameter here exactly as it is in P4, and for the
+/// same reason: it is inside the signature.
+///
+/// The method names and the Profile live here with the rest of the wire vocabulary; the
+/// policy that goes *in* them is `crate::group_e2ee`.
+pub const GROUP_E2EE_PROFILE: &str = "anp.group.e2ee.v2";
+/// P6 §4.3 L273: the four control methods are read at `group-e2ee`, one notch above the
+/// transport-only default the two KeyPackage methods keep (L272).
+pub const GROUP_E2EE_SECURITY_PROFILE: &str = "group-e2ee";
+pub const PUBLISH_KEY_PACKAGE: &str = "group.e2ee.publish_key_package";
+pub const GET_KEY_PACKAGE: &str = "group.e2ee.get_key_package";
+pub const GROUP_E2EE_CREATE: &str = "group.e2ee.create";
+pub const GROUP_E2EE_ADD: &str = "group.e2ee.add";
+pub const GROUP_E2EE_REMOVE: &str = "group.e2ee.remove";
+pub const GROUP_E2EE_SEND: &str = "group.e2ee.send";
+
 /// P1 §8.2.1: a capabilities probe explains itself under the core binding.
 pub const GET_CAPABILITIES: &str = "anp.get_capabilities";
 pub const CORE_BINDING: &str = "anp.core.binding.v1";
@@ -158,6 +179,10 @@ pub struct Sender {
     pub keyid: String,
     pub agent: String,
     pub profile: String,
+    /// Which device of that identity this run is. P1 §6.2.4.1 requires it inside P5/P6 and
+    /// forbids it everywhere else, so it rides along and only [`call_device`] puts it on the
+    /// wire — a `Sender` is not a device until a Profile says the caller is one.
+    pub device_id: String,
     signing_key: PrivateKeyMaterial,
 }
 
@@ -189,6 +214,7 @@ impl Sender {
             keyid: format!("{}#key-1", identity.did),
             agent: identity.agent.clone(),
             profile: identity.profile.clone(),
+            device_id: identity.device_id.clone(),
             signing_key,
         })
     }
@@ -242,7 +268,14 @@ pub struct CallRequest {
     pub method: String,
     pub profile: String,
     pub target: AnpTarget,
+    /// The `group_policy`/`group_key_package`-shaped object this call carries.
     pub body: Map<String, Value>,
+    /// P1 §6.2.4.1: MUST inside P5/P6, MUST NOT appear outside them. Only [`call_device`]
+    /// sets it, from the sender's own device.
+    pub sender_device_id: Option<String>,
+    /// P1 §6.2.3. `None` is `transport-protected`, which is every family but P6's four
+    /// control methods (P6 §4.3 L272–273 draws that line).
+    pub security_profile: Option<String>,
     /// P1 §6.2.7: a message-bearing operation MUST carry it. Set by `direct.send` and
     /// `group.send`, absent on a state change.
     pub message_id: Option<String>,
@@ -269,6 +302,8 @@ pub fn sign_request(sender: &Sender, id: &str, request: CallRequest) -> Result<A
         profile,
         target,
         body,
+        sender_device_id,
+        security_profile,
         message_id,
         content_type,
         operation_id,
@@ -276,8 +311,9 @@ pub fn sign_request(sender: &Sender, id: &str, request: CallRequest) -> Result<A
 
     let meta = AnpMeta {
         profile,
-        security_profile: TRANSPORT_PROTECTED.to_string(),
+        security_profile: security_profile.unwrap_or_else(|| TRANSPORT_PROTECTED.to_string()),
         sender_did: Some(sender.did.clone()),
+        sender_device_id,
         target: Some(target),
         operation_id: Some(operation_id.unwrap_or_else(uuid_v4)),
         created_at: Some(now_rfc3339()),
@@ -370,6 +406,8 @@ pub async fn call_extension(
                 did: channel.sender.did.clone(),
             },
             body,
+            sender_device_id: None,
+            security_profile: None,
             message_id: None,
             content_type: None,
             operation_id: None,
@@ -418,6 +456,8 @@ pub async fn call_group(
             profile: GROUP_PROFILE.to_string(),
             target,
             body,
+            sender_device_id: None,
+            security_profile: None,
             message_id: None,
             content_type: None,
             operation_id: None,
@@ -425,6 +465,69 @@ pub async fn call_group(
     )
     .await?;
 
+    result_of(method, subject, response)
+}
+
+/// A `group.e2ee.*` call of P6 `anp.group.e2ee.v2`.
+///
+/// The two reasons this is not [`call_group`] with more arguments are both in `meta`, and
+/// both are things the caller must not choose: the Profile is `anp.group.e2ee.v2` (§4.3
+/// L264), and `sender_device_id` is present because §4.3 L266 makes it mandatory — every P6
+/// request is from a *device*, which is why the sender's own device is the only value that
+/// can go there.
+///
+/// The Profile's security mode is the one thing that does vary by method, and P6 §4.3
+/// L272–273 states the split itself, so [`group_e2ee_security_profile`] reads it rather than
+/// leaving the choice to each call site.
+pub async fn call_device(
+    client: &reqwest::Client,
+    channel: &Channel,
+    method: &str,
+    target: AnpTarget,
+    body: Map<String, Value>,
+    subject: &str,
+) -> Result<Value> {
+    let response = call(
+        client,
+        &channel.sender,
+        &channel.endpoint,
+        CallRequest {
+            method: method.to_string(),
+            profile: GROUP_E2EE_PROFILE.to_string(),
+            target,
+            body,
+            sender_device_id: Some(channel.sender.device_id.clone()),
+            security_profile: Some(group_e2ee_security_profile(method).to_string()),
+            message_id: None,
+            content_type: None,
+            operation_id: None,
+        },
+    )
+    .await?;
+
+    result_of(method, subject, response)
+}
+
+/// P6 §4.3 L272–273: the two KeyPackage methods (and `notice`) are read at
+/// `transport-protected`, the four control methods at `group-e2ee`.
+///
+/// The spec's first group also names `group.e2ee.notice`, which this client never *calls* —
+/// it is agent-addressed and arrives as a `group.incoming` delivery — so the match below is
+/// the two KeyPackage methods or the four control ones, and nothing falls between them.
+///
+/// Written as the spec's own split rather than as a flag on each call site: which of the two
+/// a method belongs to is a fact about the method, and a call site that got it wrong would
+/// produce a request the receiver refuses for a reason that reads like an auth failure.
+pub fn group_e2ee_security_profile(method: &str) -> &'static str {
+    match method {
+        PUBLISH_KEY_PACKAGE | GET_KEY_PACKAGE => TRANSPORT_PROTECTED,
+        _ => GROUP_E2EE_SECURITY_PROFILE,
+    }
+}
+
+/// Success and refusal are both answers, and only the caller knows which it can act on — so
+/// a refusal becomes an error here, attributed to `subject`.
+fn result_of(method: &str, subject: &str, response: AnpResponse) -> Result<Value> {
     match response {
         AnpResponse::Success { result, .. } => Ok(result),
         AnpResponse::Error { error, .. } => Err(rejection(

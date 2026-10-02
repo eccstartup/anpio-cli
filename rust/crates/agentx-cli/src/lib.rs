@@ -11,7 +11,9 @@
 
 pub mod error;
 pub mod group;
+pub mod group_e2ee;
 pub mod identity;
 pub mod message;
+pub mod mls;
 
 pub use error::{AgentxError, Result};

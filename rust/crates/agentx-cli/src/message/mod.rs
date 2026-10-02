@@ -18,13 +18,15 @@ pub mod rpc;
 pub mod stream;
 
 pub use channel::{
-    call, call_extension, call_group, discover, extension_rejection, is_error, now_rfc3339,
-    open_channel,
-    open_channel_for, payload_of, policy_for, rejection, relaxed_hosts, sign_request, uuid_v4, CallRequest, Channel,
-    Endpoint, Payload, Sender, CORE_BINDING, DID_SUPERSEDED, DIRECT_PROFILE, DIRECT_SEND,
-    EXTENSION_PROFILE, GET_CAPABILITIES, GROUP_CREATE, GROUP_GET_INFO, GROUP_JOIN, GROUP_LEAVE,
-    GROUP_PROFILE, GROUP_SEND, INBOX_GET, INBOX_MARK_READ, MESSAGE_GET_BATCH, METHOD_NOT_FOUND,
-    TRANSPORT_PROTECTED, UNSUPPORTED_PROFILE,
+    call, call_device, call_extension, call_group, discover, extension_rejection,
+    group_e2ee_security_profile, is_error, now_rfc3339, open_channel, open_channel_for, payload_of,
+    policy_for, rejection, relaxed_hosts, sign_request, uuid_v4, CallRequest, Channel, Endpoint,
+    Payload, Sender, CORE_BINDING, DID_SUPERSEDED, DIRECT_PROFILE, DIRECT_SEND, EXTENSION_PROFILE,
+    GET_CAPABILITIES, GET_KEY_PACKAGE, GROUP_CREATE, GROUP_E2EE_ADD, GROUP_E2EE_CREATE,
+    GROUP_E2EE_PROFILE, GROUP_E2EE_REMOVE, GROUP_E2EE_SECURITY_PROFILE, GROUP_E2EE_SEND,
+    GROUP_GET_INFO, GROUP_JOIN, GROUP_LEAVE, GROUP_PROFILE, GROUP_SEND, INBOX_GET, INBOX_MARK_READ,
+    MESSAGE_GET_BATCH, METHOD_NOT_FOUND, PUBLISH_KEY_PACKAGE, TRANSPORT_PROTECTED,
+    UNSUPPORTED_PROFILE,
 };
 pub use client::http_client;
 pub use discovery::{
@@ -41,8 +43,8 @@ pub use listen::{
     ListenEvent, ListenMessage, ListenState, ListenView,
 };
 pub use resolve::{
-    assert_allowed_host, did_host, did_to_url, document_is_bound, document_url,
-    is_loopback_host_name, resolve_did_document, ResolvePolicy,
+    assert_allowed_host, did_host, did_to_url, document_in_crate_form, document_is_bound,
+    document_url, is_loopback_host_name, resolve_did_document, ResolvePolicy,
 };
 pub use rpc::{post_message, post_notification, AnpResponse};
 pub use stream::{

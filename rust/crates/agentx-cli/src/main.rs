@@ -11,19 +11,22 @@ use serde_json::{json, Map, Value};
 use std::sync::Arc;
 
 use agentx::group::{group_target, policy_of, service_target};
+use agentx::group_e2ee::{get_key_package_body, publish_body};
 use agentx::identity::{
     create_identity, fetch_host_service, register_identity, CreateIdentityInput, Identity,
     IdentityLocation,
 };
 use agentx::message::{
-    build_message_request, call, call_extension, call_group, device_of, discover, http_client,
-    now_rfc3339, open_channel, open_channel_for, parse_capabilities, payload_of, policy_for,
-    post_message, rejection, run_listen, uuid_v4, view_for, websocket_connect, AnpMeta, AnpResponse,
-    AnpTarget, CallRequest, Channel, ConnectFn, ListenArgs, ListenDeps, ResolvePolicy, Sender,
-    TargetKind, CORE_BINDING, DIRECT_PROFILE, DIRECT_SEND, DID_SUPERSEDED, GET_CAPABILITIES,
-    GROUP_CREATE, GROUP_GET_INFO, GROUP_JOIN, GROUP_LEAVE, GROUP_PROFILE, GROUP_SEND, INBOX_GET,
-    INBOX_MARK_READ, MESSAGE_GET_BATCH, TRANSPORT_PROTECTED,
+    build_message_request, call, call_device, call_extension, call_group, device_of, discover,
+    http_client, now_rfc3339, open_channel, open_channel_for, parse_capabilities, payload_of,
+    policy_for, post_message, rejection, run_listen, uuid_v4, view_for, websocket_connect, AnpMeta,
+    AnpResponse, AnpTarget, CallRequest, Channel, ConnectFn, ListenArgs, ListenDeps, ResolvePolicy,
+    Sender, TargetKind, CORE_BINDING, DIRECT_PROFILE, DIRECT_SEND, DID_SUPERSEDED,
+    GET_CAPABILITIES, GET_KEY_PACKAGE, GROUP_CREATE, GROUP_GET_INFO, GROUP_JOIN, GROUP_LEAVE,
+    GROUP_PROFILE, GROUP_SEND, INBOX_GET, INBOX_MARK_READ, MESSAGE_GET_BATCH, PUBLISH_KEY_PACKAGE,
+    TRANSPORT_PROTECTED,
 };
+use agentx::mls::{generate_key_package, new_key_package_id};
 
 #[derive(Parser)]
 #[command(
@@ -328,6 +331,71 @@ enum GroupCommand {
         #[command(flatten)]
         own: OwnIdentity,
     },
+    /// End-to-end encryption for groups (P6 `anp.group.e2ee.v2`).
+    ///
+    /// A subfamily rather than six more `group` verbs: P6 is a different Profile with its own
+    /// security modes (§4.3) and its own state — an MLS store this device owns, which no other
+    /// command touches. It also cannot be discovered from a group's document alone: the
+    /// Profile is deliberately not advertised yet (client-mls.md §6), so a caller has to know
+    /// which groups run it.
+    E2ee {
+        #[command(subcommand)]
+        command: GroupE2eeCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum GroupE2eeCommand {
+    /// Publish this device's KeyPackage so others can add it (P6 `group.e2ee.publish_key_package`).
+    ///
+    /// This is the one thing every device must do before it can be added to any encrypted
+    /// group: §8.2 has the group's owner fetch a *published* package for the member it is
+    /// adding (§9.3.3), so a device that never ran this cannot be invited. It is also the only
+    /// P6 call with no group involved — the service being asked is this identity's own.
+    Publish {
+        /// Name this package instead of letting the client mint an id. The id is filed both
+        /// here and in the service's cabinet, and the local store refuses a second package
+        /// under one it already holds — so this is for naming, not for retrying a publish.
+        #[arg(long = "key-package-id", value_name = "ID")]
+        key_package_id: Option<String>,
+        /// How long the published package claims to be valid. §7.3 makes `expires_at` a
+        /// SHOULD, so this is a hint rather than a gate.
+        #[arg(
+            long = "valid-days",
+            value_name = "DAYS",
+            default_value_t = agentx::mls::KEY_PACKAGE_VALID_DAYS
+        )]
+        valid_days: i64,
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        own: OwnIdentity,
+    },
+    /// Fetch a peer device's published KeyPackage (P6 `group.e2ee.get_key_package`).
+    ///
+    /// The read side of [`GroupE2eeCommand::Publish`]: §9.3.3 has whoever adds a member run
+    /// this to get the package the commit will cover. §8.2.4 lets the service **claim** the
+    /// package as it hands it out, so asking twice does not print the same package twice —
+    /// the second answer is the next one, or a refusal when the cabinet is empty.
+    GetKeyPackage {
+        /// The DID whose device to ask about.
+        #[arg(long = "target-did", value_name = "DID")]
+        target_did: String,
+        /// That DID's device id — the other half of what names one KeyPackage.
+        #[arg(long = "target-device", value_name = "ID")]
+        target_device: String,
+        /// A suite the caller would rather have. §8.2.2 puts this in a MAY and gives it no
+        /// meaning; the service checks only that it is a non-empty string.
+        #[arg(long = "suite", value_name = "SUITE")]
+        suite: Option<String>,
+        /// Refuse an expired package rather than falling back to one (P6 §8.2.4 L763).
+        #[arg(long = "require-fresh")]
+        require_fresh: bool,
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        own: OwnIdentity,
+    },
 }
 
 /// How many unread ids `msg read --all` asks for at a time.
@@ -469,6 +537,42 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .await
             }
+            GroupCommand::E2ee { command } => match command {
+                GroupE2eeCommand::Publish {
+                    key_package_id,
+                    valid_days,
+                    json,
+                    own,
+                } => {
+                    cmd_group_e2ee_publish(
+                        &own,
+                        key_package_id,
+                        valid_days,
+                        json,
+                        &allow_private,
+                    )
+                    .await
+                }
+                GroupE2eeCommand::GetKeyPackage {
+                    target_did,
+                    target_device,
+                    suite,
+                    require_fresh,
+                    json,
+                    own,
+                } => {
+                    cmd_group_e2ee_get_key_package(
+                        &own,
+                        target_did,
+                        target_device,
+                        suite,
+                        require_fresh,
+                        json,
+                        &allow_private,
+                    )
+                    .await
+                }
+            },
         },
     }
 }
@@ -663,6 +767,8 @@ async fn cmd_msg_send(
                 did: to.to_string(),
             },
             body: payload.body,
+            sender_device_id: None,
+            security_profile: None,
             message_id: Some(operation_id.clone()),
             content_type: Some(content_type),
             operation_id: Some(operation_id),
@@ -1202,6 +1308,8 @@ async fn cmd_group_send(
             profile: GROUP_PROFILE.to_string(),
             target: group_target(group_did),
             body: payload.body,
+            sender_device_id: None,
+            security_profile: None,
             message_id: Some(operation_id.clone()),
             content_type: Some(content_type),
             operation_id: Some(operation_id),
@@ -1224,6 +1332,132 @@ async fn cmd_group_send(
         )
         .into()),
     }
+}
+
+// ---- group e2ee ------------------------------------------------------------------
+
+/// Publish this device's KeyPackage (§8.1).
+///
+/// The order is the one the pieces have to come in: mint the package (which needs the
+/// identity and writes to the MLS store), then open the channel, then send. A mint that
+/// fails costs nothing on the network, and a channel that fails leaves a package in the
+/// store that a retry with the same `--key-package-id` will hand back unchanged.
+async fn cmd_group_e2ee_publish(
+    own: &OwnIdentity,
+    key_package_id: Option<String>,
+    valid_days: i64,
+    json: bool,
+    allow_private: &[String],
+) -> anyhow::Result<()> {
+    let location = IdentityLocation::new(&own.agent, &own.profile);
+    let identity = Identity::load(&location)?;
+    let key_package_id = key_package_id.unwrap_or_else(new_key_package_id);
+
+    let package = generate_key_package(
+        &location,
+        &identity,
+        &key_package_id,
+        chrono::Duration::days(valid_days),
+    )?;
+    let body = publish_body(&package)?;
+
+    let client = http_client()?;
+    let channel = open_channel(&client, &identity, allow_private).await?;
+    // The target is the service, as with `group.create`: §8.1.2 L697 spells out that
+    // `meta.target.did` is the servicing host's DID, and the device being published is
+    // `meta.sender_device_id` — the caller's own, which `call_device` fills in.
+    let target = service_target(&channel.endpoint.target)?;
+
+    let result = call_device(
+        &client,
+        &channel,
+        PUBLISH_KEY_PACKAGE,
+        target,
+        body,
+        &channel.sender.did,
+    )
+    .await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+    report_key_package_published(&result)?;
+    Ok(())
+}
+
+/// §8.1.3: the service's own record of what it filed, echoed back.
+///
+/// `published: false` is not a failure the caller should paper over — §8.1.2 says the cabinet
+/// ignores a re-publish under an id it already holds, so a false here means the service did
+/// not store *this* object, and printing the rest of the fields as if it had would be
+/// reporting a state the service does not have.
+fn report_key_package_published(result: &Value) -> anyhow::Result<()> {
+    if result.get("published").and_then(Value::as_bool) != Some(true) {
+        anyhow::bail!("group.e2ee.publish_key_package did not report `published: true` (P6 §8.1.3)")
+    }
+    field("owner:", result.get("owner_did"));
+    field("device:", result.get("owner_device_id"));
+    field("key package:", result.get("key_package_id"));
+    field("published at:", result.get("published_at"));
+    Ok(())
+}
+
+/// Fetch a peer device's published KeyPackage (§8.2).
+///
+/// The body names the *peer* while the target names the service, which is the shape §8.2.2
+/// asks for: the cabinet belongs to the servicing host, and the package is looked up inside
+/// it by `(did, device)`. Nothing is written locally — the package is evidence of what the
+/// peer published, and §9.3.3's `add` is where one gets used.
+async fn cmd_group_e2ee_get_key_package(
+    own: &OwnIdentity,
+    target_did: String,
+    target_device: String,
+    suite: Option<String>,
+    require_fresh: bool,
+    json: bool,
+    allow_private: &[String],
+) -> anyhow::Result<()> {
+    let location = IdentityLocation::new(&own.agent, &own.profile);
+    let identity = Identity::load(&location)?;
+
+    let client = http_client()?;
+    let channel = open_channel(&client, &identity, allow_private).await?;
+    let target = service_target(&channel.endpoint.target)?;
+
+    let result = call_device(
+        &client,
+        &channel,
+        GET_KEY_PACKAGE,
+        target,
+        get_key_package_body(&target_did, &target_device, suite.as_deref(), require_fresh)?,
+        &target_did,
+    )
+    .await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+    report_key_package_fetched(&result)
+}
+
+/// §8.2.3: the package as published, plus the two fields the caller asked with.
+///
+/// The package's own id and expiry are what the caller can act on; its MLS bytes are not
+/// something a terminal should print, so they stay behind `--json`. A response whose
+/// `group_key_package` is missing is a service lying about §8.2.3, not an empty cabinet —
+/// an empty cabinet is a refusal (`keyPackageNotFound`), which never reaches here.
+fn report_key_package_fetched(result: &Value) -> anyhow::Result<()> {
+    let package = result.get("group_key_package").ok_or_else(|| {
+        anyhow::anyhow!("group.e2ee.get_key_package answered without a group_key_package (P6 §8.2.3)")
+    })?;
+    field("target:", result.get("target_did"));
+    field("device:", result.get("target_device_id"));
+    field("key package:", package.get("key_package_id"));
+    field("suite:", package.get("suite"));
+    field("expires:", package.get("expires_at"));
+    Ok(())
 }
 
 /// §8.1.3: `group_did` at minimum, and the pair a caller has to keep for the next call — the

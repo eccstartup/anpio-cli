@@ -308,7 +308,44 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
   放在 **4xx** 里（`Unauthorized` → 401 + JSON-RPC 体），本 CLI 与 TS `connectx` 都只收 2xx，
   于是两边的体都被丢掉、只剩一句 HTTP 状态——与 message-service.md §2.1 定的"拒绝走 2xx"
   一致，**不要为此改客户端**。要端到端跑 `group`，目标是本仓的 `packages/service`，不是 awiki。
-- **未做**：身份这块还剩"换钥/换设备/`update_document`"；`group e2ee`（B2）在 Phase 3。
+- **`group e2ee` 的两个服务作用域方法已落并对真服务跑通（2026-10-02）**：
+  `group e2ee publish`（§8.1）与 `group e2ee get-key-package`（§8.2）。
+  分工是 §1 那条：`src/mls.rs` 是**设备半边**（MLS store 落在身份自己的目录下
+  `<root>/<agent>/<profile>/mls/`，KeyPackage 用**设备签名钥** `#<device>-sign` 签、
+  不是 `key-1`，因为 §6.4 要的正是"文档里这个设备的 `signing_key_id`"）；
+  `src/group_e2ee.rs` 是**线半边**（请求体的形状，与 service 侧
+  `groupE2ee.ts` / `groupControl.ts` 的分法同源）。方法名、Profile、以及
+  "哪两个方法读 `transport-protected`、哪四个读 `group-e2ee`"都在 `message/channel.rs`
+  （`group_e2ee_security_profile`），是照 §4.3 L272–273 推出来的，不是调用点随手选的。
+  **`publish` 的请求体只有一个字段**（§8.1.2），且是**整份对象原样**（`did_wba_binding`
+  连同它的 proof）——§8.2.3 把同一个对象交给后来跑 `add` 的人，任何在这条路上做的规范化
+  都会改掉下游每个验签方的输入。
+- **端到端怎么跑通的**（一次性脚手架，跑完即删，没有留进套件）：三条身份都挂在 awiki 上、
+  文档里的 `serviceEndpoint` 也指着 awiki，而 awiki 没有 P6——所以 `group e2ee` 的
+  **真阳性**必须打本仓的 `packages/service`。做法：(a) 起一台只发一份文档的玩具 DID 主机
+  （`/user/<h>/<e1_…>/did.json`，注意路径里**带 DID 最后一段**，不是 `/user/<h>/did.json`）；
+  (b) 把已存身份的 DID 换个主机段、`service` 条目改成服务自己的 `serviceDid`
+  （`did:web:127.0.0.1%3A8788`）与端点，**用身份自己的 `key-1` 重签**（沿用 awiki 那版
+  不折 `@context` 的签法）；(c) 服务开 `AGENTX_PUBLIC_URL` = 该端口 +
+  `AGENTX_DID_DEV_HOSTS=127.0.0.1`。跑出来的：`publish` 回 `published: true` 且库里
+  `group_key_packages` 真有那一行；`get-key-package` **逐枚取走**（第二句拿到的是下一枚，
+  取空后回 `anp.group.e2ee.key_package_not_found`）——§8.2.4 L767 那条"发出即占住"的 MAY
+  本服务是实现了的。**顺带核到一条规范没写死的语义**：同一个 `key_package_id` 再生成一次
+  被本地 store 拒（`group.e2ee.key_package_consumed`），所以 `--key-package-id` 是**命名**，
+  不是"重试取回原包"——publish 重试要么换 id、要么走 `get_key_package` 读回。
+- **第四个坑：crate 内部验文档那条路没有 `document_is_bound` 的那层回退。** §6 上面记的
+  `@context` 折入问题不只在**解析**侧：`generate_key_package_v2` 会拿调用方递进来的
+  issuer 文档再跑一次 `validate_did_document_binding`（`rust/src/proof/object_proof.rs`），
+  而那条路是 crate 自己直呼、**没有我们那层重编码回退**的。于是"刚被本客户端成功解析并验过
+  的 awiki 文档"递进去，回来的是一句
+  `Issuer DID document binding validation failed`——一条假否定，且看不出和文档有关。
+  **处理**：把 `document_is_bound` 拆成 `document_is_bound`（要的是是/否）与
+  `document_in_crate_form`（要的是"递给 crate 的那份"），`mls.rs` 用后者。**只换编码，
+  不重写验签器**，与解析侧同一条底线。这也解释了为什么 §8-J 生成侧与解析侧会互为镜像：
+  同一个 crate 的签与验在 base58 这条分支上就不自洽。
+- **未做**：`group e2ee` 的四个群作用域方法（`create` / `add` / `remove` / `send`）与收包路径
+  （`process_welcome_v2` / `process_commit_v2`，靠 `msg listen` 投递驱动）；身份这块还剩
+  "换钥/换设备/`update_document`"。
 - 先落 **`msg`** 一族（含 `msg listen` 常驻契约），因为它是 §4 消息库的入口。
 - **与 TS `connectx` 并存**，`CONNECTX_HOME` 的处理见 §8-F。
 
@@ -337,8 +374,10 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 
 **本轮不再有挂起的裁定。** 身份存储 + DID 文档发布（含挂 awiki host）已跑通（§6 Phase 1）；
 `msg` 一族的五个命令也跑通了（`send` / `caps` / `inbox` / `show` / `read`，见 §6）。
-Phase 1 到此收口：`msg listen` 与 `group` 一族都已落地（见 §6），剩下的身份工作
-（换钥 / 换设备 / `update_document`）与 `group e2ee` 按 §6 的 Phase 3 顺序走。
+Phase 1 到此收口：`msg listen` 与 `group` 一族都已落地（见 §6）。Phase 3 已开工：
+`group e2ee` 的两个服务作用域方法（`publish` / `get-key-package`）已落并对真服务跑通
+（见 §6），接着是它的四个群作用域方法与收包路径，然后是剩下的身份工作
+（换钥 / 换设备 / `update_document`）与 `did` / `anp` / `agent` 三族。
 
 ---
 

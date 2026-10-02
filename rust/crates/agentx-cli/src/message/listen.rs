@@ -581,6 +581,8 @@ async fn request(
                 did: ctx.channel.sender.did.clone(),
             },
             body,
+            sender_device_id: None,
+            security_profile: None,
             message_id: None,
             content_type: None,
             operation_id: None,

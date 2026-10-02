@@ -317,26 +317,37 @@ pub fn assert_allowed_host(url: &Url, policy: &ResolvePolicy, context: &str) -> 
 }
 
 /// Does this document's own proof bind it to the DID it claims?
+pub fn document_is_bound(document: &Value) -> bool {
+    document_in_crate_form(document).is_some()
+}
+
+/// The same document, in the one form `anp` 1.0.5's own checks accept.
 ///
-/// `anp` 1.0.5's verdict is asked first and trusted when it answers *yes*. Its only known
-/// blind spot is a false *no*: for a base58-btc (`z…`) `eddsa-jcs-2022` proof it folds the
-/// document's `@context` into the proof options before hashing the signing input, while the
-/// DID host this client resolves through signs that same proof without the fold (ANP-03
-/// §2.5.5 as the host implements it). A rejection of such a proof is therefore retried
-/// against the encoding the crate's own generator writes — [`proof_value_as_base64url`] —
-/// which selects the crate's legacy branch and verifies the signature as it was made.
+/// The crate's verdict is asked first and trusted when it answers *yes*, in which case the
+/// document is handed back unchanged. Its only known blind spot is a false *no*: for a
+/// base58-btc (`z…`) `eddsa-jcs-2022` proof it folds the document's `@context` into the
+/// proof options before hashing the signing input, while the DID host this client resolves
+/// through signs that same proof without the fold (ANP-03 §2.5.5 as the host implements
+/// it). A document it rejects is therefore offered again as [`proof_value_as_base64url`] —
+/// the encoding the crate's own generator writes — which selects its legacy branch and
+/// verifies the signature as it was made.
 ///
 /// This never widens what counts as a valid signature: both branches hash the same proof
 /// options minus `proofValue`, over the same document, and both still require the signing
-/// key's fingerprint to be the one the DID spells.
-pub fn document_is_bound(document: &Value) -> bool {
+/// key's fingerprint to be the one the DID spells. `None` means the document is not bound
+/// under either convention.
+///
+/// A caller that only needs a yes/no wants [`document_is_bound`]. A caller that is **about
+/// to hand the document to the crate** — `group_e2ee::generate_key_package_v2`, which
+/// re-checks the issuer's binding internally and has no fallback of its own — wants this,
+/// because giving it the raw bytes is how a document this client just verified comes back
+/// as `Issuer DID document binding validation failed` ([`crate::mls`]).
+pub fn document_in_crate_form(document: &Value) -> Option<Value> {
     if anp::authentication::validate_did_document_binding(document, true) {
-        return true;
+        return Some(document.clone());
     }
-    match proof_value_as_base64url(document) {
-        Some(rewritten) => anp::authentication::validate_did_document_binding(&rewritten, true),
-        None => false,
-    }
+    let rewritten = proof_value_as_base64url(document)?;
+    anp::authentication::validate_did_document_binding(&rewritten, true).then_some(rewritten)
 }
 
 /// The document with its `proofValue` re-encoded from base58-btc multibase to base64url, or
