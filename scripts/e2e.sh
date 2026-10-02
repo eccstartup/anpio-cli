@@ -277,11 +277,23 @@ cp "$WORK/session.bak" "$WORK/home/alice/default/session.json"
 # ---- 消息与通讯录 -------------------------------------------------------------
 
 section "msg send — a direct message, alice -> bob"
+run_quiet "$CLI" did show --agent alice --json
+ALICE_DID="$(field did)"
 run_quiet "$CLI" did show --agent bob --json
 BOB_DID="$(field did)"
 run "$CLI" msg send --agent alice --to "$BOB_DID" --text "hello bob"
 expect_status "msg send is accepted" 0
 expect "  and reports the target it resolved" "$BOB_DID"
+
+# `--once` 是 realtime.md 给的那条逃生舱：回填、打印、退出 0。于是这条"唯一一个常驻进程"的命令
+# 也能进脚本——不这么写，客户端最重的那条路就只有 `packages/e2e`（TS 那边）在跑。
+# 断言的是**投递与读取是两件事**：`msg send` 只说明服务收下了，信在收件箱里是这里才知道的。
+section "msg listen --once — the message was waiting, and reading it says so"
+run "$CLI" msg listen --agent bob --once
+expect_status "the one-shot listener exits 0" 0
+expect "  and replays what was waiting before it ever connected" "hello bob"
+expect "  and names the sender it came from" "$ALICE_DID"
+expect "  and carries the delivery cursor, which is what dedupes a reconnect" '"seq":'
 
 section "contacts — a name for that DID, and the name coming back"
 run "$CLI" contacts add --agent alice "$BOB_DID" --remark Bob
@@ -289,6 +301,21 @@ expect_status "contacts add succeeds" 0
 run "$CLI" contacts resolve --agent alice Bob
 expect_status "contacts resolve succeeds" 0
 expect "  and gives back exactly the DID" "$BOB_DID"
+
+# 这是"Agent 能替人发消息"那句话的机器形态：**输入是名字，不是 DID**。
+# 名字进发现是块垒（§3.3）：DID 形状的参数直接走发现，其余只有册子能翻。
+section "msg send --to <name> — the address book is what turns a name into a DID"
+run "$CLI" msg send --agent alice --to Bob --text "hello by name"
+expect_status "msg send accepts the name the book just learned" 0
+expect "  and prints the DID the name resolved to" "$BOB_DID"
+expect "  and says it was a name, not a DID" "named:"
+
+# 册子上没有的名字是**拒绝**，不是"发给自己"或"发给某个候选人"。
+section "a name nobody has is refused, and the refusal names the fix"
+run "$CLI" msg send --agent alice --to Nobody --text "hello nobody"
+expect_status "an unknown name exits 1" 1
+expect "  and says no contact has that name" "no contact named"
+expect "  and names the command that adds one" "contacts add"
 
 # ---- 群 ----------------------------------------------------------------------
 
