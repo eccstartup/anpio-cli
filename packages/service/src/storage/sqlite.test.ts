@@ -598,6 +598,92 @@ describe('the v9 → v10 migration', () => {
   })
 })
 
+/** B1b-A1：群自己的 Ed25519 钥。这一层只判**行语义**——一列私钥、一列时间、一个主键；
+ *  "它签出来的文档长什么样"是 `rpc/groupDidDocument.test.ts` 的事。 */
+describe('the group signing key (v11, B1b-A1)', () => {
+  const GROUP = 'did:web:host.example:g:AAAA'
+
+  it('round-trips a key and misses cleanly for a group that has none', () => {
+    const store = open()
+    expect(store.groupSigningKey(GROUP)).toBeUndefined()
+
+    store.insertGroupSigningKey({ groupDid: GROUP, privateKeyHex: 'ab'.repeat(32), createdAt: '2026-10-02T00:00:00Z' })
+    expect(store.groupSigningKey(GROUP)).toEqual({
+      groupDid: GROUP,
+      privateKeyHex: 'ab'.repeat(32),
+      createdAt: '2026-10-02T00:00:00Z',
+    })
+  })
+
+  it('collides rather than replacing the key a group was created with', () => {
+    const store = open()
+    store.insertGroupSigningKey({ groupDid: GROUP, privateKeyHex: 'ab'.repeat(32), createdAt: '2026-10-02T00:00:00Z' })
+
+    // 一张 `group_keys` 行的身份就是"这个群的钥"。第二次写不是更新，是撞约束——换掉它等于
+    // 悄悄让这个群此前签过的一切失去归处。
+    expect(() =>
+      store.insertGroupSigningKey({ groupDid: GROUP, privateKeyHex: 'cd'.repeat(32), createdAt: '2026-10-02T00:00:01Z' }),
+    ).toThrow()
+    expect(store.groupSigningKey(GROUP)?.privateKeyHex).toBe('ab'.repeat(32))
+  })
+
+  it('keeps the key out of every `StoredGroup` read', () => {
+    const store = open()
+    store.insertGroup({
+      groupDid: GROUP,
+      hostServiceDid: 'did:web:host.example',
+      groupStateVersion: 1,
+      groupEventSeq: 1,
+      groupProfileJson: '{}',
+      groupPolicyJson: '{}',
+      createdAt: '2026-10-02T00:00:00Z',
+      creatorDid: 'did:web:alice.example',
+    })
+    store.insertGroupSigningKey({ groupDid: GROUP, privateKeyHex: 'ab'.repeat(32), createdAt: '2026-10-02T00:00:00Z' })
+
+    // 这是分表的全部理由：`group()` 是 `SELECT *`，而它读回来的对象会跟着调用点到处走
+    // （日志、测试快照、序列化）。私钥不在它里面。
+    const group = store.group(GROUP)
+    expect(group).toBeDefined()
+    expect(JSON.stringify(group)).not.toContain('ab'.repeat(32))
+    expect(Object.keys(group ?? {})).not.toContain('privateKeyHex')
+  })
+})
+
+describe('the v10 → v11 migration', () => {
+  /** A file as v10 wrote it: everything the current SCHEMA has except `group_keys`. */
+  function writeV10(path: string): void {
+    const db = new DatabaseSync(path)
+    db.exec(`CREATE TABLE groups (
+       group_did            TEXT PRIMARY KEY,
+       host_service_did     TEXT NOT NULL,
+       group_state_version  INTEGER NOT NULL,
+       group_event_seq      INTEGER NOT NULL,
+       group_profile_json   TEXT NOT NULL,
+       group_policy_json    TEXT NOT NULL,
+       created_at           TEXT NOT NULL,
+       creator_did          TEXT NOT NULL
+     )`)
+    db.exec(`INSERT INTO groups VALUES
+       ('did:web:host.example:g:old', 'did:web:host.example', 3, 7, '{}', '{}',
+        '2026-09-01T00:00:00Z', 'did:web:owner.example')`)
+    db.exec('PRAGMA user_version = 10')
+    db.close()
+  }
+
+  it('adds the table, and reads every pre-existing group as having no key', () => {
+    const path = join(dir, 'v10.db')
+    writeV10(path)
+
+    const store = open(path)
+    // 升级之前的群**没有**钥，这必须读成"没有"，而不是当场补铸一把：一把事后铸出来的钥
+    // 不是此前任何一句关于这个群的话所依据的那把（`Storage.groupSigningKey` 的注释）。
+    expect(store.groupSigningKey('did:web:host.example:g:old')).toBeUndefined()
+    // 而老行本身没被动过。
+    expect(store.group('did:web:host.example:g:old')).toMatchObject({ groupStateVersion: 3, groupEventSeq: 7 })
+  })
+})
+
 /** P5 §7 的密钥材料（C12）。这一层要判的是**行语义**：一设备一行、按上传顺序发、领取是
  *  一次互斥的 UPDATE。上面那些"哪一步先判"是 `rpc/keys.test.ts` 的事。 */
 describe('prekey bundles and one-time prekeys (P5, C12)', () => {

@@ -107,6 +107,25 @@ export interface StoredGroup {
   creatorDid: string
 }
 
+/**
+ * One group's own Ed25519 key (B1b-A1) — the key `group.create` mints and the one that
+ * signs this group's DID document and every `group_receipt.proof`.
+ *
+ * It lives in its own table rather than as a column of {@link StoredGroup} so that
+ * `Storage.group()` — a `SELECT *` read that plenty of call sites do just to look at the
+ * policy — cannot carry private key material along with it. Reading a key is a call site's
+ * explicit decision here, not a side effect of reading a group.
+ *
+ * `privateKeyHex` is the 32-byte seed as bare hex, the same text form `AGENTX_KEY_FILE`
+ * accepts, so `parsePrivateKey(hex, 'ed25519')` reads both. The public key is deliberately
+ * NOT stored: it is derivable, and two copies of one fact can disagree.
+ */
+export interface StoredGroupSigningKey {
+  groupDid: string
+  privateKeyHex: string
+  createdAt: string
+}
+
 /** `role` is `owner` | `admin` | `member` and defaults to `member` when absent
  *  (§7.2 L384); `membershipStatus` is `active` | `left` | `removed` (§6.5). */
 export interface StoredGroupMember {
@@ -508,6 +527,19 @@ export interface Storage {
   /** Write a new group. The counters are given rather than derived: `group.create` starts
    *  them at 1/1 (§6.2 L237), and that is a decision of the operation, not of the store. */
   insertGroup(group: StoredGroup): void
+  /** The group's own signing key, or `undefined` if this service hosts no such group.
+   *
+   *  Every group created from v11 on has one; a group created by an older build does not,
+   *  and the callers that need to SIGN (the DID document of B1b-A2, the receipt proof of
+   *  B1b-A5) treat that absence as "this group cannot be proved about" rather than as a
+   *  reason to mint one late — a key minted after the fact would not be the key any earlier
+   *  statement was made under. */
+  groupSigningKey(groupDid: string): StoredGroupSigningKey | undefined
+  /** Write a group's signing key. Called from `group.create` in the same transaction as
+   *  {@link Storage.insertGroup}, which is the whole point: a group row without its key has
+   *  no recovery path (B1b-A1). The primary key makes a second insert for one group collide
+   *  instead of replacing the identity it was created with. */
+  insertGroupSigningKey(row: StoredGroupSigningKey): void
   /** Replace the stored `group_profile` / `group_policy`. The caller has already merged the
    *  patch and validated the RESULT (groups.md §8), so this writes a finished object. */
   updateGroupProfile(groupDid: string, profileJson: string): void

@@ -171,6 +171,20 @@ describe('group.create (P4 §8.1)', () => {
     expect(result.group_receipt).not.toHaveProperty('proof')
   })
 
+  it('mints the group its own Ed25519 key, in the same transaction as the group row', () => {
+    const groupDid = mintGroup()
+
+    const key = storage.groupSigningKey(groupDid)
+    expect(key).toBeDefined()
+    expect(key?.createdAt).toBe(AT)
+    // hex 的 32 字节种子：`parsePrivateKey(hex, 'ed25519')` 认的形状，与 `AGENTX_KEY_FILE`
+    // 那种裸 hex 同一套（groups.md §2.1）。
+    expect(key?.privateKeyHex).toMatch(/^[0-9a-f]{64}$/)
+
+    // 每个群一把，不是一份部署一把。
+    expect(storage.groupSigningKey(mintGroup())?.privateKeyHex).not.toBe(key?.privateKeyHex)
+  })
+
   it('refuses a target that is not this service, with 1014', () => {
     const rejection = refusalOf(() => invoke(GROUP_CREATE, { actor: ALICE, target: BOB, body: { group_policy: OPEN_POLICY } }))
     expect(rejection.code).toBe(1014)

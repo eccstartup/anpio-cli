@@ -28,6 +28,7 @@ import type {
   StoredGroupKeyPackage,
   StoredGroupLeaf,
   StoredGroupMember,
+  StoredGroupSigningKey,
   StoredMessage,
   StoredOneTimePrekey,
   StoredPrekeyBundle,
@@ -243,6 +244,16 @@ function toGroupMember(row: Row): StoredGroupMember {
   const lastDidCheckedAt = maybeText(row.last_did_checked_at)
   if (lastDidCheckedAt !== undefined) member.lastDidCheckedAt = lastDidCheckedAt
   return member
+}
+
+/** The group's own key (v11, B1b-A1). One row, and the row IS the key material — nothing
+ *  else reads it, so there is no shape to keep in sync beyond the column order. */
+function toGroupSigningKey(row: Row): StoredGroupSigningKey {
+  return {
+    groupDid: text(row.group_did),
+    privateKeyHex: text(row.private_key),
+    createdAt: text(row.created_at),
+  }
 }
 
 function toOutbox(row: Row): OutboxEntry {
@@ -758,6 +769,21 @@ class SqliteStorage implements Storage {
       group.groupPolicyJson,
       group.createdAt,
       group.creatorDid,
+    )
+  }
+
+  groupSigningKey(groupDid: string): StoredGroupSigningKey | undefined {
+    const row = this.stmt('SELECT * FROM group_keys WHERE group_did = ?').get(groupDid) as Row | undefined
+    return row === undefined ? undefined : toGroupSigningKey(row)
+  }
+
+  insertGroupSigningKey(row: StoredGroupSigningKey): void {
+    // A plain INSERT for the same reason `insertGroup` uses one: the row is this group's
+    // identity, and a second write for one `group_did` is a collision, not an update.
+    this.stmt('INSERT INTO group_keys (group_did, private_key, created_at) VALUES (?, ?, ?)').run(
+      row.groupDid,
+      row.privateKeyHex,
+      row.createdAt,
     )
   }
 

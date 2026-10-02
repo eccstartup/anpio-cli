@@ -58,8 +58,13 @@
  *  v10: `group_members` gains `last_did_checked_at` — when the periodic DID refresh last
  *  looked at this row (A3c-4). It is the sweep's cursor, not a fact about the membership:
  *  a NULL just means "never looked", which is where every existing row starts and which the
- *  sweep reads as "look at me first". Nullable, so `ALTER TABLE ADD COLUMN` suffices. */
-export const SCHEMA_VERSION = 10
+ *  sweep reads as "look at me first". Nullable, so `ALTER TABLE ADD COLUMN` suffices.
+ *
+ *  v11: `group_keys` is new — the per-group Ed25519 key B1b-A1 mints at `group.create`.
+ *  Like v3/v6/v8/v9 it arrives through the `IF NOT EXISTS` pass and needs no migration step
+ *  of its own; the version moves for the usual reason. **This is the first table in this
+ *  database whose contents are key material** — see the table's own comment. */
+export const SCHEMA_VERSION = 11
 
 export const SCHEMA: readonly string[] = [
   // ---- idempotency -----------------------------------------------------------
@@ -198,6 +203,25 @@ export const SCHEMA: readonly string[] = [
      payload_json  TEXT NOT NULL,
      occurred_at   TEXT NOT NULL,
      PRIMARY KEY (group_did, event_seq)
+   )`,
+
+  // 群自己的 Ed25519 私钥（B1b-A1），hex 编码的 32 字节种子——与 `AGENTX_KEY_FILE` 认的
+  // 那种裸 hex 同形，所以 `parsePrivateKey(hex, 'ed25519')` 两边都能读。
+  //
+  // **这张表里的每一行都是密钥。** 它是本库里唯一一处签名私钥落盘的地方，于是数据库文件、
+  // 它的备份、以及任何"把 db 发过来看看"的调试，全部按密钥对待（TODO3 §A1 的代价记账）。
+  //
+  // 独立一张表而不是 `groups` 上的一列，理由是读路径：`Storage.group()` 是 `SELECT *`，
+  // 加一列就等于让私钥跟着每一个 `StoredGroup` 走——进日志、进测试快照、进任何一个只是
+  // 想看看群策略的调用点。独立表把"谁能读到钥"变回一个调用点上看得见的决定。
+  //
+  // 与群行同一个事务写入（`group.create` 的 `BEGIN IMMEDIATE` 里），所以不存在"有行没钥"
+  // 的半群状态——那种状态的恢复路径是零。主键就是 `group_did`，第二次插入会撞约束而不是
+  // 悄悄换掉一个群的身份。
+  `CREATE TABLE IF NOT EXISTS group_keys (
+     group_did    TEXT PRIMARY KEY,
+     private_key  TEXT NOT NULL,
+     created_at   TEXT NOT NULL
    )`,
 
   // ---- E2EE ------------------------------------------------------------------

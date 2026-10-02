@@ -394,6 +394,8 @@ describe('the schema the worker reads', () => {
     // SEPARATE worker's queue, so this one still has nothing to do with it.
     // v10 added `group_members.last_did_checked_at`, the DID refresh's cursor — a column
     // on a table this file does not read either (`group_members` is P4's, not the outbox's).
-    expect(SCHEMA_VERSION).toBe(10)
+    // v11 added `group_keys`, the per-group signing key (B1b-A1) — a new P4 table, nothing
+    // to do with a retired outbox row. Checked, no action.
+    expect(SCHEMA_VERSION).toBe(11)
   })
 })

@@ -459,6 +459,13 @@ CREATE TABLE group_events (          -- group.state_changed 的可重放来源
   event_type TEXT NOT NULL, payload_json TEXT NOT NULL, occurred_at TEXT NOT NULL,
   PRIMARY KEY (group_did, event_seq)
 );
+-- v11 随 B1b-A1 补上：群自己的 Ed25519 私钥，hex 的 32 字节种子。**这张表里每一行都是
+-- 密钥**，所以数据库文件与它的备份按密钥对待（groups.md §2.1）。单独一张表而不是
+-- `groups` 上的一列，是因为 `group()` 是 `SELECT *`——加一列会让私钥跟着每个 `StoredGroup`
+-- 走。没有公钥列：它是可推导的，存两份同一个事实只会有一份先变。
+CREATE TABLE group_keys (
+  group_did TEXT PRIMARY KEY, private_key TEXT NOT NULL, created_at TEXT NOT NULL
+);
 
 -- P5/P6 E2EE：本服务看不见明文，只存不透明字节
 CREATE TABLE prekey_bundles (

@@ -810,6 +810,16 @@ function createGroup(ctx: GroupContext): Record<string, unknown> {
     createdAt: ctx.acceptedAt,
     creatorDid: actor,
   })
+  // 群自己的 Ed25519 钥（B1b-A1），与群行**同一个事务**。落在这里而不是别处，是因为
+  // `perform` 的整个身体包裹在一次 `BEGIN IMMEDIATE` 里：要么两者都在，要么都不在。
+  //
+  // 32 个随机字节就是一把合法的 Ed25519 私钥（种子），不需要再夹取——`parsePrivateKey`
+  // 要的也正是这个形状。它签这份群的 DID 文档与它的每一份 `group_receipt.proof`。
+  ctx.storage.insertGroupSigningKey({
+    groupDid,
+    privateKeyHex: randomBytes(32).toString('hex'),
+    createdAt: ctx.acceptedAt,
+  })
   ctx.storage.upsertGroupMember({
     groupDid,
     memberDid: actor,

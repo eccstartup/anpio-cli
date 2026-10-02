@@ -50,6 +50,24 @@
 "把 db 发过来看看"的调试，都要按密钥对待。这是本轮唯一一处把"不提交密钥"这条纪律从
 仓库扩到运行时的资产上。
 
+**落地（2026-10-02）。** schema **v11**：新表 `group_keys (group_did PRIMARY KEY,
+private_key, created_at)`，`private_key` 是 hex 的 32 字节种子——与 `AGENTX_KEY_FILE` 认的
+裸 hex 同形，`parsePrivateKey(hex, 'ed25519')` 两边都能读。访问子是
+`groupSigningKey()` / `insertGroupSigningKey()`，**单开一张表而不是 `groups` 上加一列**：
+`Storage.group()` 是 `SELECT *`，加一列就等于让私钥跟着每一个 `StoredGroup` 走（日志、测试
+快照、任何只是想看看群策略的调用点）；分表把"谁能读到钥"变回调用点上看得见的决定
+（`sqlite.test.ts` 有一条测试钉住这件事）。铸钥在 `createGroup` 里、紧跟 `insertGroup`：
+`perform` 的整个身体包在一次 `BEGIN IMMEDIATE` 里，所以要么两者都在要么都不在。**升级之前
+的群没有钥，且不补铸**——事后铸出来的那把不是此前任何一句关于这个群的话所依据的那把，
+`groupSigningKey` 返回 `undefined` 就是这个意思（v10 → v11 迁移测试钉住它）。
+
+**不在这一条里做的**：没有从私钥推公钥的地方，也还没有任何消费者。公钥的推导
+（`ed25519PublicKey`）随 A2 一起进 core 的 `advanced` 入口——A1 只负责"这把钥存在且属于这
+个群"，A2 负责"它能变成一份文档"。
+
+文档更正一处：groups.md 新增 §2.1（钥的三条取舍 + 数据库按密钥对待这条代价），§7 那段
+"要签它需要 `assertionMethod` 私钥"指了过去。
+
 ### A2 群 DID 文档的形状与签名
 
 按 §2 的形状造一份 `did:web` 文档：
@@ -156,5 +174,8 @@ federation.md §3/§8。**与 B1a 一样，更正不是附赠，是这一步的�
   `🤖 Generated with [Claude Code](https://claude.com/claude-code)`。
 - 不提交密钥。**A1 之后这条多一层意思**：群私钥进数据库，所以数据库文件与它的备份也按
   密钥对待，不随日志、不随 bug report 外发。
-- 当前基线：`19b23c3`，`npm run typecheck` 通过，`npm test` = 209 + 693 + 3 + 624 = **1529**
-  全绿。
+- 当前基线：`ff129d8`（`19b23c3` 之后只有一次纯文档提交），`npm run typecheck` 通过，
+  `npm test` = 213 + 693 + 3 + 629 = **1538** 全绿（按 workspace 顺序：cli / core / e2e /
+  service）。**更正一处**：本文件原先记的 `209 + 693 + 3 + 624 = 1529` 里，第一个数抄的是
+  CLI 更早的 209——在 `19b23c3` 上它就已经是 213，所以那一行的真值是 1533。服务端
+  624 → 629 是 B1b-A1 的五条（storage 四条 + handler 一条）。
