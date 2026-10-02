@@ -84,6 +84,27 @@ KeyPackage 的 `did_wba_binding` Object Proof 由设备自签，验证侧从**�
     （C9）没有接受，`group_did_updates` 因此没有写入者。换 DID 的验证侧 core 已经写好
     （`packages/core/src/did/chain.ts` 走完转移链并给出四档保证），服务端缺的是调用它、按保证
     档位决定接受，再按 P6 §10.5 编排（暂停 → 逐设备 add 新 DID → 逐设备 remove 旧 DID → 恢复）。
+    分四段，A3c-1 已落地：
+
+    - ~~**A3c-1 请求触发。**~~
+      （2026-10-02 落地：`rpc/memberDidUpdate.ts` 走 §8.12 受理前的第 1–3 条（从记录里当前
+      存着的旧 DID 出发、用 core 的 `resolveDidChain` 走完整转移链、只收 `verified` /
+      `recovery_verified`——用户 2026-10-02 裁定按**甲**，`provider_asserted` 一律拒），通过后
+      由 `groups.ts` 的 `applyMemberDidUpdate` 在一个事务里改名册（只改 `member_did`，`role` /
+      `status` / `joined_at` / `added_by` 靠"改一行"而非"删加"原样保留）、推两个计数器、排一条
+      `member-did-updated`（正文带 `previous_subject_did` / `subject_did`，§7.10.2 L590）。
+      触发面是 §8.12 L946 逐字那五个：四个无条件，`group.get_info` 只在**私有群**触发。
+      比较并交换做在 `renameGroupMember` 的 `UPDATE ... WHERE member_did = <旧>` 上，返回 false
+      即"另一条触发路已经做过了"；操作标识是 `group_did + 旧 + 新` 的确定性摘要。`group_leaves`
+      的行跟着搬，新 DID 已有行的设备不搬。**§8.12 本身只覆盖了"新 DID 来办事"这一路**，
+      另外三路见下面三段。）
+    - **A3c-2 投递触发。** 往旧 DID 投递时发现合规后继 → 先改完名册，再往**当前** DID 生成新的
+      `group.incoming`。
+    - **A3c-3 P6 §10.5 编排。** 给 `group_did_updates` 一个写入者：暂停 → 逐设备 add 新 DID →
+      逐设备 remove 旧 DID → 恢复。**这一半不做完，群会停在 §10.5 自己规定的暂停中间态里**，
+      所以不能只做前两半。
+    - **A3c-4 定时刷新。** 用户裁定的低负载周期扫描，兜住"对端 DID 服务器已更新、而我们还没被
+      任何请求或投递碰到"这一档。
 
 - **A4 同 DID 的 Remove 分支 v1 不做，回 5003。**
   理由写在 `packages/service/src/rpc/groupControl.ts:52`：该分支的前置是
