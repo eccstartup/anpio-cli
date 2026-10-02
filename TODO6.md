@@ -90,8 +90,15 @@
       （`connectx`"不再是文档入口"）这些都该换，但那是一次跨十来页的正文改写，且 `quickstart`
       的安装那段要从 `npx` 改成"从源码 build"，**需要你点头再动**：甲=现在就整体换；
       乙=只在各页加一句"另有 `agentx-cli`，见参考页"，正文维持现状。
-- [ ] `skill/connectx/SKILL.md`：按 2.1 改名/重写，并**把 `help.test.ts` 的门禁跟着改**
+- [x] **`skill/connectx/SKILL.md`：按 2.1 改名/重写，并**把 `help.test.ts` 的门禁跟着改**
       （它拿 skill 里逐字给出的调用去和命令面对账，命令面变了它就该红）。
+      —— 2026-10-02 完成（`6063fd0`）：`skill/connectx/SKILL.md` → **`skill/agentx-cli/SKILL.md`**，
+      按 Rust 客户端重写（装法、store 根、`did create` 一步注册、`contacts`、扩展面的
+      `unsupported_extension` 负结果、`Error: <码>: <人话>`），判断那部分照旧。
+      门禁**从 `packages/cli` 搬到 Rust**：它原本拿 skill 的调用对 TS 的 `commands.ts` 账，
+      skill 改讲 `agentx-cli` 之后就对错了账本；现在在
+      `rust/crates/agentx-cli/tests/cli_surface.rs` 里**跑真二进制**校验每条逐字调用与旗标。
+      `help.test.ts` 只留三条门禁；`docs/design/cli.md` 记了这次搬运。
 - [ ] `docs/design/cli.md` §8 的存储布局：现在是 `~/.connectx/` + `key.json`（keystore V3），
       与 Rust 的 `~/.agentx-cli/<agent>/<profile>/{identity.json,session.json}` **不同**。
       要么写两段，要么写一段并把差异点名。

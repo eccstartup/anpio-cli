@@ -73,6 +73,18 @@
 且在文档里说清楚：它只校验 skill 里**逐字给出**的那几条调用还解析得开（命令、子命令、旗标），
 其余散文它管不着——那是刻意的，不是遗漏。
 
+### 那份 skill 现在讲的是 `agentx-cli`（2026-10-02，TODO6 §2.2）
+
+§2.1 裁定（`connectx` 冻结、`agentx-cli` 接棒）落到 skill 上就是：`skill/connectx/SKILL.md`
+改名成 **`skill/agentx-cli/SKILL.md`**、按 Rust 客户端的命令面重写。上面那句判据不变，变的是
+里面的事实：装法是 `cargo build`、store 根是 `AGENTXCLI_HOME`、`did create` 一步就把文档发到
+主机、`contacts` 那一层是新写的、扩展面的负结果是 `unsupported_extension`。
+
+门禁也跟着搬：`help.test.ts` 那条读的原本是这份文件，而它拿 skill 的调用去和 **TS 的
+`commands.ts` 清单**对账——skill 改讲 `agentx-cli` 之后，那条门禁检查的就是**错的命令面**。
+所以它移到 `rust/crates/agentx-cli/tests/cli_surface.rs`，改成**跑真二进制**：每条逐字调用
+要能走到一个页面，且它写的每个旗标都是那个页面认的。`help.test.ts` 只留三条。
+
 ## 3. 命令面
 
 命令面**以数据形式**声明在 `src/help/commands.ts` 一个文件里，`cli.ts` 的解析、help 渲染、
