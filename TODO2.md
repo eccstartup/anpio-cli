@@ -8,8 +8,11 @@
 
 ## 0. C13 端到端实测（结论留档）
 
+（口径：**ANP 1.2 已发布**，不再是 vNext。本文件原先写的"vNext 文档"即 1.2 文档，已改过来；
+规范里的 profile 名仍是 `.v2` 那一套，两者说的是同一版。）
+
 **方法**：拿 `awiki-open-server`（用户改过的版本，`http://127.0.0.1:8765`）当 DID 服务器，
-真注册一份 vNext 单设备文档（root + 设备签名钥 + 设备 E2EE 钥），再让**本服务的解析器**发真
+真注册一份 1.2 单设备文档（root + 设备签名钥 + 设备 E2EE 钥），再让**本服务的解析器**发真
 HTTP 取回它、验 e1 文档证明、按 `allowInsecureTransport` 那条联调口放行，最后用**真签的**
 `origin_proof` 打真方法。脚手架脚本跑完已删（它靠改模块常量取巧，不该当测试留在仓库）。
 
@@ -29,16 +32,22 @@ KeyPackage 的 `did_wba_binding` Object Proof 由设备自签，验证侧从**�
 
 ## A. 需要裁定的（按要紧程度排）
 
-- **A1 core 的指纹绑定管得太宽 —— 最要紧，P6 在真实 DID 网里跑不起来的直接原因。**
+- ~~**A1 core 的指纹绑定管得太宽 —— 最要紧，P6 在真实 DID 网里跑不起来的直接原因。**
   `packages/core/src/crypto/resolveDid.ts:1100` 在解析**任何** keyid 时都
   调 `assertFingerprintBinding`（定义在 `packages/core/src/crypto/resolveDid.ts:1236`），
-  要求解析出的那把钥的指纹等于 DID 路径段里的 `e1_`。可 vNext 单设备文档里，`e1_` 承诺的是
+  要求解析出的那把钥的指纹等于 DID 路径段里的 `e1_`。可 1.2 单设备文档里，`e1_` 承诺的是
   **root** 钥，设备签名钥是另一把。于是 `${did}#dev-signing` 一律解析失败：
   `binds fingerprint "e1_…" but the resolved key's fingerprint is "e1_…"`。
   而 P6 §6.4 要求 origin proof 由设备的 `signing_key_id` 签——**今天本服务无法验证一台合规
   设备的 P6 调用**。这是一条审计驱动的安全控制（ANP-2026-09-11-01），动它就是动安全边界。
   选项：(i) 放宽成"只对文档自身证明用的那把钥绑指纹，其余 keyid 只要求被关系授权"；
-  (ii) 保持现状，在文档里记成已知限制。**建议 (i)**，但需要你拍板。
+  (ii) 保持现状，在文档里记成已知限制。**建议 (i)**，但需要你拍板。~~
+  （2026-10-02 按 (i) 落地，`7028711`：只有"active e1_ 文档、证明策略为 required、且 keyid
+  点名的不是那把证明钥"这一档才免掉整体绑定。免掉的底气是文档自身的证明——`assertDocumentProof`
+  已经要求并以指纹绑定的那把钥验过它，其后取到的方法属于一份**已被认证的文档**，
+  `assertAuthenticationAuthorized` 照旧把它限在 `authentication`。其余各档——`k1_` 或认不出
+  的 profile、过渡态的 deactivated 文档、不带 fragment（按位选方法而非按名）的 keyid、
+  以及证明钥自己——一律保持严格整体绑定。）
 
 - **A2 设备 profile 集合两边对不上。**
   `packages/service/src/rpc/groupE2ee.ts:144` 的 `GROUP_E2EE_DEVICE` 要
@@ -65,10 +74,13 @@ KeyPackage 的 `did_wba_binding` Object Proof 由设备自签，验证侧从**�
   `e2eeAuthorizedBy` 两个关系）。这是**收窄不是放行**（该拒的仍拒），但那条合法路径暂时不可用。
   选项：接受 v1 缺失，或补一个"否定门禁"的表达。
 
-- **A5 两个有界保留闸门是 worker 选项，不是 Config 设置。**
+- ~~**A5 两个有界保留闸门是 worker 选项，不是 Config 设置。**
   `maxAttempts` 默认 8（`packages/service/src/delivery/deviceQueue.ts:49`）、
   `maxQueueAgeMs` 默认 24h（`packages/service/src/delivery/deviceQueue.ts:55`），
-  今天要调只能改代码。选项：提升到 `Config` 做成部署档位。**建议提**（运维会想调）。
+  今天要调只能改代码。选项：提升到 `Config` 做成部署档位。**建议提**（运维会想调）。~~
+  （2026-10-02 落地，`ec4e273`：`AGENTX_DEVICE_QUEUE_MAX_ATTEMPTS`（缺省 8）与
+  `AGENTX_DEVICE_QUEUE_MAX_AGE_MS`（缺省 24h），解析口径与其他数值设置一致——空值当未设、
+  非正整数在启动时拒绝而不是悄悄钳住。worker 选项保留作覆盖，测试仍可钉住某一条上限。）
 
 - **A6 §12.6 第 3 项"投递前复核"的判据。**
   规范这句没给判据，现取"每次尝试前重跑资格检查，仅点名的那两个例外放行"（在
@@ -133,4 +145,4 @@ KeyPackage 的 `did_wba_binding` Object Proof 由设备自签，验证侧从**�
 - 提交信息末尾 `Co-Authored-By: Claude Code <noreply@anthropic.com>`；PR 描述末尾
   `🤖 Generated with [Claude Code](https://claude.com/claude-code)`。
 - 不提交密钥。
-- 当前基线：`3e3747b`，`npm run typecheck` 通过，`npm test` 690 + 577 全绿。
+- 当前基线：`a9e0a68`，`npm run typecheck` 通过，`npm test` 207 + 693 + 581 全绿。
