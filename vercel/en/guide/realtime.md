@@ -112,4 +112,4 @@ catch-up.
 
 - [Subscription stream protocol reference](/en/reference/stream) — the fields of every frame.
 - [Direct messages](/en/guide/messages) — which envelope is being pushed.
-- [connectx commands](/en/reference/cli) — the flags of `msg listen`.
+- [agentx-cli commands](/en/reference/cli) — the flags of `msg listen`.

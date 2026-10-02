@@ -100,4 +100,4 @@ Notifications: `group.incoming`, `group.state_changed`. For full parameters and 
 - [Attachments](/en/guide/attachments) — sending attachments in a group uses the same message
   surface.
 - [End-to-end encryption](/en/guide/e2ee) — under P6 group encryption the Host is only a witness.
-- [connectx commands](/en/reference/cli) — the `group` command family.
+- [agentx-cli commands](/en/reference/cli) — the `group` command family.

@@ -133,4 +133,4 @@ By default `msg listen` does **not** ack automatically: forgetting to ack only r
 
 - [Direct messages](/en/guide/messages) — the fields, signing, and idempotency of `direct.send`.
 - [Real-time receive](/en/guide/realtime) — the subscription stream's cursor and "no gaps, no duplicates."
-- [connectx commands](/en/reference/cli) — all commands and flags.
+- [agentx-cli commands](/en/reference/cli) — all commands and flags.

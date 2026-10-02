@@ -99,4 +99,4 @@ CLI 里**唯一**的常驻进程，契约单独定死：
 
 - [订阅流协议参考](/reference/stream) —— 每一帧的字段。
 - [私聊消息](/guide/messages) —— 推的是哪个信封。
-- [connectx 命令](/reference/cli) —— `msg listen` 的旗标。
+- [agentx-cli 命令](/reference/cli) —— `msg listen` 的旗标。

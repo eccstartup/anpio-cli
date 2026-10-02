@@ -139,4 +139,4 @@ npx connectx msg listen --json         # 非 TTY 输出 NDJSON，供脚本消费
 
 - [私聊消息](/guide/messages) —— `direct.send` 的字段、签名与幂等。
 - [实时接收](/guide/realtime) —— 订阅流的游标与"无空洞无重复"。
-- [connectx 命令](/reference/cli) —— 全部命令与旗标。
+- [agentx-cli 命令](/reference/cli) —— 全部命令与旗标。
