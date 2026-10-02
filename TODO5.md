@@ -8,6 +8,9 @@
 本文件给可行性结论、落分阶段计划、列**要你定的点**（§7），并单开一节写**你没提到、但绕不开的
 问题**（§8）。口径与 TODO1–4 一致。
 
+**做到哪了，看 §6 开头的「进度总表」一处**——`~~划掉~~` 就是做完的，`- [x]` 同理；下面的正文
+一律保留原样（那是当时的判断，不是现在的状态）。
+
 ---
 
 ## 0. 本轮锁定的决定
@@ -89,12 +92,18 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 
 ## 3. 要在 Rust 里新写的（移植面）
 
-1. **CLI 参数 / 帮助 / 渲染**（~1600 行）：1193 行的命令表 + 渲染层。机械，但量在那儿。
-2. **身份存储**（~1200 行）：含 **Ethereum keystore V3**（scrypt + aes-128-ctr + keccak256）与
+**每条带一个状态签**（2026-10-02）：`[已落]` / `[部分]` / `[未动]`。
+
+1. **[部分]** **CLI 参数 / 帮助 / 渲染**（~1600 行）：1193 行的命令表 + 渲染层。机械，但量在那儿。
+   已落骨架与 `did`（3 条）/`msg`（6 条）/`group`（6 条 + `e2ee` 3 条）/`discover` 的面；
+   `anp` / `agent` / `version` 未动。
+2. **[部分]** **身份存储**（~1200 行）：含 **Ethereum keystore V3**（scrypt + aes-128-ctr + keccak256）与
    **EIP-1193 web3 钱包路径**——`--wallet web3` 是 CLI 的一等路径。
-3. **core 的客户端子集**（估 ~4000–5000 行）：`message/`（envelope / rpc / discovery / locator /
+   已落的是**自定格式**那一半（§0.1 第 1 条把两个客户端分开了），keystore V3 / web3 未动。
+3. **[部分]** **core 的客户端子集**（估 ~4000–5000 行）：`message/`（envelope / rpc / discovery / locator /
    verify / objectProof）、`connectors/`、`crypto/agentDescription`、`crypto/serverAuth`、
    `actions`（register / update）、`did/chain`。**crate 把这层留给应用，正是要在这里补的。**
+   已落 `message/` 那条主线（信封 / 那一跳 / 发现 / 解析 / 验文档 / 流），其余未动。
    **调整（2026-10-02）**：crate 自带**客户端的 origin proof 构造**
    （`proof/rfc9421_origin.rs` 的 `build_signed_request_object` / `build_logical_target_uri` /
    `generate_rfc9421_origin_proof`），所以 auth 那一段不用移植——估量往下调。
@@ -107,7 +116,7 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
    没兑就不判，`dispatch.ts` 的 `consumeProofNonce`）。crate 的
    `build_im_signature_input` 总是补 `created` 和一个随机 `nonce`——**多出来的 nonce 不违例**，
    它进 `@signature-params` 那一行，签名自洽。结论：**`generate_rfc9421_origin_proof` 原样可用。**
-4. **SSRF / 逐跳网络策略**（`core/crypto/resolveDid.ts` 的 `fetchControlledJson` 一族）。
+4. **[部分]** **SSRF / 逐跳网络策略**（`core/crypto/resolveDid.ts` 的 `fetchControlledJson` 一族）。
    `message/rpc.ts` 用它，理由是"消息端点的**主机由对端选定**"——所以这一跳比 DID 文档那一跳
    **更需要**它。**已落（2026-10-02）**：策略被放进 `post_message` / `post_notification`
    内部（不是调用方传参才生效），所以**没有一条消息 POST 能绕过它**——`caller` 拿不到一个
@@ -115,12 +124,14 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
    解析成地址、拒绝私网地址（`resolveHostAddresses`），这条要一个 Rust 侧不带的解析器，
    所以只保留**字面 IP** 的判断（与 TS 在没有 `node:dns` 时的回退同形）。见
    [`assert_allowed_host`](rust/crates/agentx-cli/src/message/resolve.rs) 的函数注释。
-5. **命令逻辑**（~1500 行）：`group` / `msg` / `listen`（含 `msg listen` 这条唯一的常驻契约，
-   [realtime.md](docs/design/realtime.md)）。
-6. **[client-mls.md](docs/design/client-mls.md) 的 store 与编排**：落
+5. **[部分]** **命令逻辑**（~1500 行）：`group` / `msg` / `listen`（含 `msg listen` 这条唯一的常驻契约，
+   [realtime.md](docs/design/realtime.md)）。三族都已落；`group e2ee` 的 `add`/`remove`/`send` 与收包
+   路径未做。
+6. **[部分]** **[client-mls.md](docs/design/client-mls.md) 的 store 与编排**：落
    **`<新 store 根>/<agent>/<profile>/mls/`**（**不是** `CONNECTX_HOME`——§0.1 第 1 条把两个
    客户端的 store 根分开了）；owner 编排（§11.12）从 CLI 挪进 Rust 客户端。
-7. **客户端消息存储（新，§4）。**
+   store 已落且真的在跑（`publish` / `get-key-package` / `create`）；owner 编排的后半未动。
+7. **[未动]** **客户端消息存储（新，§4）。**
 
 **被省掉的东西**：走这条路，B2 的 **napi 壳整条取消**——不是"要写两次"，是"换一种方式拿 MLS"。
 这是手术的收益。
@@ -189,7 +200,31 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 
 ## 6. 分阶段计划（全量）
 
-**Phase 0 —— 先证那条缝（spike，不进仓库）**
+### 进度总表（2026-10-02）
+
+`~~划掉~~`＝做完；`- [ ]`＝还没动。命令面的实际清单是 `agentx-cli --help`，这张表只记状态。
+
+| 家族 | 命令 | 状态 |
+| --- | --- | --- |
+| `did` | `create` / `show` / `register` | ~~做完~~（对 awiki host 真跑通） |
+| `did` | `resolve` / `update` / `restore` | 还没 |
+| — | `discover` | ~~做完~~ |
+| `msg` | `send` / `caps` / `inbox` / `show` / `read` | ~~做完~~（`send` 真阳性；`inbox` 一族对 awiki 为负是**正确**结果） |
+| `msg` | `listen` | ~~做完~~（realtime.md 那条常驻契约） |
+| `group`（P4） | `create` / `info` / `members` / `join` / `leave` / `send` | ~~做完~~（真阳性只对本仓 `packages/service`） |
+| `group e2ee` | `publish` / `get-key-package` | ~~做完~~（对真服务跑通） |
+| `group e2ee` | `create` | ~~做完~~（对真服务跑通） |
+| `group e2ee` | `add` / `remove` / `send` | 还没 |
+| `group e2ee` | 收包路径（`process_welcome_v2` / `process_commit_v2`） | 还没（靠 `msg listen` 投递驱动） |
+| `anp` | `show` / `login` / `sign` | 还没 |
+| `agent` | `show` / `use` / `list` | 还没 |
+| — | `version` | 还没 |
+| 身份 | 换钥 / 换设备 / `update_document` | 还没 |
+| 库侧 | 信封 / 那一跳 HTTP / SSRF 逐跳 / 身份存储 / MLS store | ~~做完~~ |
+| 库侧 | 消息库 `messages.db`（§4、Phase 2） | 还没 |
+| 收束 | Phase 4：`packages/e2e` 覆盖新客户端 / 命令面定稿 / TS CLI 冻结 | 还没 |
+
+**Phase 0 —— 先证那条缝（spike，不进仓库）** —— [x] ~~已做完（2026-10-02）~~
 最小 Rust 客户端：读本机 keystore 的身份 → 用 crate 的 `did_wba` / `http_signatures` →
 对**真服务**发一条 `group.e2ee.*`，看能不能过服务端的方法表与资格门禁。不做 CLI、不做 e2e。
 只回答一个问题：**1.0.5 的客户端能力，够不够接上服务端那 571 行。**
@@ -224,12 +259,12 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
    所以**并进 Phase 1**，不留在 spike 里——spike 已经把它该回答的回答完了。
 
 **Phase 1 —— `agentx-cli` 骨架 + 身份 + 一个族**
-- Rust workspace 新建（顶层 `rust/` 或 cargo workspace 成员），arg 解析（clap）、帮助/渲染、
+- [x] ~~Rust workspace 新建（顶层 `rust/` 或 cargo workspace 成员），arg 解析（clap）、帮助/渲染、
   身份读取（**自定盘上格式**，独立 store 根；**不需要**与 TS 逐字节兼容，见 §8-E）、
-  core 客户端子集里 `msg` 必需的那部分。
-- **第二件事是传输层**（Phase 0 结果第 4 条）：reqwest + 本服务的 JSON-RPC 信封 + HTTP 签名
+  core 客户端子集里 `msg` 必需的那部分。~~ **已落**（2026-10-02）。
+- [x] ~~**第二件事是传输层**（Phase 0 结果第 4 条）：reqwest + 本服务的 JSON-RPC 信封 + HTTP 签名
   （crate 的 `generate_auth_header` / `did_wba`）+ `x_agentx` 扩展面。没有它，`msg` 一族一行都
-  跑不起来；有了它，Phase 0 剩下的"真打一发"顺手就做了。
+  跑不起来；有了它，Phase 0 剩下的"真打一发"顺手就做了。~~ **已落**（2026-10-02）。
 
 **Phase 1 进展（2026-10-02）**
 
@@ -370,18 +405,30 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
   （`process_welcome_v2` / `process_commit_v2`，靠 `msg listen` 投递驱动）；身份这块还剩
   "换钥/换设备/`update_document`"。
 - 先落 **`msg`** 一族（含 `msg listen` 常驻契约），因为它是 §4 消息库的入口。
+  → [x] ~~已落~~
 - **与 TS `connectx` 并存**，`CONNECTX_HOME` 的处理见 §8-F。
 
-**Phase 2 —— 消息库**
-- `messages.db`（§4）+ 本地游标 + 与 `mls/` 的分工；read 状态与对账规则落定。
-- 这一步**触及服务端**（ack / 保留 / 补拉），与"把服务做好"合并做。
+**Phase 2 —— 消息库**（还没动）
+- [ ] `messages.db`（§4）+ 本地游标 + 与 `mls/` 的分工；read 状态与对账规则落定。
+- [ ] 这一步**触及服务端**（ack / 保留 / 补拉），与"把服务做好"合并做。
 
-**Phase 3 —— 逐族补齐**
-`group`（含 `group e2ee`，即 B2 的目标）→ `did` → `anp`（login/sign）→ `agent`。每族一次提交。
+**Phase 3 —— 逐族补齐**（每族一次提交）
+`group`（含 `group e2ee`，即 B2 的目标）→ `did` → `anp`（login/sign）→ `agent`。
 
-**Phase 4 —— 覆盖与收束**
-新客户端自己的端到端（Rust 侧，或驱动二进制的 TS 侧——今天的 `packages/e2e` **不覆盖它**，
-见 §8-H）；`agentx-cli` 的命令面定稿；TS CLI 冻结在某个版本（§8-I）。
+- [x] ~~P4 `group` 一族~~（2026-10-02）：`create | info | members | join | leave | send`
+- [x] ~~`group e2ee publish | get-key-package`~~（2026-10-02）
+- [x] ~~`group e2ee create`~~（2026-10-02）
+- [ ] `group e2ee add | remove | send`（§9.3/§9.4/§9.5）
+- [ ] `group e2ee` 收包路径：`process_welcome_v2` / `process_commit_v2`（靠 `msg listen` 投递驱动）
+- [ ] 身份：换钥 / 换设备 / `update_document`
+- [ ] `did` 剩下的三条：`resolve` / `update` / `restore`
+- [ ] `anp` 一族：`show` / `login` / `sign`
+- [ ] `agent` 一族：`show` / `use` / `list`
+- [ ] `version`
+
+**Phase 4 —— 覆盖与收束**（还没动）
+- [ ] 新客户端自己的端到端（Rust 侧，或驱动二进制的 TS 侧——今天的 `packages/e2e` **不覆盖它**，
+  见 §8-H）；`agentx-cli` 的命令面定稿；TS CLI 冻结在某个版本（§8-I）。
 
 ---
 
@@ -498,10 +545,14 @@ Phase 1 到此收口：`msg listen` 与 `group` 一族都已落地（见 §6）�
 
 与 [client-mls.md](docs/design/client-mls.md) §8 同一份清单，此处只记依赖：
 
-1. **fetch** 本机 `anp` 检出（0.9.0，落后 origin/master 93 个提交）；
-2. **在 1.0.5 上重核** §2 / §3 用到的每个函数签名（1.x 有 `v2_origin`、`sealed_handoff` 等
-   新模型，0.9.0 上的判断要重验）；
-3. **定 pin**（§7 第 4 点）。与 `awiki-open-server` 钉 `anp==1.0.3`（Python）**无关**。
+1. [x] ~~**fetch** 本机 `anp` 检出（0.9.0，落后 origin/master 93 个提交）；~~ 已 fetch
+   （**注意**：crates.io 的 1.0.5 对应 `origin/release/0929`，**不是** `origin/master`；
+   本机检出的版本号仍是 0.9.0 那条线，读源码用 `git show origin/release/0929:rust/...`）。
+2. [x] ~~**在 1.0.5 上重核** §2 / §3 用到的每个函数签名（1.x 有 `v2_origin`、`sealed_handoff` 等
+   新模型，0.9.0 上的判断要重验）；~~ 已核，结论落在 §2/§3/§6 的各处（含 crate 自带
+   origin proof、`group_e2ee::operations::v2` 的真实签名）。
+3. [x] ~~**定 pin**（§7 第 4 点）。与 `awiki-open-server` 钉 `anp==1.0.3`（Python）**无关**。~~
+   已定 `anp = "1.0.5"`（`rust/Cargo.toml`）。
 
 ---
 
@@ -514,4 +565,5 @@ Phase 1 到此收口：`msg listen` 与 `group` 一族都已落地（见 §6）�
 不提交密钥。**消息库一旦落明文，它就是密钥**（§8-B）——备份、调试、分享一律按 TODO4 §E 那条办。
 
 **当前基线**（TODO4 §E）：`npm run typecheck` 通过，`npm test` = 213 + 695 + 4 + 652 = **1564**
-全绿。本台账**纯方案，尚未动任何代码**。
+全绿。本台账**已不是"纯方案"**：命令面落到哪儿见 §6 的「进度总表」；Rust 侧 `cargo test` = **69**
+全绿（`rust/`）。
