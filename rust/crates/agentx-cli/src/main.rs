@@ -541,7 +541,9 @@ enum MsgCommand {
     /// (`/anp-im/rpc` → `/anp-im/stream`), so a service that mounts its stream elsewhere
     /// cannot be reached by this command.
     ///
-    /// Nothing is stored locally: the delivery cursor lives on the service, per
+    /// Every message it consumes is also written to the local store (`messages.db`,
+    /// client-messages.md), because the plaintext of an E2EE group message has no other
+    /// home. The *delivery cursor* is not local: it lives on the service, per
     /// `(identity, device)`, and a reconnect resumes from it. Ctrl-C exits 0.
     Listen {
         /// Which device this stream is. Defaults to the local `agent/profile`, so the same
