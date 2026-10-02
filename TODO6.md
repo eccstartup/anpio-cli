@@ -83,7 +83,9 @@
       —— 进度：**§3 的 `contacts` 一族已随 `cf4b7dd` 落地**，文档同批写完
       （`rust/README.md` 的 `contacts` 条 + `msg send --to` 那一条，
       `docs/design/message-service.md` §9.4 的接口定义、§9.1 与 §13 的 Profile 清单）。
-      §4 的成员名 / 群备注 / "我在群里的昵称"三条还没落地，落地时同样补文档。
+      **§4 的"群里成员的名字"也已落地**（`rust/crates/agentx-cli/src/contacts.rs` 的
+      `RosterNames` + `main.rs` 的 `group members --names`），文档同批在 `rust/README.md`
+      的 `group` 条里。§4 剩下的群备注 / "我在群里的昵称"两条还没落地，落地时同样补文档。
 - [ ] `TODO5.md` §6 里那些"端到端跑过"的记录**是历史，不是说明**。参考页要能独立站住，
       不能要求读者先去读一份 TODO。
 
@@ -184,13 +186,27 @@ ANP 的定址单位是 **DID**，`msg send --to` 只吃 DID。
 - [x] **`group info` 打出 `group_profile.display_name`**：先查今天打不打；
       不打就是一条现成的补丁。
       —— 今天**已经打**（`report_group_info` → `name:`），不是缺口。
-- [ ] **群里成员的名字**：`group members` 今天只出 did / role / status / joined_at。
+- [x] ~~**群里成员的名字**~~：`group members` 今天只出 did / role / status / joined_at。
       加名字有两条路，要选：
       ① `--names` 显式开关，逐个去主机取 profile（群大了会很慢，但总是新的）；
       ② 只显示**通讯录里已经认得的**，认不得就只出 DID（快，但依赖 §3 的表）。
       **建议 ②为主、①做逃生舱**：默认不联网，要名字就明确要。
       —— **2026-10-02 裁定：按"②为主 + ①逃生舱"做**（用户选的就是这条）。
       默认那条只读 `contacts.list`，认不得就出 DID；`--names` 才逐个去各自主机 `get_me`。
+      —— **2026-10-02 落地**。默认读一次 `contacts.list`，名字按 **`subject`** 查（§3.2：
+      换钥后仍认得出人），认不得就只出 DID；`--names` 只对**通讯录不认得**的成员去各自
+      **DID 主机**取名字，**备注优先**、已起过名的不再问。两条要说清的：
+      (a) 取名字走的是主机上那条**免凭据的公开资料路由**
+      `GET /user-service/v1/users/<did>/profile`（awiki 自己的兼容面，不是 ANP——
+      `get_me` 要 bearer token，我们只有自己身份的，读不了对端的）；
+      路径里的 DID 要**把 `%` 再转义一次**（`%3A` → `%253A`），否则服务端解一次码就得到
+      `localhost:8765` 这个不存在的 DID——已用真主机对过：不转义回 404 `profile_not_found`。
+      (b) 对端主机不是 awiki 时该成员退回只出 DID，末尾一行 `note: N member(s) …`。
+      **不是失败**：可执行的那一半（DID）照样在。`--json` 始终是服务答复原文，名字属于
+      给人看的那一层。真链路跑过：本仓 service 上建群 → awiki 身份 `group join` 进群 →
+      默认只出 DID；`--names` 把 awiki 那边的 `Names Alice` 取回来，而 toy host 那个成员
+      如实落进 note；给 awiki 那位起了备注后，`--names` 也只出备注（对方改成
+      `AWIKI-NAME-WINS` 也没顶掉它）。4 个新单测（`contacts::tests` 的 `RosterNames`）。
 - [ ] **群的本地备注**：和人的 remark 同口径，落在本地表
       （`groups(group_did / subject, remark, ...)`）。我给群起的名字，协议里没有。
       —— 口径要跟 §3 对齐：人的备注落在 **service 的库**（`contacts` 表，`owner_did` 分行），
@@ -209,7 +225,7 @@ ANP 的定址单位是 **DID**，`msg send --to` 只吃 DID。
 
 | 档 | 含义 | 今天 |
 | --- | --- | --- |
-| **一** | 单测全绿 | ✅ 143 个库侧 + 6 个命令面（`tests/cli_surface.rs`） |
+| **一** | 单测全绿 | ✅ 147 个库侧 + 6 个命令面（`tests/cli_surface.rs`） |
 | **二** | 一个人照文档能手工跑完一条链路 | ⚠️ 能跑，但配方只存在于本次对话和 TODO5 §6 的散文里 |
 | **三** | **一条命令**跑完全链路，并且 CI 每次 push 都跑 | ❌ 没有 |
 

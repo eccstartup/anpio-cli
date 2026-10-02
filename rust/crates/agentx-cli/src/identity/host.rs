@@ -25,6 +25,8 @@ use super::store::Identity;
 /// (`get_me` / `update_me`), which is why the nickname lives there and not under `did-auth`.
 const DID_AUTH_PATH: &str = "/user-service/v1/did-auth/rpc";
 const PROFILE_PATH: &str = "/user-service/v1/did/profile/rpc";
+/// The credential-free view of a profile, by DID. See [`fetch_public_profile`].
+const PUBLIC_PROFILE_PATH: &str = "/user-service/v1/users";
 
 /// What the host says about itself, read from its `/.well-known/did.json`.
 pub struct HostService {
@@ -253,6 +255,40 @@ pub async fn update_profile(
     fields: Value,
 ) -> Result<Value> {
     call(client, base, PROFILE_PATH, "update_me", fields, Some(token)).await
+}
+
+/// The profile **anyone** can read, for a DID that is not ours — the escape hatch behind
+/// `group members --names` (TODO6 §4.2 ①).
+///
+/// [`fetch_profile`] above is the host's control plane: it wants the bearer token `register`
+/// handed out, and only the owner of the identity has one. Asking for a *peer's* name is not
+/// an owner's request, so this is a different route with no credential at all: the DID in the
+/// path, and the public view of the same profile — the name, avatar and blurb the peer chose
+/// for itself.
+///
+/// Like `get_me`, this is **awiki's own surface, not ANP** (rust/README.md, `me show | set`):
+/// the protocol has no nickname anywhere. A peer hosted elsewhere may well answer 404 or
+/// nothing here, and that is a "no name for this member", not a failure of the caller.
+pub async fn fetch_public_profile(client: &reqwest::Client, base: &Url, did: &str) -> Result<Value> {
+    // The DID is **one** path segment, and it carries a percent-encoded port in its first
+    // segment (`localhost%3A8765`). The server decodes what it receives, so sending `%3A`
+    // through would hand it `localhost:8765` — a string that is not this DID, and one no row
+    // is keyed by. Escaping the percent sign is what keeps the DID byte-identical end to end.
+    let encoded = did.replace('%', "%25");
+    let url = base
+        .join(&format!("{PUBLIC_PROFILE_PATH}/{encoded}/profile"))
+        .with_context(|| format!("{base} cannot serve {PUBLIC_PROFILE_PATH}"))?;
+    let response = client
+        .get(url.clone())
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    let status = response.status();
+    let text = response.text().await.with_context(|| format!("reading {url}"))?;
+    if !status.is_success() {
+        bail!("GET {url} failed: HTTP {status}: {}", snippet(&text));
+    }
+    serde_json::from_str(&text).with_context(|| format!("{url} did not return JSON"))
 }
 
 /// The `sha256:<base64url>` digest the host computes over a stored document (RFC 8785 JSON

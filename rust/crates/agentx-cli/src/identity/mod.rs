@@ -20,8 +20,8 @@ pub use did::{
     without_proof, CreateIdentityInput,
 };
 pub use host::{
-    document_hash, fetch_host_service, fetch_profile, register_identity, update_document, update_profile,
-    HostService, Issued,
+    document_hash, fetch_host_service, fetch_profile, fetch_public_profile, register_identity,
+    update_document, update_profile, HostService, Issued,
 };
 pub use session::{
     load_session, parse_ttl_seconds, save_session, session_host, SessionEntry, SessionFile, SessionWrite,

@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use agentx::contacts::{
     ambiguous_name_error, book_from_json, looks_like_a_did, lookup, not_a_did_error,
-    unknown_name_error, Contact, Lookup,
+    unknown_name_error, Contact, Lookup, RosterNames,
 };
 use agentx::group::{group_target, policy_of, service_target};
 use agentx::group_receive::GroupReceiver;
@@ -23,7 +23,8 @@ use agentx::anp::login::login;
 use agentx::anp::{LoginError, Superseded};
 use agentx::identity::{
     create_identity, current_agent_path, deliver, describe_status, document_hash, document_is_superseded,
-    fetch_host_service, fetch_profile, list_identities, load_session, load_stored_key, parse_ttl_seconds,
+    fetch_host_service, fetch_profile, fetch_public_profile, list_identities, load_session, load_stored_key,
+    parse_ttl_seconds,
     read_current_agent, register_identity, resign_document, resolve_agent_id, resolve_agent_id_with_source,
     resolve_chain, retirement_document, save_session, select_current_agent, session_host, snake_case_name, subject_of,
     successor_of, update_document, update_profile, without_proof, Accepted, ChainError, ChainResolution,
@@ -32,7 +33,7 @@ use agentx::identity::{
 };
 use agentx::message::{
     build_message_request, call, call_device, call_extension, call_group, device_of, did_host, did_to_url,
-    discover, document_in_crate_form, group_e2ee_security_profile, http_client, now_rfc3339,
+    discover, document_in_crate_form, document_url, group_e2ee_security_profile, http_client, now_rfc3339,
     open_channel, open_channel_for, parse_capabilities, payload_of, policy_for, post_message,
     resolve_did_document, rejection, run_listen, uuid_v4, view_for, websocket_connect, AnpMeta,
     AnpResponse, AnpTarget, CallRequest, Channel, ConnectFn, ListenArgs, ListenDeps, ResolvePolicy,
@@ -672,9 +673,21 @@ enum GroupCommand {
     ///
     /// Not a separate method on the wire: P4 §7.5 makes the list an option on `get_info`, so
     /// this is a spelling of the same call with a longer, more expensive answer.
+    ///
+    /// Names come from the address book (`contacts.list`, TODO6 §3), so a member already in
+    /// the book prints as the remark you gave them — that costs one extra round trip and no
+    /// per-member fetch. `--names` additionally asks each of the remaining members' own DID
+    /// host for the name they chose for themselves (TODO6 §4.2 ①), which is one request per
+    /// unnamed member. A host that does not answer leaves that member printed as their DID:
+    /// the route is awiki's own and not ANP's, so "no name" is a normal answer here.
+    ///
+    /// `--json` prints the service's roster verbatim — names belong to the human rendering,
+    /// the same rule `msg send --json` follows for its `named:` line.
     Members {
         #[arg(value_name = "GROUP_DID")]
         group_did: String,
+        #[arg(long)]
+        names: bool,
         #[arg(long)]
         json: bool,
         #[command(flatten)]
@@ -1068,12 +1081,13 @@ async fn main() -> anyhow::Result<()> {
                 group_did,
                 json,
                 own,
-            } => cmd_group_info(&own, &group_did, false, json, &allow_private).await,
+            } => cmd_group_info(&own, &group_did, false, false, json, &allow_private).await,
             GroupCommand::Members {
                 group_did,
+                names,
                 json,
                 own,
-            } => cmd_group_info(&own, &group_did, true, json, &allow_private).await,
+            } => cmd_group_info(&own, &group_did, true, names, json, &allow_private).await,
             GroupCommand::Join {
                 group_did,
                 json,
@@ -3289,6 +3303,7 @@ async fn cmd_group_info(
     own: &OwnIdentity,
     group_did: &str,
     members: bool,
+    names: bool,
     json: bool,
     allow_private: &[String],
 ) -> anyhow::Result<()> {
@@ -3313,7 +3328,8 @@ async fn cmd_group_info(
         return Ok(());
     }
     if members {
-        report_roster(&result)?;
+        let (roster_names, unfetched) = member_names(own, &client, &result, names, allow_private).await?;
+        report_roster(&result, &roster_names, unfetched)?;
     } else {
         report_group_info(&result);
     }
@@ -4198,9 +4214,88 @@ fn report_group_info(result: &Value) {
     }
 }
 
+/// DID → name for one roster (TODO6 §4.2).
+///
+/// Two sources, in this order, because they answer different questions. A remark is what *I*
+/// call this peer: deliberate, mine, and the one of the two that survives the peer renaming
+/// itself. The peer's own display name fills in the members the book does not know — and it is
+/// asked **only** for those, so a group whose members are all in the book costs no per-member
+/// request at all while `--names` still does what it says for the rest.
+///
+/// The count that comes back with the names is how many members `--names` asked about and got
+/// no answer for. It is reported rather than swallowed: a roster that quietly fell back to DIDs
+/// looks the same as one where nobody has a name.
+async fn member_names(
+    own: &OwnIdentity,
+    client: &reqwest::Client,
+    roster: &Value,
+    fetch: bool,
+    allow_private: &[String],
+) -> anyhow::Result<(RosterNames, usize)> {
+    // One read of the book whether or not `--names` was given: it is the default source, and
+    // it also decides which members still need asking. `contacts.list` is self-addressed, so
+    // this needs a channel to **our** service — the group's channel is addressed to the group.
+    let identity = Identity::load(&own.location()?)?;
+    let channel = open_channel(client, &identity, allow_private).await?;
+    let book = fetch_contacts(client, &channel).await?;
+    let mut names = RosterNames::from_book(&book);
+    let mut unfetched = 0usize;
+
+    if fetch {
+        for row in rows_of(roster, "member_list") {
+            let Some(agent_did) = text_of(row.get("agent_did")) else {
+                continue;
+            };
+            // A member the book already names is not asked about: the remark is the reader's
+            // own word for them, and one HTTP round trip per known member is the cost the
+            // escape hatch was meant to avoid.
+            if names.name_of(agent_did).is_some() {
+                continue;
+            }
+            match peer_display_name(client, agent_did, allow_private).await {
+                Some(name) => names.remember(agent_did, name),
+                None => unfetched += 1,
+            }
+        }
+    }
+    Ok((names, unfetched))
+}
+
+/// The name a peer chose for itself, read from its own DID host (TODO6 §4.2 ①).
+///
+/// `None` for every way of not having one — the host does not answer, it serves no public
+/// profile for this DID, or the profile carries no name. They are one answer on purpose: the
+/// caller prints the DID either way, and telling "their host is down" apart from "they never
+/// set a name" would not change anything it could do about it.
+async fn peer_display_name(
+    client: &reqwest::Client,
+    agent_did: &str,
+    allow_private: &[String],
+) -> Option<String> {
+    let host = did_host(agent_did).ok()?;
+    // The scheme gate is the one the document fetch uses, and it is needed for the same
+    // reason: a DID spells `https` and cannot say otherwise, so a host reachable over plain
+    // HTTP is only reachable where the caller allowed it (`--allow-private`, or loopback).
+    let policy = policy_for(std::slice::from_ref(&host), allow_private);
+    // The returned URL is the DID's own document address, which is fine as a base: every path
+    // here is absolute, and joining one discards the rest — what has to survive is scheme,
+    // host and port, and those are exactly what a DID host base is.
+    let base = document_url(agent_did, &policy).ok()?;
+    let profile = fetch_public_profile(client, &base, agent_did).await.ok()?;
+    // `display_name` is what `me set --name` writes; the rest are the host's other spellings
+    // of the same thing, tried in that order so a profile that has only a handle still names
+    // the member. All three empty is "no name", not an empty name.
+    for field in ["display_name", "nick_name", "handle"] {
+        if let Some(name) = text_of(profile.get(field)) {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
 /// §7.2: `agent_did` / `role` / `status` are the minimum; `joined_at` and `added_by` are
 /// optional and printed when present.
-fn report_roster(result: &Value) -> anyhow::Result<()> {
+fn report_roster(result: &Value, names: &RosterNames, unfetched: usize) -> anyhow::Result<()> {
     let rows = rows_of(result, "member_list");
     if rows.is_empty() {
         println!("no members listed (the service returns a roster only to callers entitled to it)");
@@ -4215,7 +4310,20 @@ fn report_roster(result: &Value) -> anyhow::Result<()> {
             Some(joined) => format!("  joined {joined}"),
             None => String::new(),
         };
-        println!("  {status:<8} {role:<6} {agent}{joined}");
+        // The DID stays on the line even when there is a name for it: it is the address, and
+        // it is what the next command takes. The name is an annotation on it, not a
+        // replacement.
+        match names.name_of(agent) {
+            Some(name) => println!("  {status:<8} {role:<6} {agent}  {name}{joined}"),
+            None => println!("  {status:<8} {role:<6} {agent}{joined}"),
+        }
+    }
+    if unfetched > 0 {
+        println!(
+            "note: {} member{} could not be named (no public profile on their host); their DID is printed instead",
+            unfetched,
+            if unfetched == 1 { "" } else { "s" }
+        );
     }
     Ok(())
 }

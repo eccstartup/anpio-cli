@@ -30,7 +30,9 @@
 //! is a different question with a different owner.
 
 use serde_json::Value;
+use std::collections::HashMap;
 
+use crate::identity::subject_of;
 use crate::error::{AgentxError, Result};
 
 /// One row of the book, as the service returns it.
@@ -125,6 +127,53 @@ pub fn lookup(book: &[Contact], input: &str) -> Lookup {
         0 => Lookup::None { did_shaped: looks_like_a_did(input) },
         1 => Lookup::One(Box::new(matches.into_iter().next().expect("length is 1"))),
         _ => Lookup::Ambiguous(matches),
+    }
+}
+
+/// The names a member roster can be annotated with, keyed by **subject** (TODO6 §4.2 ②).
+///
+/// A group's member list carries no name at all (§4.1): every entry is a DID, and a person
+/// reading a roster of DIDs learns nothing. The book is what turns one back into a name, but
+/// only for the peers it already knows — which is the deal, not a shortcoming: a name here is
+/// one the reader themselves chose, and `--names` exists for the members nobody has named.
+///
+/// The key is the subject rather than the DID for §3.2's reason, and it matters *more* here
+/// than in `lookup`: `lookup` only fails to find a name, while a roster lookup that missed
+/// would silently print the DID. A peer that rotated a key is still the same peer.
+#[derive(Debug, Default)]
+pub struct RosterNames {
+    by_subject: HashMap<String, String>,
+}
+
+impl RosterNames {
+    /// Index the rows of a book that have a name. A row without a remark contributes nothing
+    /// — there is no name to show, which is a normal state and not a missing one.
+    pub fn from_book(book: &[Contact]) -> Self {
+        Self {
+            by_subject: book
+                .iter()
+                .filter_map(|contact| {
+                    contact
+                        .remark
+                        .as_ref()
+                        .map(|remark| (contact.subject.clone(), remark.clone()))
+                })
+                .collect(),
+        }
+    }
+
+    /// The name for one roster entry, if the book has one.
+    pub fn name_of(&self, agent_did: &str) -> Option<&str> {
+        self.by_subject.get(&subject_of(agent_did)).map(String::as_str)
+    }
+
+    /// Record a name learned some other way — `--names` reads it off the peer's own host.
+    ///
+    /// Kept here, rather than letting the caller build the map itself, so the one rule that
+    /// matters (the key is the subject) cannot be spelled differently at the second write
+    /// site. A second spelling is how the two halves of a roster would come to disagree.
+    pub fn remember(&mut self, agent_did: &str, name: String) {
+        self.by_subject.insert(subject_of(agent_did), name);
     }
 }
 
@@ -324,5 +373,58 @@ mod tests {
     fn a_contact_without_a_did_is_refused_rather_than_read_as_empty() {
         let row = json!({ "subject": "x", "remark": "Alice" });
         assert!(Contact::from_json(&row).is_err());
+    }
+
+    /// The two halves of one key rotation, minted rather than written by hand: a DID's
+    /// fingerprint segment is a real key's multibase encoding, and a made-up `e1_zzz` does not
+    /// parse — `subject_of` returns it verbatim, so a test built on one would pass no matter
+    /// what the lookup keyed on. This is the same pair `identity::did`'s
+    /// `a_successor_moves_the_fingerprint_and_nothing_else` uses.
+    fn rotated() -> (String, String) {
+        let older = crate::identity::test_support::mint("alice");
+        let next = crate::identity::successor_of(&older).unwrap();
+        assert_ne!(older.did, next.did, "the two spellings must differ");
+        (older.did, next.did)
+    }
+
+    #[test]
+    fn a_roster_entry_is_named_through_a_key_rotation() {
+        // TODO6 §4.2 ② + §3.2. The book holds the DID the peer has since rotated away from;
+        // the roster holds the new one. They are the same person, and the name must still
+        // land — a lookup keyed by DID prints the bare DID here, which reads like a gap in the
+        // book rather than a key chosen wrongly.
+        let (older, next) = rotated();
+        let names = RosterNames::from_book(&[contact(Some("Alice"), &older)]);
+        assert_eq!(names.name_of(&next), Some("Alice"));
+    }
+
+    #[test]
+    fn a_member_the_book_does_not_name_gets_no_name() {
+        // §4.1: the roster has no name field, so a member outside the book is just a DID.
+        // This is the gap `--names` exists to fill, and getting `Some("")` here instead of
+        // `None` would print an empty column that looks like a name.
+        let names = RosterNames::from_book(&[contact(Some("Alice"), ALICE), contact(None, BOB)]);
+        assert_eq!(names.name_of(BOB), None);
+        assert_eq!(names.name_of("did:wba:elsewhere.example:user:carol:e1_ddd"), None);
+    }
+
+    #[test]
+    fn a_name_learned_from_the_peers_own_host_lands_on_the_same_subject_key() {
+        // `--names` writes through a different path than `from_book`, and a second spelling
+        // of the key is exactly how the two halves of one roster would come to disagree: the
+        // fetched name would land on a row no later lookup ever asked about.
+        let (older, next) = rotated();
+        let mut names = RosterNames::from_book(&[]);
+        names.remember(&next, "Alice Smith".to_string());
+        assert_eq!(names.name_of(&older), Some("Alice Smith"));
+    }
+
+    #[test]
+    fn a_roster_lookup_of_something_that_is_not_a_did_does_not_panic() {
+        // `text_of(row.get("agent_did")).unwrap_or("(unnamed)")` in the renderer feeds the
+        // placeholder through here, and `subject_of` is total — so the placeholder is a
+        // subject that nothing is keyed by, rather than a crash in the middle of a listing.
+        let names = RosterNames::from_book(&[contact(Some("Alice"), ALICE)]);
+        assert_eq!(names.name_of("(unnamed)"), None);
     }
 }

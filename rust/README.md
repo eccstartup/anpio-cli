@@ -40,7 +40,7 @@ pin 为准**，源码阅读用 `git show origin/release/0929:rust/...`。
 
 store 根是 `AGENTXCLI_HOME`（缺省 `~/.agentx-cli`），一条身份由 `--agent` / `--profile`
 命名——两个都可以不写：`--agent` > `$AGENTXCLI_AGENT` > 当前 agent（`agent use` 选的）>
-`default`，`--profile` > `$AGENTXCLI_PROFILE` > `default`。`cargo test` 全绿（143 个单测）。
+`default`，`--profile` > `$AGENTXCLI_PROFILE` > `default`。`cargo test` 全绿（147 个单测）。
 
 - **`did create | show | list | register`** —— 身份存储 + DID 文档。
   `list` 与 `agent list` 不是一回事：后者答"现在是谁"（选择），前者答"这里有哪些 DID"（身份），
@@ -142,6 +142,16 @@ cargo run --manifest-path rust/Cargo.toml -- discover http://127.0.0.1:8787
   `update-profile --name` 改的是**群自己的名字** `group_profile.display_name`（§7.4），
   正文是 `group_profile_patch`（RFC 7386 合并，§8.7.2），要走 `permissions.update_profile`——
   这是 CLI 里唯一能写群名的地方；`group info` 把它读出来。
+  **`members` 的名字有两档**（TODO6 §4.2）：默认读一次通讯录（`contacts.list`），
+  认得的成员在 DID 后面跟**你给他起的备注**——名字挂在 `subject` 上（§3.2），
+  对端换钥也不会丢；认不得的就只出 DID，那正是 `--names` 存在的理由，
+  它逐个别名成员去**各自的主机**取对方给自己起的名字。两处都只做**非 `--json`** 的那一档：
+  `--json` 始终是服务的答复原文，名字属于给人看的那一层（和 `msg send --json` 的 `named:` 同一条规矩）。
+  `--names` 有两条要说清的：一是**备注优先**——`--names` 只补通讯录不认得的那几个，
+  已经起过名的成员不会被对方改过的昵称顶掉；二是**它读的是 awiki 的公开资料路由，不是 ANP**
+  （协议里根本没有昵称，见 `me show | set` 那条）。所以对端主机不是 awiki 时，这个成员就
+  退回只出 DID，末尾打一行 `note: N member(s) could not be named`——**不是失败**，
+  可执行的那一半（DID）照样在。
   **端到端要打本仓的 `packages/service`**：本机 awiki host 对 `group create` 回 HTTP 401，
   是它自己不许 public RPC 建群的策略（`group.remote_create_not_allowed`），
   详见 [TODO5.md](../TODO5.md) §6 Phase 1。
