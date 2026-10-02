@@ -225,9 +225,16 @@ KeyPackage 的 `did_wba_binding` Object Proof 由设备自签，验证侧从**�
   另有 C11 记的"挡住 v1 的"两条：群 DID 文档没人发布（§5.2 L220 要求解析 `group_did` 才能
   找到 Host）；`serviceDid` 文档由 `awiki-open-server` 托管，外层 `keyid` 的 fragment 必须与它
   写进去的一致（与 A7 同源）。
-- **B2（= TODO1 E4，端到端）** `connectx msg send` → `AgentXAgent` → `connectx msg listen` 收到。
+- ~~**B2（= TODO1 E4，端到端）** `connectx msg send` → `AgentXAgent` → `connectx msg listen` 收到。
   今天 P4/P5/P6 都是**方法级**测过、**没串起来端到端跑过**。A1/A2 定了之后，这条应该顺带把
-  P6 也串进去。
+  P6 也串进去。~~
+  （2026-10-02：补了第四个 workspace `packages/e2e`，3 条用例串起 发送/收取/补历史/实时推送 四段。
+  服务侧用真 `loadConfig` + `createDispatch` + `createServer` + `createStreamSession`，与 `main.ts`
+  同一批模块同一批参数；客户端侧跑 `runMsg` / `runListen` 本体，真随机钥、真签名、真 WebSocket。
+  唯一替身是"谁托管 DID 文档"——一台按 `didToUrl` 推出来的路径发 `application/did+json` 的玩具主机；
+  真拿 `awiki-open-server` 当主机就测不到"对端服务在别处"（同 A7）。两个坑各留了一句注释：
+  端口必须先占（`config.publicUrl` / `serviceDid` / `stream.hello` 要三处一致），`--once` 在补完
+  历史后就结束、测实时推送得注 `ListenView` + `AbortSignal`。跑法 `npm run test:e2e`。）
 - ~~**B3（= TODO1 A7 尾）** `packages/service` 里不得直连 `resolveDidDocument`——消息定址一律走
   `ServiceLocator` / `KeyResolver`。core 里那 5 处与 CLI 那 2 处是 ANP-02/03/04 自己的解析，
   **留着**，只有 service 这一侧要收敛（E3 的评审清单钉这条）。~~
@@ -278,3 +285,5 @@ KeyPackage 的 `did_wba_binding` Object Proof 由设备自签，验证侧从**�
 - 不提交密钥。
 - 当前基线：`ec61ae8`，`npm run typecheck` 通过，`npm test` 207 + 693 + 620 全绿。
   （2026-10-02 更正计数：服务端那组从 581 长到 620——A3c 的四段各自带了测试。）
+  （2026-10-02 B2 之后：多一组，`npm test` = 207 + 693 + **3** + 620，第四组是 `packages/e2e`。
+  它一个文件就 4.5 秒——每条用例都真起一个服务、真连一次 socket，所以它比别组长，但不是卡住。）

@@ -3,7 +3,7 @@
 ANP（Agent Network Protocol）消息层的**客户端 + 服务端**实现：一个命令行客户端
 `connectx`，一个可自建的消息服务 `AgentXAgent`。
 
-## 三块
+## 三块 + 一个测试包
 
 | 包 | 产物 | 角色 |
 |---|---|---|
@@ -12,6 +12,10 @@ ANP（Agent Network Protocol）消息层的**客户端 + 服务端**实现：一
 | `packages/service` | `agentx` | ANPMessageService：接收、存储、推送、取件，群组与附件 |
 
 `core` 不含传输与进程，`cli` 与 `service` 都建在它上面。
+
+`packages/e2e` 是第四个包，只装测试：它把 `connectx` 的命令函数对着一个真跑起来的
+`AgentXAgent` 跑，中间是真 HTTP、真签名、真 WebSocket。它**不产出任何东西**，只
+回答一个别处回答不了的问题——这两块拼起来还成立吗。`npm run test:e2e`。
 
 ## 两处服务
 

@@ -1,0 +1,25 @@
+{
+  "name": "@agentx/e2e",
+  "version": "0.0.0",
+  "private": true,
+  "description": "End-to-end: the connectx CLI talking to AgentXAgent across a real socket.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eccstartup/ANPMessageService.git",
+    "directory": "packages/e2e"
+  },
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.1",
+    "typescript": "^5.0.0",
+    "vitest": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=24.16.0"
+  }
+}
