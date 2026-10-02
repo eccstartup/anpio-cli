@@ -638,8 +638,16 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 - [x] ~~`group e2ee send`~~（2026-10-02）
 - [x] ~~`group e2ee` 收包路径：`process_notice_v2` / `decrypt_received_v2`~~（2026-10-02；靠 `msg listen` 投递驱动）
 - [x] ~~`did list`~~（2026-10-02；`did` 一族与 `cli.md` §3.1 的七条对齐，见 §6）
-- [ ] 身份：换钥 / 换设备 / `update_document`（`did update` 只是其中的"换钥"那一半；还剩
-  文档已存在时的替换（`update_document`，`register` 的对端）与换设备）
+- [ ] 身份：换钥 / 换设备 / `update_document`。**2026-10-02 核过 `update_document`，它卡在一条
+  已冻结的约束上，不是没写**：awiki host 的 `update_document`（`user_compat/core.py:974`）
+  用 **bearer token 当控制权证明**（`current_did(request)`），而那个 token 只有 `register`
+  那一次会发；`register` 撞到已注册的 DID 时在发 token 之前就 `Conflict` 了。本客户端要在
+  两次调用之间留住它，就得**从 `session.json` 读回**——而 `cli.md` §1 约束 3 **明文冻结**了
+  "CLI 不从缓存里读回 token"（连带不设 `logout`）。按 §1 那条判据（"有没有一条 CLI 路径会
+  消费它"），`update_document` 现在**没有消费它的路径**。要动它得先改 §1 约束 3，那是裁定不是实现。
+  （另外 host 侧它本来就拒绝改设备钥/根钥——`device_key_or_root_change_not_supported` /
+  `root_change_not_supported`——所以"换钥"确实归 `did update` 的 ANP-03 链，"换设备"归
+  设备清单，两者都不是这个 RPC。）
 - [x] ~~`did resolve` / `did restore`~~（2026-10-02；`resolve` 的文档面 + `--chain` 走完更新链，
   `restore` 是明说的拒绝。见 §6）
 - [x] ~~`did update`（写的那半：`--target` / `--resume`，与本机钥的生命周期一起）~~（2026-10-02；
