@@ -403,7 +403,8 @@ CLI 不替调用方决定。
 2. **暂存的后继钥叫 `successor.json`**，语义一样（提交一次更新的中间态，是那把钥的唯一副本），
    名字不同。P6 的设备状态多出 `mls/` 一个目录，`connectx` 没有——它不做 P6。
 
-`msg` 族在这两套里都不新增存储；`messages.db`（TODO5 §4）尚未落地，落地时是 `mls/` 的兄弟目录。
+`msg` 族在这两套里都不新增存储；`messages.db`（TODO5 §4）尚未落地，落地时是 `mls/` 的兄弟目录
+——形状已定在 [client-messages.md](client-messages.md)，含"为什么是两个文件而不是一个 sqlite"。
 
 ## 9. 与 core 的边界
 

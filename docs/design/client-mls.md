@@ -9,6 +9,16 @@
 口径是**方案，不是落地记录**。下面的函数名、版本、形状都核过，但一行代码还没写；动手第一步
 见 §8。
 
+> **2026-10-02 读法更正（TODO5 §1、§3）。** §3 与 §4 里那个 **`packages/mls` napi crate +
+> `CONNECTX_HOME` 下的 store** 是当时那份计划，**已经取消**：MLS 只在 Rust crate 里，
+> 所以不做 napi 壳，**直接由 Rust 客户端调**（[TODO5.md](../../TODO5.md) §3 那句"B2 的 napi
+> 壳整条取消——不是'要写两次'，是'换一种方式拿 MLS'"）。今天的事实是：
+> store 在 `$AGENTXCLI_HOME/<agent>/<profile>/mls/`（**不是** `CONNECTX_HOME`，两个客户端
+> 的 store 根是分开的），实现是 [`rust/crates/agentx-cli/src/mls.rs`](../../rust/crates/agentx-cli/src/mls.rs)，
+> **已经真的在跑**（`publish` / `get-key-package` / `create` / `add` / `remove` / `send` 与收包路径）。
+> 保留下来的读法是 §2 / §2.1 那张 crate 函数对照表与 §5 的四个坑——它们与实现无关，仍然成立。
+> 这个目录里的**兄弟** `messages.db` 单独一份：[client-messages.md](client-messages.md)。
+
 ## 1. 为什么有这一块
 
 服务端那一半**早就写完了**：`packages/service/src/rpc/groupE2ee.ts` 571 行受理逻辑，配
