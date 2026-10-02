@@ -16,6 +16,7 @@ import type { DataPlaneHandler, DataPlaneResponse } from '../dataplane'
 // 这两条路由的路径由**铸 `upload_uri` / `object_uri` 的那个模块**定义：客户端的 URL 与
 // 服务端的路由表必须说的是同一个字符串，各写一份字面量只会有一半跟着改。
 import { OBJECTS_PATH, UPLOAD_PATH } from '../rpc/attachments'
+import { GROUP_DID_SEGMENT, groupDidOf } from '../rpc/groups'
 import { upgrade, type WebSocketConnection, type WebSocketHandlers } from '../stream/ws'
 
 export const RPC_PATH = '/anp-im/rpc'
@@ -73,7 +74,10 @@ function trimTrailingSlash(path: string): string {
  *  `/g/` 当成绝对路径写死的原因。返回空串表示群文档就挂在根上。 */
 export function groupDidRoutePrefix(config: Config): string {
   const probe = 'probe'
-  return new URL(didToUrl(`${config.serviceDid}:g:${probe}`)).pathname.slice(0, -`/g/${probe}/did.json`.length)
+  return new URL(didToUrl(groupDidOf(config.serviceDid, probe))).pathname.slice(
+    0,
+    -`/${GROUP_DID_SEGMENT}/${probe}${GROUP_DID_SUFFIX}`.length,
+  )
 }
 
 /** `POST /anp-im/rpc`, the control plane. `body` is the request text, undecoded: the
@@ -344,12 +348,12 @@ export function createServer(options: ServerOptions): RunningServer {
           return
         }
         if (options.handleGroupDid === undefined) {
-          refuse(res, 501, `${groupDidPath}<id>/did.json is not implemented yet`)
+          refuse(res, 501, `${groupDidPath}<id>${GROUP_DID_SUFFIX} is not implemented yet`)
           return
         }
         // 未知的群 id（以及 v11 之前建的、没有钥的群）是 404：这里没有你问的东西，不是我们
         // 坏了。一个陌生人猜了一个 id 打过来不该看到 500（TODO3 A3）。
-        const document = options.handleGroupDid(`${config.serviceDid}:g:${groupId}`)
+        const document = options.handleGroupDid(groupDidOf(config.serviceDid, groupId))
         if (document === undefined) {
           refuse(res, 404, 'no such group')
           return

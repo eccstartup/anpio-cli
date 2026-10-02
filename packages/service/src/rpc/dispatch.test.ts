@@ -1339,6 +1339,110 @@ async function mintGroup(h: Harness, profile: Record<string, unknown> = {}): Pro
   return groupDid
 }
 
+// B1b-A4 —— 群族的出站接线。两批分开验，因为它们的 `meta.target` 不是一回事：
+// `group.create` 那一批指着一个 `serviceDid`（与附件同形），其余十一条指着一个 `group_did`。
+//
+// 这里验的是**路由**，不是转发本身（那是 `federation/forward.test.ts` 的事）：谁被问了、
+// 什么被原样传回去，以及——本轮新加的那一处判据——住在**自己命名空间**里的群会不会被误
+// 当成对端送出去。
+describe('a group call whose group lives elsewhere (P8 §5.4)', () => {
+  const REMOTE_GROUP = 'did:web:groups.example:g:REMOTE'
+  const PEER_SERVICE = 'did:web:groups.example'
+
+  it('forwards a group.send to the remote group, and files nothing of its own', async () => {
+    const { relay, asked } = recording({
+      kind: 'answered',
+      result: { accepted: true, message_id: 'm-1', operation_id: 'op-send', seq: 4 },
+    })
+    const h = harness({ relay })
+    const outcome = await h.call(
+      await signed({
+        method: 'group.send',
+        meta: groupMeta({
+          target: { kind: 'group', did: REMOTE_GROUP },
+          operation_id: 'op-send',
+          message_id: 'm-1',
+          content_type: 'text/plain',
+        }),
+        body: { text: 'hello group' },
+      }),
+    )
+
+    expect(asked).toEqual([REMOTE_GROUP])
+    expect(outcome.json?.result?.seq).toBe(4)
+    // 群不在本服务上，所以本地一个群行都不该有：落了就是替对端记了一笔它自己的账。
+    expect(h.storage.group(REMOTE_GROUP)).toBeUndefined()
+  })
+
+  it('returns the peer refusal unchanged', async () => {
+    const { relay } = recording({
+      kind: 'refused',
+      rejection: { code: 3000, anpCode: 'group.not_member', retryable: false, message: 'not a member' },
+    })
+    const h = harness({ relay })
+    const outcome = await h.call(
+      await signed({
+        method: 'group.get_info',
+        meta: groupMeta({ target: { kind: 'group', did: REMOTE_GROUP } }),
+        body: {},
+      }),
+    )
+
+    expect(outcome.json?.error?.code).toBe(3000)
+    expect(outcome.json?.error?.data?.anp_code).toBe('group.not_member')
+  })
+
+  it('keeps a group in its own namespace local, without asking the network', async () => {
+    // 本服务亲手建的群住在 `serviceDid:g:<id>` 里，它的文档也由**本服务**发布（groups.md
+    // §2.2/§2.3）——"入口在哪"是本地常量。**这一档不是优化**：放它出站，那趟解析要么被
+    // `AGENTX_ALLOWED_DID_HOSTS` 拒（那份清单写的是对端域，不写自己），要么要求本服务的
+    // `publicUrl` 是 https，于是一个自家的群会在自己的 `group.send` 上报 1012。
+    const { relay, asked } = recording({ kind: 'answered', result: { accepted: true, seq: 99 } })
+    const h = harness({ relay })
+    const groupDid = await mintGroup(h)
+
+    const outcome = await h.call(
+      await signed({
+        method: 'group.send',
+        meta: groupMeta({
+          target: { kind: 'group', did: groupDid },
+          sender_did: second.did,
+          operation_id: 'op-send',
+          message_id: 'm-1',
+          content_type: 'text/plain',
+        }),
+        body: { text: 'hello' },
+        signer: second,
+      }),
+    )
+
+    expect(asked).toEqual([])
+    // 本地受理而不是转发：`second` 不是成员，所以答案是本地那一关的 3000，而不是对端那份。
+    expect(outcome.json?.error?.code).toBe(3000)
+    expect(outcome.json?.error?.data?.anp_code).toBe('group.not_member')
+  })
+
+  it('forwards a group.create whose target is another service (§8.1.2)', async () => {
+    // 这一批的目标是一个 `serviceDid`，与 `attachment.*` 完全同形——连"目标写着自己就本地办"
+    // 那次短路都共用（`relayFor` 里那次 `serviceDid` 比较）。
+    const { relay, asked } = recording({
+      kind: 'answered',
+      result: { group_did: `${PEER_SERVICE}:g:THEIRS`, group_receipt: { subject_method: 'group.create' } },
+    })
+    const h = harness({ relay })
+    const outcome = await h.call(
+      await signed({
+        method: 'group.create',
+        meta: groupMeta({ target: { kind: 'service', did: PEER_SERVICE } }),
+        body: { group_policy: GROUP_POLICY },
+      }),
+    )
+
+    expect(asked).toEqual([PEER_SERVICE])
+    expect(outcome.json?.result?.group_did).toBe(`${PEER_SERVICE}:g:THEIRS`)
+  })
+})
+
 describe('group.* over the wire (P4)', () => {
   it('creates a group, and replays the same operation idempotently', async () => {
     const h = harness()

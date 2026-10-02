@@ -618,8 +618,11 @@ Host 无法区分"第一次进群"与"重新加入"（§10.3 L1066 的触发条�
    codepoint"（`rust/src/group_e2ee/v2_errors.rs:84`）。本仓库照抄这个位置：
    **代码可以写，`anp.get_capabilities` 里 P6 不得作为稳定 Profile 出现**，直到上游公布
    稳定 codepoint。（[TODO1.md](../../TODO1.md) 的 `D2` 已按此裁定。）
-2. **群 DID 文档未发布**：`get_key_package` 之外的所有 group-addressed 方法都要先解析
-   `group_did` 找 Host，同 [federation.md](federation.md) §8 第 1 条。
+2. ~~**群 DID 文档未发布**~~（2026-10-02 收）：`get_key_package` 之外的所有
+   group-addressed 方法都要先解析 `group_did` 找 Host，而那份文档此前没有人发布。B1b 把
+   发布义务落在**群自己所在的域**（`group_did = serviceDid + ":g:" + <id>`，本服务发布自己
+   名下的那些），同 [federation.md](federation.md) §8 第 1 条。别人名下的群仍要靠它自己的
+   Host 发布，那部分从来不在本仓库。
 3. **`provider_asserted` 的取舍留给部署**（§10.5 L1082、L1098）：P6 业务策略接受还是拒绝
    由部署定，且 P6 拒绝时 **MUST** 保持 E2EE 消息面暂停——合规行为是 fail closed。
 

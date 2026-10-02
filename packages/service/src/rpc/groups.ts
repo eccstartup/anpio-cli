@@ -785,6 +785,24 @@ function newGroupId(): string {
   return randomBytes(16).toString('base64url')
 }
 
+/** `group_did` 里把群 id 与 `serviceDid` 隔开的那个路径段（groups.md §2）。
+ *
+ *  导出是因为知道这个形状的**不止**建群这一处：`http/server.ts` 要拿它反推文档的 URL
+ *  （B1b-A3），`dispatch.ts` 要拿它判"这个目标是不是我们自己命名空间里的群"（B1b-A4）。
+ *  三处各写一遍 `':g:'` 的结果是改了一处、另外两处安静地按旧形状走。 */
+export const GROUP_DID_SEGMENT = 'g'
+
+/** 由群 id 拼出 `group_did`。 */
+export function groupDidOf(serviceDid: string, groupId: string): string {
+  return `${serviceDid}:${GROUP_DID_SEGMENT}:${groupId}`
+}
+
+/** 这个 `group_did` 是不是住在 `serviceDid` 自己的命名空间里——也就是"本服务是不是它的
+ *  Group Host"。前缀匹配，因为随机段的形状不属于这个判断。 */
+export function isOwnGroupDid(serviceDid: string, did: string): boolean {
+  return did.startsWith(`${serviceDid}:${GROUP_DID_SEGMENT}:`)
+}
+
 function createGroup(ctx: GroupContext): Record<string, unknown> {
   const actor = actorOf(ctx.meta)
   const target = targetOf(ctx.meta)
@@ -797,7 +815,7 @@ function createGroup(ctx: GroupContext): Record<string, unknown> {
   const profile = profileDefaults(optionalObject(ctx.body, 'group_profile') ?? {})
   const members = initialMembersOf(ctx.body)
 
-  const groupDid = `${ctx.serviceDid}:g:${newGroupId()}`
+  const groupDid = groupDidOf(ctx.serviceDid, newGroupId())
   // §6.2 L237 与 §6.2 L244 的初值：创建自己占掉 1/1。`initial_members` 是**这一次**状态
   // 变更的一部分，不另开版本号——见 [groups.md](../docs/design/groups.md) §7 里这条取舍。
   ctx.storage.insertGroup({

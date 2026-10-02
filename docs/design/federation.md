@@ -169,11 +169,20 @@ MTI 第 14 项（§10 L661）。
   由 Group Host 分发（§5.4 L273），继续走 outbox + 退避。这条路 C5b 已经建好，
   只是住户换了。
 
-**`direct.send` 与 `attachment.*` 两族已接。**`group.*` 仍落在本地受理，且是**响亮的
-失败**（群不存在），不是静默走错域：
+**三族都已接**（`direct.send` 在 C11、`attachment.*` 在 B1a、`group.*` 在 B1b-A4）。群族是
+三族里最后接上的，因为它比前两族多一个前置条件：
 
-- `group.*` 的判断要先解析 `group_did` 的文档才做得了，而那份文档还没有人发布（§5.1、
-  §8 第 1 条）——接上它只会让**自家**的群也解析失败。
+- `group.*` 里那十一条的判断要先解析 `group_did` 的文档才做得了——而那份文档在 B1b 之前
+  **还没有人发布**。B1b 把"谁来发布群 DID 文档"这件事裁定成**本服务自己**（TODO3 §0），
+  A1–A3 铸出群钥、造出文档、把文档挂上 `GET …/g/<id>/did.json`，这一族才接得上。
+- 接上之后还有一处前两族没有的判据：住在**自己命名空间**里的群（`serviceDid:g:<id>`）直接
+  落在本地（`relayFor` 里的 `isOwnGroupDid`）。放它出站的那趟解析要么被
+  `AGENTX_ALLOWED_DID_HOSTS` 拒（清单写的是对端域，不写自己），要么要求本服务的
+  `publicUrl` 是 https——于是一个**本服务亲手建的群**会在自己的 `group.send` 上报 1012。
+  这不是优化：一个本地就知道答案的调用不该取决于出站解析成不成功。见 §3.3。
+- 跨域那一档还多一处与前两族不同的接线：群一转发，本地处理器就**整段跳过**
+  （`dispatch.ts` 的群分支与附件分支同形）。群不住在本服务上，名册、事件序、回执与那把
+  群钥都在它的 Host 那里，本地再跑一遍只会去查一个不存在的群。
 
 （`attachment.*` 早先记在这里，理由是"锚点是原始附件消息的发送者 DID，不是
 `meta.target.did`"。那条理由是错的，见 §5.2：那两句约束的是调用方怎么发现服务，不是域
@@ -200,20 +209,26 @@ MTI 第 14 项（§10 L661）。
 > 解析出 `meta.target.did` 公开的 `ANPMessageService`；**是本服务就在本地办完，不是本
 > 服务就按 §5 转发原始方法。**
 
-两族的目标写法不同、规则却同一条：私聊的 `target.kind = "agent"`，`target.did` 是收件
-agent；附件的 `target.kind = "service"`，`target.did` 是那个对象服务的 `serviceDid`。
-群的 `target.did` 是 `group_did`，但那一族还没接（§3.2）。
+三族的目标写法不同、规则却同一条：私聊的 `target.kind = "agent"`，`target.did` 是收件
+agent；附件的 `target.kind = "service"`，`target.did` 是那个对象服务的 `serviceDid`；
+群的 `target.kind = "group"`，`target.did` 是 `group_did`——**只有一个例外**，
+`group.create` / `group.e2ee.create` 的 `target.kind = "service"`、`target.did` 是一个
+`serviceDid`（§8.1.2 L624–625）：建群之前还没有群可指，那两条是"请一个服务建群"。
 
 `isOurOwnIngress(config, endpoint)` 就是这个判断，C11 把它从 `delivery/worker.ts` 提到了
 `http/server.ts`——那里才是定义 `RPC_PATH`、也就是"我们的入口长什么样"的地方。出站转发与
 后台推送现在读的是同一个函数：**"自己是谁"只有一个定义**，两处各写一遍就是将来只改了一边
 的入口。同域不产生任何 HTTP，这是 C5b 就定下的取舍，仍然成立。
 
-**附件那一族在这条规则之前还有一次本地比较**（`relayFor` 里 `target.did` 与
-`config.serviceDid` 比一下）。它省的不是一次解析，是一次**依赖**：`isOurOwnIngress` 要求
-先把我们自己的文档解析出来，而我们自己的文档不在本服务手里（§4 第 2 点）——靠它来判
-"是自己"会让一次同域附件调用在文档不可达时无端失败。目标写着我们自己的 `serviceDid`，
-答案本来就在本地。
+**两族在这条规则之前还有一次本地比较**（`relayFor` 里）。它们省的不是一次解析，是一次
+**依赖**：`isOurOwnIngress` 要求先把目标文档解析出来，而我们自己的文档不在本服务手里
+（§4 第 2 点）——靠它来判"是自己"会让一次同域调用在文档不可达时无端失败。
+
+- 附件族比的是 `target.did` 与 `config.serviceDid`（目标写着我们自己的 `serviceDid`，
+  答案本来就在本地）。
+- 群族比的是 `isOwnGroupDid(config.serviceDid, target.did)`：住在自己命名空间里的群。
+  与上一档不同的是，这里的理由**不是**"我们自己的文档解析不出来"——群文档正是本服务发布
+  的（[groups.md](groups.md) §2.2）——而是那趟解析**过不了白名单**（见 §3.2）。
 
 ### 3.4 outbox 换了住户
 
@@ -257,13 +272,16 @@ C5b 那行 `direct.incoming` 入队本来就是白跑的一趟：后台 worker �
 `group_did` 进行服务发现」。
 
 [groups.md](groups.md) §2 选的形状 `group_did = serviceDid + ":g:" + <id>` 天然是
-可解析的（`did:web:host:g:XXXX` → `https://host/g/XXXX/did.json`），**缺口只在文档没有
-人发布**——那条缺口与 message-service.md §13 的服务条目是**同一条接缝**，都在
-DID 文档托管方（`awiki-open-server`）那边，不在本仓库。
+可解析的（`did:web:host:g:XXXX` → `https://host/g/XXXX/did.json`）。这条形状决定了**发布
+义务跟着群走**：文档要住在那个 URL 上，就只能由 `group_did` 里的那个域发布——也就是
+**本服务自己**（TODO3 §0 的裁定）。B1b 之前记在这里的"缺口"因此收了：本服务现在发布
+**自己名下**的群文档（A1 铸钥、A2 造文档、A3 挂路由）。**剩下的那一半与 message-service.md
+§13 仍是同一条接缝**：本服务**自己**的 `serviceDid` 文档仍由 DID 文档托管方
+（`awiki-open-server`）发布，见 §4 第 2 点。
 
-**所以 v1 的跨域群操作，取决于那份文档发不发。** 本服务的代码侧只做两件：把
-`group_did` 交给 `ServiceLocator`，以及解析不出来时**明确失败**（不要退化到"按域名猜
-Host"——§7.5 L495 禁止的正是这个猜法，§5.2 也没给它留路）。
+**代码侧只做两件**：把 `group_did` 交给 `ServiceLocator`，以及解析不出来时**明确失败**
+（不要退化到"按域名猜 Host"——§7.5 L495 禁止的正是这个猜法，§5.2 也没给它留路）。本服务
+名下的群在这一层之前就短路掉了（§3.3 的 `isOwnGroupDid`），所以这里问的都是**别人的**群。
 
 ### 5.2 附件：锚点是"调用方怎么找到服务"，不是"域服务怎么路由"
 
@@ -279,7 +297,8 @@ DID** 去解析其公开 `ANPMessageService`，把 `attachment.get_download_tick
 把原始方法转过去（§3.3）。早先那版把这条写成"附件的锚点是原始发送者 DID，不是
 `meta.target.did`"，把调用方的发现义务与域服务的路由混成了一件事，是错的。
 
-由此 §3.2 那张"两族今天仍落在本地"的清单里，`attachment.*` 划掉，只剩 `group.*`。
+由此 §3.2 那张"还没接"的清单如今**是空的**：`attachment.*` 在 B1a 划掉，`group.*` 在
+B1b-A4 划掉。三族共用的就是 §3.3 那一条规则。
 
 **调用方那一侧另有两句约束，与本层无关但别丢**：§9.1 L565 与 §5.3 L249 都点着说，群场景
 里用的是**原始群消息的发送者 DID**，**不是** `group_did`；而且 **MUST NOT** 只凭
@@ -317,8 +336,13 @@ Grant 的键已经是 `(message_id, attachment_id, object_uri)`，多存一列�
 
 ## 8. 缺口（不是本仓库能补的）
 
-1. **群 DID 文档未发布**（§5.1）。挡住跨域 `group.*` 与 MTI 第 1/4/5 项
-   （§10 L648、L651、L652）。
+1. **群 DID 文档的发布面窄了**（§5.1）。B1b 之前是"还没有人发布"；B1b 之后本服务发布
+   **自己名下**的群文档，跨域 `group.*` 与 MTI 第 1/4/5 项（§10 L648、L651、L652）只在这个
+   范围内通了。剩下两处不是本服务的事：别人名下的群要靠**它自己**的 Host 发布（§5.1 的
+   `ServiceLocator` 本来就不假设是谁发的），以及本服务自己的 `serviceDid` 文档仍由
+   `awiki-open-server` 托管（下面第 2 条）。**部署侧另有一条硬前提**：`did:web` 一律要求
+   https，所以 `AGENTX_PUBLIC_URL` 是 http 的部署（含本仓库的默认值）其群文档解析不出来，
+   `AGENTX_ALLOWED_DID_HOSTS` 也得写进对端域（TODO3 §B）。
 2. **`serviceDid` 文档未由本服务托管**（§4 第 2 点）。外层 `keyid` 的 fragment 由发布方
    决定，本服务只能配成一致。
 3. **被取代 DID 的拒绝需要 P2 连续性来源**：§6.7 / §7.2 L492 要求重建签名重试，而

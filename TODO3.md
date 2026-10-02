@@ -153,6 +153,31 @@ v11 前无钥的群 / 空段 / 多一段 / 坏转义 → 404，非 GET → 405 +
 出站），**晚于 A3 也不会变**，可以随 A1 一起先接上。把这一批单独列出来是因为很容易漏：
 看族名会以为"群族全都要等群文档"，其实只有后一批要。
 
+**落地（2026-10-02）。** 表只有一张，已在 A1 落库（v11），这一步不动 schema。
+
+接线做了三处，前两处是按计划，第三处是写测试时**测出来的**：
+
+1. `RELAYED_METHODS` 收全十三条（先接的两条 + 后接的十一条），`relayFor` 的规则一字未动。
+2. `relayFor` 里加了一次短路——`isOwnGroupDid(config.serviceDid, targetDid)` 直接回 `LOCAL`。
+   **计划里没有这一条，但不加就是回归**：`targetDid` 对群族是 `group_did`，永远不等于
+   `config.serviceDid`，于是本服务亲手建的群会在自己的 `group.send` 上被送去解析**自己**的
+   文档——而那趟解析要么被 `AGENTX_ALLOWED_DID_HOSTS` 拒（那份清单写的是对端域），要么要求
+   本服务的 `publicUrl` 是 https，净效果是一个本地就知道答案的调用报 1012。
+3. **群分支要像附件分支那样在转发后整段跳过本地处理器**（`dispatch.ts`）。这是新写的测试
+   当场抓到的：`relayFor` 把转发结果交给 `perform`，而群那一支此前不看 `input.relayed`，
+   照常往下跑本地处理器——去查一个本地不存在的群，于是"转发已经成功"的调用回一句 3000。
+   附件族早就有一模一样的早返回，群族补上同一行即可。
+
+顺带把三处 `:g:` 分隔符收进 `groups.ts` 的 `GROUP_DID_SEGMENT` / `groupDidOf` /
+`isOwnGroupDid`（`http/server.ts` 与 `dispatch.ts` 各有一处字面量）。
+
+测试 `rpc/dispatch.test.ts` 新增 4 条：远程 `group.send` 被转发且本地不落群行、对端拒绝
+原样翻回、**自家命名空间里的群不问网络**（`asked` 为空 + 本地 3000——没有第 2 处短路时这
+条会红）、`group.create` 指名别的服务被转发（与附件同形的批次）。服务 645 → 649。
+
+文档：federation.md §3.2（"两族已接、`group.*` 仍落在本地"整段重写）、§3.3（三族的目标
+写法 + 两族各自的本地比较）、§5.1、§5.2、§8 第 1 条；e2ee-group.md §13 第 2 条。
+
 ### A5 `group_receipt.proof` 开始签
 
 groups.md §7 记的"v1 不签"是**有前提的欠账**，不是结论：

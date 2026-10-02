@@ -64,7 +64,19 @@ import {
   type GroupControlContext,
 } from './groupControl'
 import { callerKeyOf, createRateLimiter } from './rateLimit'
-import { GROUP_HANDLERS } from './groups'
+import {
+  GROUP_ADD,
+  GROUP_CREATE,
+  GROUP_GET_INFO,
+  GROUP_HANDLERS,
+  GROUP_JOIN,
+  GROUP_LEAVE,
+  GROUP_REMOVE,
+  GROUP_SEND,
+  GROUP_UPDATE_POLICY,
+  GROUP_UPDATE_PROFILE,
+  isOwnGroupDid,
+} from './groups'
 import { adoptMemberDidForRequest, requestTriggersDidUpdate, type DidChainResolver } from './memberDidUpdate'
 import {
   ATTACHMENT_ABORT_OBJECT,
@@ -82,13 +94,20 @@ import { errorResponse, failureId, noResponse, parseRequestText, successResponse
 const LOCAL: ForwardOutcome = { kind: 'local' }
 
 /**
- * 会出站转发的两族（P8 §5.1、§5.3）。
+ * 会出站转发的三族（P8 §5.1、§5.3、§5.4）。
  *
  * 表放在这里是为了让"哪些方法会出站"是一个**可数的事实**：方法表将来加一条
  * service-scoped 的控制面方法，漏了这里就是"它静默落在本地、再响亮地失败"，而不是转发。
  * 判断在 {@link relayFor}。
  *
- * `group.*` 不在这张表里，理由见 `relayFor`。
+ * `group.*` 分两批进来（B1b-A4），因为它们的 `meta.target` 不是一回事：
+ *
+ *   - `group.create` / `group.e2ee.create` 是 `kind: "service"`，`did` = 某个
+ *     `serviceDid`（§8.1.2 L624–625）——建群之前还没有群可指。**与附件完全同形**，连
+ *     "目标写着 `config.serviceDid` 就本地办"那次短路都复用。
+ *   - 其余十一条是 `kind: "group"`，`did` = `group_did`（§8.2.2 L648–649、§8.9.2
+ *     L833–834）。它们以前接不上，是因为"是不是本服务"要先解析群文档，而群文档此前没有
+ *     托管方；B1b-A2/A3 让它有了（groups.md §2.2/§2.3）。
  */
 const RELAYED_METHODS: ReadonlySet<string> = new Set([
   DIRECT_SEND,
@@ -96,6 +115,21 @@ const RELAYED_METHODS: ReadonlySet<string> = new Set([
   ATTACHMENT_COMMIT_OBJECT,
   ATTACHMENT_ABORT_OBJECT,
   ATTACHMENT_GET_DOWNLOAD_TICKET,
+  // 目标是服务的那两条：建群与建 MLS 组。
+  GROUP_CREATE,
+  GROUP_E2EE_CREATE,
+  // 目标是群的那十一条：读、成员增删、资料与策略、群消息，以及 MLS 的增删发。
+  GROUP_GET_INFO,
+  GROUP_JOIN,
+  GROUP_ADD,
+  GROUP_REMOVE,
+  GROUP_LEAVE,
+  GROUP_UPDATE_PROFILE,
+  GROUP_UPDATE_POLICY,
+  GROUP_SEND,
+  GROUP_E2EE_ADD,
+  GROUP_E2EE_REMOVE,
+  GROUP_E2EE_SEND,
 ])
 
 export interface DispatchDeps {
@@ -279,6 +313,14 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
         // 才是不一致——方法表里有它，处理器表里没有。
         const group = GROUP_HANDLERS[spec.name]
         if (group !== undefined) {
+          // 跨域那一档到此为止（P8 §5.4）：群不住在本服务上，名册、事件序、回执与那
+          // 把群钥都在它的 Host 那里。本地**什么都不该做**——照常往下走会去查一个本地
+          // 没有的群，于是"转发已经成功"的调用反倒回一句 3000（`group.not_found`）。
+          // 落一行本地群同样是错的：那是同一个群的两份名册，而两份会各自演化。
+          //
+          // 台账照记（`acceptOperation` 写的），所以重试拿到的是同一份答复。这与
+          // `attachment.*` 那条早返回同形，是 §3.3"跨域不增加一层新的中继协议"的直接后果。
+          if (input.relayed !== undefined) return input.relayed
           return group({
             storage: deps.storage,
             serviceDid: deps.config.serviceDid,
@@ -640,7 +682,7 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
    * 不发），不是就按 §5 把**原始方法**转发过去——§3.1 L61–68 说得很直白：跨域不增加一层
    * 新的中继协议。
    *
-   * 目标 DID 一律取自 `meta.target.did`，但两族的语义不同，别把下游的发现义务和这里的
+   * 目标 DID 一律取自 `meta.target.did`，但三族的语义不同，别把下游的发现义务和这里的
    * 路由混起来：
    *
    *   - `direct.send`：`target.kind = "agent"`，`target.did` 是收件 agent（§5.1）。
@@ -648,11 +690,14 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
    *     `serviceDid`（§10.1 L798）。§5.2/§5.3 额外要的那句"先从**原始附件消息发送者的
    *     DID** 解析出公开服务"，约束的是**调用方**怎么找到这个 `serviceDid`；等请求走到
    *     我们这里，`meta.target.did` 已经写着它解析出来的结果，这一层照转即可，不重解析。
+   *   - `group.*`：两档。`group.create` / `group.e2ee.create` 的 `target.did` 是一个
+   *     `serviceDid`（§8.1.2 L624–625），与附件同形；其余十一条是 `group_did`
+   *     （§8.2.2 L648–649、§8.9.2 L833–834）。
    *
-   * `group.*` 仍是唯一没接的：它的目标是 `group_did`，而"是不是本服务"要先解析那份文档
-   * 才判得了（[federation.md](docs/design/federation.md) §5.1）。群 DID 文档今天没有托管
-   * 方，接上只会让**自家**的群也解析失败——那条缺口在 Host 侧，不在这里。等 Host 侧发布
-   * 文档之后，把 `group.*` 那几条加进 `RELAYED_METHODS` 即可，机制本身不用改。
+   * **群这一族与附件有一处不同，值得写下来**：群文档由**本服务**发布（groups.md §2.2/§2.3），
+   * 而附件的文档不在（§13）。所以自家命名空间里的群（`serviceDid:g:<id>`）在下面那一行就
+   * 短路成 {@link LOCAL} 了，连"解析自己的入口"都不做——一个 HTTP 都不发。对端的群照常
+   * 转发，由 `relay` 解析它的文档，那正是 A2/A3 那条接缝要撑起来的事。
    *
    * `replayed` 是这次调用在幂等台账上已经有过记录——**已经记过账的操作不再出站**。那份
    * 记录里的结果就是对端的答复，重试要的是它。不查这一下，每次重试都会再打扰对端一遍
@@ -670,11 +715,21 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
     if (replayed) return LOCAL
     const targetDid = envelope.params.meta.target?.did
     if (targetDid === undefined || targetDid === '') return LOCAL
-    // 目标写着我们自己的 `serviceDid`：这是同域的附件调用。答案本地就知道，不该让"我们的
+    // 目标写着我们自己的 `serviceDid`：这是同域的附件调用，或 `group.create` /
+    // `group.e2ee.create`（它们的目标就是一个 serviceDid）。答案本地就知道，不该让"我们的
     // 文档解析得到我们自己的入口"变成前提——那份文档不在本服务手里
     // （[message-service.md](docs/design/message-service.md) §13），它解析不出来时这次调用
     // 仍该照常办。`direct.send` 走不到这里：它的目标是 agent DID，不会等于一个 serviceDid。
     if (targetDid === deps.config.serviceDid) return LOCAL
+    // 住在自己命名空间里的群（`serviceDid:g:<id>`）：群文档由**本服务**发布（groups.md
+    // §2.2/§2.3），所以"它的入口在哪"同样是本地已知的常量，不必问网络。**这不是优化**：
+    // 那一趟解析要么被 `AGENTX_ALLOWED_DID_HOSTS` 拒掉（清单里是**对端**域，不写自己），
+    // 要么要求本服务的 `publicUrl` 是 https，于是一个本服务亲手建的群会在自己的 `group.send`
+    // 上报 1012——一个本地就知道答案的调用，不该取决于出站解析成不成功。
+    //
+    // 群不在本服务上时（`group_did` 属于别的域）走下面那次真的转发，由 `relay` 去解析对端的
+    // 文档——那才是这条接缝要撑起来的事。
+    if (isOwnGroupDid(deps.config.serviceDid, targetDid)) return LOCAL
     return relay.forward(envelope, targetDid)
   }
 
