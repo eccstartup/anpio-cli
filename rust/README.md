@@ -112,6 +112,9 @@ cargo run --manifest-path rust/Cargo.toml -- discover http://127.0.0.1:8787
   `msg send --to` 收 **DID 或通讯录里的名字**：DID 形状的参数（`looks_like_a_did` 是语法
   测试，不是方法白名单）直接进发现，其余当名字查通讯录（见下面 `contacts` 那条），
   两个名字指向同一人时**退出 1 并列出候选**，不随便挑一个。
+  **三条 `send` 都往本地留一行**（[client-messages.md](../docs/design/client-messages.md)）：
+  在服务端回 `accepted: true` **之后**写，`message_id` 就是 `--operation-id` 那个值。
+  留不下只是 stderr 一句话——信已经发出去了，一个满盘不该让脚本以为没发成。
   `msg send` 两个本机身份**双向** `direct.send` 跑通（两边都回 `accepted: true`）；
   `inbox` / `show` / `read` 是 `x_agentx.inbox.v1` 扩展面，仅实现规范的对端回 `-32601`
   是**正确的负结果**（cli.md §5），不是缺陷：它报成 `unsupported_extension` 并退出 1，

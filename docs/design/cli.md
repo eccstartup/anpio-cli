@@ -404,9 +404,10 @@ CLI 不替调用方决定。
 2. **暂存的后继钥叫 `successor.json`**，语义一样（提交一次更新的中间态，是那把钥的唯一副本），
    名字不同。P6 的设备状态多出 `mls/` 一个目录，`connectx` 没有——它不做 P6。
 
-`msg` 族在这两套里都不新增存储；`agentx-cli` 的 `messages.db` **已经落地**（写入侧：
-`msg listen` 每消费一条就落一行；形状在 [client-messages.md](client-messages.md)，含"为什么是
-两个文件而不是一个 sqlite"）。它是 `mls/` 的**兄弟**而不是它的一部分：两者丢了的后果不同
+`msg` 族在这两套里都不新增存储；`agentx-cli` 的 `messages.db` **写入侧已经落地**——
+`msg listen` 每消费一条落一行，`msg send` / `group send` / `group e2ee send` 在服务端确认之后
+各落一行（形状在 [client-messages.md](client-messages.md)，含"为什么是两个文件而不是一个
+sqlite"）。它是 `mls/` 的**兄弟**而不是它的一部分：两者丢了的后果不同
 （`mls/` 丢了以后解不开，`messages.db` 丢了以后只是没历史），所以必须能分别备份。
 **读侧还没动**——`msg inbox` 仍然只问服务端（那份文档 §8 是这三个选项在等裁定）。
 

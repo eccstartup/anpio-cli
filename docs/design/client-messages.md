@@ -150,7 +150,8 @@ CREATE TABLE sync_state (
   而且字符串排序不是排序。转换在写入时做，转不动就拒绝整行（宁可什么都不记，也不要记一个
   悄悄截断的计数器）。
 - **`direction` 与"发出的消息"同表。** 聊天客户端两个方向都要显示，所以发出的消息也落一行，
-  在 `msg send` / `group e2ee send` **成功之后**写。没有 `outbox`、没有重试队列：`operation_id`
+  在 `msg send` / `group send` / `group e2ee send` **成功之后**写（**已实现**）。没有 `outbox`、
+  没有重试队列：`operation_id`
   那套重试归调用方（[cli.md](cli.md) §3.3 说得明白，旗标存在的唯一理由就是重试），本地库
   不替它排队。
 - **`text` / `payload_json` 两列而不是一列 JSON。** §7.4 的 exactly-one-of 是协议形状；两列让
@@ -256,7 +257,9 @@ CREATE TABLE sync_state (
 ## 7. 动手前
 
 > **2026-10-02 状态。** 下面第 1、2 条已经落地：`crate::messages` 是库本身（`MessageStore`），
-> `RecordingView` 是第 2 条说的那个挂法（包在 `ListenView` 外面，`cmd_msg_listen` 里装配）。
+> `RecordingView` 是第 2 条说的那个挂法（包在 `ListenView` 外面，`cmd_msg_listen` 里装配）；
+> 发出的一侧也已落地——`msg send` / `group send` / `group e2ee send` 在 `accepted: true` 那一支
+> 里各落一行（`record_outgoing`，`payload_from` 是 `payload_of` 的逆）。
 > 第 3 条（`msg inbox` 要不要本地优先）**仍然待裁定**，§8 是那三个选项。
 > 落地的过程中改掉了这份文档两处：`epoch` → `group_state_version`（P6 的每消息版本是密文自己
 > 指名的 `group_state_ref.group_state_version`，不是本地 epoch），以及补上 `messages.endpoint`

@@ -676,8 +676,12 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
       —— **2026-10-02 续（`a04cc5e`、`5c3d5d8`）**：写入侧实现完
       （`crate::messages` + 挂在 `ListenView` 外面的 `RecordingView`）。
       读侧是刻意的下一步，见下面那条。
-- [ ] 写出侧：`msg send` / `group send` / `group e2ee send` **成功之后**各落一行（`direction: out`）。
-      这一条与读侧无关，两件都能先做。
+- [x] ~~写出侧：`msg send` / `group send` / `group e2ee send` **成功之后**各落一行（`direction: out`）。~~
+      —— **2026-10-02（`1d6f24e`）**：三条路都在 `accepted: true` 那一支里落行；`--operation-id`
+      就是 `message_id`（P1 §6.2.6）。P6 那条记**明文**的 content type 而不是密文的，
+      `group_state_version` 取刚造出来的密文自己的 `group_state_ref`——和接收侧读的是同一个字段。
+      `scripts/e2e.sh` 直接读那个文件断言：两边各有一行，且 bob 的 `applied_seq` 等于它落的那行的
+      `service_seq`（§2.1 的先后，在能观测的地方被咬住）。
 - [ ] 读侧待裁定：`msg inbox` 变本地优先 / 新增 `msg history` / 加 `--local`（那份文档 §8）。
 - [ ] 这一步**触及服务端**（ack / 保留 / 补拉），与"把服务做好"合并做。
 
