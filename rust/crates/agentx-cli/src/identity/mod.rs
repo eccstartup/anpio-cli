@@ -8,6 +8,7 @@
 mod chain;
 mod did;
 mod host;
+mod session;
 mod store;
 mod update;
 
@@ -16,6 +17,10 @@ pub use chain::{
 };
 pub use did::{create_identity, load_stored_key, retirement_document, subject_of, successor_of, CreateIdentityInput};
 pub use host::{fetch_host_service, register_identity, HostService};
+pub use session::{
+    parse_ttl_seconds, save_session, session_host, SessionEntry, SessionFile, SessionWrite,
+    DEFAULT_SESSION_TTL_SECONDS, SESSION_FILE,
+};
 pub use store::{
     assert_segment, current_agent_path, list_identities, read_current_agent, resolve_agent_id,
     resolve_agent_id_with_source, resolve_profile_name, select_current_agent, store_root, AgentSource, Identity,

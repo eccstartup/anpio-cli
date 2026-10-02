@@ -40,7 +40,7 @@ pin 为准**，源码阅读用 `git show origin/release/0929:rust/...`。
 
 store 根是 `AGENTXCLI_HOME`（缺省 `~/.agentx-cli`），一条身份由 `--agent` / `--profile`
 命名——两个都可以不写：`--agent` > `$AGENTXCLI_AGENT` > 当前 agent（`agent use` 选的）>
-`default`，`--profile` > `$AGENTXCLI_PROFILE` > `default`。`cargo test` 全绿（120 个单测）。
+`default`，`--profile` > `$AGENTXCLI_PROFILE` > `default`。`cargo test` 全绿（128 个单测）。
 
 - **`did create | show | register`** —— 身份存储 + DID 文档。
 - **`did resolve | restore`** —— `resolve` 是解析面：不给 `--chain` 就取那一份文档
@@ -64,6 +64,14 @@ store 根是 `AGENTXCLI_HOME`（缺省 `~/.agentx-cli`），一条身份由 `--a
   一行都不发——所以它是核一个 target 契约的工具。`anp/request.rs` 是那条字节的唯一出处，
   与 `did update` 那一跳共用；单测把它的产出递给 crate 自己的 `verify_http_message_signature`
   验，因为两端都自己的验签等于没验。
+- **`anp login --target <url>`** —— `sign` 那份请求，发出去，把服务器发的凭据拿回来。
+  401 挑战只答一次，而且只在服务器报了一个**不同的** nonce 时才重签：同一个 nonce 再挑战一次
+  是在拒绝。409 `did_superseded` 是一个**结论**而不是一次被拒的证明，所以它不走"登录失败"那条
+  路——`currentDid` 只是 peer 的提示（ANP-03 §3.2），这个客户端拿**自己的**链（`resolve_chain`）
+  说哪个 DID 才算数，`--target` 的 rig 说了谎也会被当场拆穿。token 从 `Authentication-Info`
+  或 body 里取，缓存进 `session.json`（同目录，明文 `0600`，和私钥一样），键是 **`host:port`**
+  而不是 host——同一台机器两个端口是两个签发方，共用一条等于后一次登录吃掉前一次；
+  写失败只警告不失败，token 已经在手里了。`--no-save-session` / `--session-ttl 7d` / `--json`。
 - **`version`** —— 词形的版本号（`--json` 给 `{"version": …}`），与 `--version` 是同一个事实。
 - **`agent show | use | list`** —— 本机现在是谁（当前 agent 存在 store 根的一个文件里，
   所以是整机范围而不是单进程）。`use` 允许点名一个还没存身份的 agent——先选 agent、
@@ -121,5 +129,4 @@ cargo run --manifest-path rust/Cargo.toml --example phase0_key_package -- /tmp/a
 
 ## 还没有
 
-`anp login`（要网络的那一半：401 挑战重签、token 会话缓存、409 走链重试），
-以及身份这块的换钥 / 换设备 / `update_document`。顺序见 TODO5 §6 的 Phase 3。
+`did list`；身份这块的换钥 / 换设备 / `update_document`。顺序见 TODO5 §6 的 Phase 3。

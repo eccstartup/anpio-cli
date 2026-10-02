@@ -10,6 +10,7 @@
 //! used here and by `identity::update`'s hop delivery, so the bytes that are signed are
 //! built in exactly one place.
 
+pub mod login;
 pub mod request;
 
 use anp::PrivateKeyMaterial;
@@ -18,8 +19,10 @@ use serde_json::Value;
 
 use crate::identity::Identity;
 
+pub use login::{LoginError, LoginOutcome, Superseded};
 pub use request::{
-    assert_not_web_page, body, header_map, nonce_from_challenge, sign_headers, signed_request_json,
+    assert_not_web_page, body, header_map, nonce_from_challenge, post_signed, sign_headers, signed_request_json,
+    PostError, Posted, SignedPost,
 };
 
 /// Sign one ANP-02 request for `identity`, and return it in the shape `anp sign` prints.

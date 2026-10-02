@@ -82,6 +82,15 @@ impl IdentityLocation {
         self.dir().join(SUCCESSOR_FILE)
     }
 
+    /// The token cache: one file per identity, keyed inside by target host.
+    ///
+    /// A session is not an identity — the next login with the same key is still "you" whatever
+    /// this file holds — which is why it is separate and why every reader treats a missing or
+    /// unreadable one as "no session" rather than as an error.
+    pub fn session_path(&self) -> PathBuf {
+        self.dir().join("session.json")
+    }
+
     /// `realtime.md` §5.4: the delivery cursor is per `(owner_did, device_id)`, and the
     /// device defaults to the local `agent/profile` — the same two names everything else
     /// is stored under, so "one machine, a different profile" is two devices.

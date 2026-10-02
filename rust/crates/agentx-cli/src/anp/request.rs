@@ -102,6 +102,132 @@ pub fn header_map(headers: &BTreeMap<String, String>) -> Result<reqwest::header:
     Ok(map)
 }
 
+/// How many times one request is signed: the first attempt, and one answer to a 401 challenge.
+///
+/// A challenge exists so a server can hand out its own nonce first, and it is answered once — a
+/// peer that challenges a second time is not asking for a nonce, it is refusing.
+pub const MAX_ATTEMPTS: usize = 2;
+
+/// One signed ANP-02 request: the identity that signs it, and where it goes.
+///
+/// A struct rather than the seven parameters it carries, because those seven are one thing — the
+/// body and the signature are made from exactly these — and a call site that could transpose the
+/// document and the key would be a call site that signs as somebody else.
+pub struct SignedPost<'a> {
+    /// The DID the request proves. It goes in the body, and `keyid` names a key of it.
+    pub did: &'a str,
+    /// The document the peer verifies against — and the one whose `authentication` makes
+    /// `keyid` a key this identity is allowed to sign with.
+    pub document: &'a Value,
+    pub key: &'a PrivateKeyMaterial,
+    /// `{did}#key-1`, the credential the signature is made under.
+    pub keyid: &'a str,
+    /// The full target URL. It is what the signature covers (`@target-uri`, `@authority`), so
+    /// it is not decoration: a request signed for one target is not valid at another.
+    pub target: &'a str,
+    /// The server's one-time nonce, or empty to accept a 401 challenge.
+    pub nonce: &'a str,
+    /// The endpoint's own body fields, spread beneath the protocol's three names.
+    pub extra: Option<Value>,
+}
+
+/// A request that went out, and the answer to it.
+#[derive(Debug)]
+pub struct Posted {
+    pub response: reqwest::Response,
+    /// The nonce the accepted attempt was signed with — the challenge's, when one was answered.
+    /// Reported because the nonce is what the peer will remember; a caller logging the request
+    /// should log the one that was actually signed.
+    pub nonce: String,
+}
+
+/// Why no answer came back.
+///
+/// The two arms exist because one of them settles a question and the other does not. Nothing
+/// sent means the peer cannot have acted on the request — the staged key of an update hop has
+/// no identity to belong to. Anything else leaves open that the peer accepted it and only the
+/// answer was lost, which is the case where a key must be kept. A single `anyhow::Error` could
+/// not carry that difference, and [`crate::identity::update`] decides with it.
+#[derive(Debug, thiserror::Error)]
+pub enum PostError {
+    /// Nothing left the process: the target was not a URL, the body or the signature could not
+    /// be built, the headers could not go on the wire.
+    #[error("{0:#}")]
+    NotSent(anyhow::Error),
+    /// The request was sent and the answer never arrived: a dropped connection, a timeout.
+    #[error("{0:#}")]
+    Unanswered(anyhow::Error),
+}
+
+impl PostError {
+    pub fn into_error(self) -> anyhow::Error {
+        match self {
+            PostError::NotSent(err) | PostError::Unanswered(err) => err,
+        }
+    }
+}
+
+/// Sign one ANP-02 request, POST it, and answer a 401 challenge once.
+///
+/// The one place a signed request goes on the wire. A login and an update hop differ in what
+/// they put in the body and in what they make of the answer; they do not differ in how the
+/// request is signed, sent, or challenged — and the version of this that was copied per caller
+/// is how one of them ends up signing a body the other would refuse.
+///
+/// The response comes back whatever its status: only the callers know what `409` or `403` means
+/// for the request they made. The 401 is the exception, because retrying it is part of sending
+/// rather than of interpreting — and it is answered only when the challenge names a nonce we
+/// are not already using, since a server that challenges with the nonce we sent is refusing.
+pub async fn post_signed(
+    client: &reqwest::Client,
+    post: &SignedPost<'_>,
+) -> std::result::Result<Posted, PostError> {
+    let url = reqwest::Url::parse(post.target)
+        .map_err(|err| PostError::NotSent(anyhow!("{0} is not a URL: {err}", post.target)))?;
+    let mut nonce = post.nonce.to_string();
+
+    for attempt in 0..MAX_ATTEMPTS {
+        // The bytes that are signed ARE the bytes that are sent: the digest covers this exact
+        // vector, so building a second one for the transport would be a chance to sign one body
+        // and deliver another.
+        let body = body(post.did, post.document, &nonce, post.extra.clone()).map_err(PostError::NotSent)?;
+        let headers = sign_headers(post.document, post.target, "POST", post.key, post.keyid, Some(&body))
+            .map_err(PostError::NotSent)?;
+
+        let response = client
+            .post(url.clone())
+            .headers(header_map(&headers).map_err(PostError::NotSent)?)
+            .body(body)
+            .send()
+            .await
+            .map_err(|err| PostError::Unanswered(anyhow!("POST {}: {err}", post.target)))?;
+
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED && attempt + 1 < MAX_ATTEMPTS {
+            let challenged = nonce_from_challenge(
+                response
+                    .headers()
+                    .get("www-authenticate")
+                    .and_then(|value| value.to_str().ok()),
+            );
+            match challenged {
+                Some(next) if next != nonce => {
+                    nonce = next;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        return Ok(Posted { response, nonce });
+    }
+
+    // Unreachable while `MAX_ATTEMPTS` is 2 and the only `continue` above is guarded by
+    // `attempt + 1 < MAX_ATTEMPTS`; kept as a definite answer rather than a panic.
+    Err(PostError::NotSent(anyhow!(
+        "the peer at {} refused every attempt",
+        post.target
+    )))
+}
+
 /// Refuse a 2xx that came back as a web page.
 ///
 /// A 2xx is not by itself an answer from an ANP server, and nothing about the acceptance is
@@ -232,5 +358,34 @@ mod tests {
         assert_eq!(nonce_from_challenge(Some("ANP nonce=\"\"")), None);
         // A scheme with no parameters at all: there is no space to split on.
         assert_eq!(nonce_from_challenge(Some("ANP")), None);
+    }
+
+    /// The classifier `did update` decides a staged key's fate with. A target that is not a URL
+    /// is refused before anything is signed, and that is the difference between "the server
+    /// said no" (nothing was sent) and "we do not know what the server did".
+    #[tokio::test]
+    async fn a_target_that_is_not_a_url_never_leaves_the_process() {
+        let identity = crate::identity::test_support::mint("alice");
+        let key = crate::identity::load_stored_key(&identity.keys["key-1"]).unwrap();
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+
+        let err = post_signed(
+            &client,
+            &SignedPost {
+                did: &identity.did,
+                document: &identity.did_document,
+                key: &key,
+                keyid: &format!("{}#key-1", identity.did),
+                target: "not a url",
+                nonce: "",
+                extra: None,
+            },
+        )
+        .await
+        .expect_err("a target that is not a URL must be refused");
+        assert!(matches!(err, PostError::NotSent(_)), "got {err:?}");
     }
 }

@@ -15,12 +15,14 @@ use agentx::group_receive::GroupReceiver;
 use agentx::group_e2ee::{
     add_body, create_body, get_key_package_body, publish_body, remove_body, send_body,
 };
+use agentx::anp::login::login;
+use agentx::anp::{LoginError, Superseded};
 use agentx::identity::{
     create_identity, current_agent_path, deliver, describe_status, document_is_superseded, fetch_host_service,
-    list_identities, load_stored_key, read_current_agent, register_identity, resolve_agent_id,
-    resolve_agent_id_with_source, resolve_chain, retirement_document, select_current_agent, snake_case_name,
-    successor_of, subject_of, Accepted, ChainError, ChainResolution, CreateIdentityInput, Hop, Identity,
-    IdentityLocation, UpdateError,
+    list_identities, load_stored_key, parse_ttl_seconds, read_current_agent, register_identity, resolve_agent_id,
+    resolve_agent_id_with_source, resolve_chain, retirement_document, save_session, select_current_agent,
+    session_host, snake_case_name, subject_of, successor_of, Accepted, ChainError, ChainResolution, CreateIdentityInput,
+    Hop, Identity, IdentityLocation, SessionWrite, UpdateError,
 };
 use agentx::message::{
     build_message_request, call, call_device, call_extension, call_group, device_of, did_host, did_to_url,
@@ -158,6 +160,34 @@ enum AnpCommand {
         /// A server-issued one-time nonce. Empty asks the target to challenge instead.
         #[arg(long, default_value = "")]
         nonce: String,
+        #[command(flatten)]
+        own: OwnIdentity,
+    },
+    /// Log in to an application server: sign one ANP-02 request, POST it, and take back the
+    /// credential the server issues.
+    ///
+    /// The request is the one `anp sign` prints, sent instead of displayed, so what goes out is
+    /// the same object either way. A 401 challenge is answered once, with the nonce the server
+    /// names. A 409 `did_superseded` is a **conclusion** about this identity rather than a
+    /// rejected proof, so it is reported as one and the chain is walked to say which DID is
+    /// current — the peer's own hint is never acted on (ANP-03 §3.2).
+    Login {
+        /// The full URL of the login endpoint, e.g. `https://site.example/api/anp/login`.
+        #[arg(long, value_name = "URI")]
+        target: String,
+        /// A server-issued one-time nonce. Empty asks the target to challenge instead.
+        #[arg(long, default_value = "")]
+        nonce: String,
+        /// Keep the token for at most this long: `7d`, `24h`, `30m`, or bare seconds. The
+        /// server's own expiry wins whenever it is shorter.
+        #[arg(long, value_name = "SPEC")]
+        session_ttl: Option<String>,
+        /// Print the token but do not cache it.
+        #[arg(long)]
+        no_save_session: bool,
+        /// Print the whole outcome as JSON, token included.
+        #[arg(long)]
+        json: bool,
         #[command(flatten)]
         own: OwnIdentity,
     },
@@ -984,6 +1014,25 @@ async fn main() -> anyhow::Result<()> {
                 nonce,
                 own,
             } => cmd_anp_sign(&own, &target, &method, &nonce),
+            AnpCommand::Login {
+                target,
+                nonce,
+                session_ttl,
+                no_save_session,
+                json,
+                own,
+            } => {
+                cmd_anp_login(
+                    &own,
+                    &target,
+                    &nonce,
+                    session_ttl.as_deref(),
+                    no_save_session,
+                    json,
+                    &allow_private,
+                )
+                .await
+            }
         },
         // `--version` is answered by clap before dispatch, so reaching here means the word
         // was typed. Same string either way: the two spellings are one fact.
@@ -1198,6 +1247,182 @@ fn cmd_anp_sign(own: &OwnIdentity, target: &str, method: &str, nonce: &str) -> a
     Ok(())
 }
 
+/// `anp login` — the same request `anp sign` prints, sent, and the credential it comes back with.
+///
+/// The token is the outcome; the cache is a convenience beside it. A failed cache write is a
+/// warning and never a failed login, because the token is already in hand and re-running the
+/// login to fix a file would be a worse outcome than a stale file (ADR-0001 §2.5).
+async fn cmd_anp_login(
+    own: &OwnIdentity,
+    target: &str,
+    nonce: &str,
+    session_ttl: Option<&str>,
+    no_save_session: bool,
+    json: bool,
+    allow_private: &[String],
+) -> anyhow::Result<()> {
+    // Before the network round trip, so a typo in `--session-ttl` fails fast.
+    let ttl = parse_ttl_seconds(session_ttl)?;
+    let location = own.location()?;
+    let identity = Identity::load(&location)?;
+    let key = load_stored_key(identity.keys.get("key-1").ok_or_else(|| {
+        anyhow::anyhow!(
+            "{} has no key-1 in the store; the binding key is what signs an ANP-02 request",
+            location.identity_path().display()
+        )
+    })?)?;
+
+    // The allowlist is the bare host, but the token is cached — and named — under the authority
+    // that issued it, port included: two servers on one machine are two different issuers.
+    let policy_host = target_host(target)?;
+    let host = session_host(target)?;
+    // Only the login endpoint's host is allowlisted: this request carries the DID document and
+    // a signature over the target URL, so it goes exactly where the caller aimed it.
+    let policy = policy_for(std::slice::from_ref(&policy_host), allow_private);
+    let client = http_client()?;
+
+    let outcome = match login(&client, target, &policy, &identity, &key, nonce).await {
+        Ok(outcome) => outcome,
+        Err(LoginError::Superseded(hint)) => {
+            return report_superseded(&client, &location, &identity, &hint, allow_private).await
+        }
+        Err(LoginError::Refused(err)) => return Err(err),
+    };
+
+    let written = match (outcome.token.as_deref(), no_save_session) {
+        (Some(token), false) => {
+            match save_session(
+                &location,
+                &host,
+                token,
+                &outcome.did,
+                Some(&outcome.subject),
+                outcome.token_type.as_deref(),
+                ttl,
+            ) {
+                Ok(()) => SessionWrite::Saved,
+                Err(err) => {
+                    eprintln!(
+                        "agentx-cli: warning: could not save the session ({err:#}). The token below is the only copy."
+                    );
+                    SessionWrite::Failed
+                }
+            }
+        }
+        _ => SessionWrite::Skipped,
+    };
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "ok": true,
+                "host": host,
+                "subject": outcome.subject,
+                "did": outcome.did,
+                "token": outcome.token,
+                "tokenType": outcome.token_type,
+                "docUrl": outcome.doc_url,
+                "session": session_word(written),
+                "sessionFile": location.session_path(),
+            }))?
+        );
+        return Ok(());
+    }
+
+    let line = |label: &str, value: &str| field(label, Some(&Value::String(value.to_string())));
+    println!("signed in to {host}");
+    line("did:", &outcome.did);
+    line("subject:", &outcome.subject);
+    match outcome.token.as_deref() {
+        Some(token) => line("token:", token),
+        None => println!("no token: the server accepted the proof and issued no credential"),
+    }
+    match written {
+        SessionWrite::Saved => line("saved:", &location.session_path().display().to_string()),
+        SessionWrite::Failed => println!("session not saved — the token above is the only copy"),
+        SessionWrite::Skipped => println!("session not saved (--no-save-session)"),
+    }
+    // The type is the one field that says how the token must be presented, so a non-default one
+    // is worth saying out loud rather than leaving for the caller to notice.
+    if let Some(token_type) = outcome.token_type.as_deref() {
+        if !token_type.eq_ignore_ascii_case("bearer") {
+            println!(
+                "note: the server named token_type \"{token_type}\" — present this token the way that \
+                 profile requires, not as a Bearer token (ANP-02 §3.2.3)"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Report a 409 `did_superseded`, with this client's own conclusion attached.
+///
+/// The peer's two DIDs are a hint (§3.2), so the walk is what decides: it is the same chain
+/// resolution `did resolve --chain` does, and it answers the one question this login cannot —
+/// whether the DID really moved, and to what. Nothing is retried: a retry would have to sign as
+/// the successor, and this store holds that key only if the update was run here.
+///
+/// The exit code stays `1`: `docs/design/cli.md` §7 reserves `2` / `3` for `did resolve`, and
+/// widening that contract is a decision about the whole command face rather than one login.
+async fn report_superseded(
+    client: &reqwest::Client,
+    location: &IdentityLocation,
+    identity: &Identity,
+    hint: &Superseded,
+    allow_private: &[String],
+) -> anyhow::Result<()> {
+    println!("did_superseded: the server refused {} as no longer current", hint.requested_did);
+    if let Some(claimed) = hint.claimed_current_did.as_deref() {
+        println!("the server says: {claimed} (a hint, not a verified fact — ANP-03 §3.2)");
+    }
+
+    let policy = policy_for(&[did_host(&identity.did)?], allow_private);
+    match resolve_chain(client, &identity.did, &policy).await {
+        Ok(chain) => {
+            println!("current did:    {}", chain.result.current_did);
+            println!(
+                "assurance:      {}",
+                chain
+                    .result
+                    .assurance
+                    .map(|value| snake_case_name(&value))
+                    .unwrap_or_else(|| "none (no hops)".to_string())
+            );
+            println!(
+                "detail:         agentx-cli did resolve {} --chain",
+                identity.did
+            );
+        }
+        Err(ChainError::Broken(err)) => {
+            eprintln!(
+                "agentx-cli: did_chain_broken: {}: {}",
+                snake_case_name(&err.kind),
+                err.message
+            );
+            eprintln!(
+                "agentx-cli: the DID is reported as superseded AND its chain does not verify; \
+                 the staged key, if any, is at {}",
+                location.successor_path().display()
+            );
+        }
+        Err(ChainError::Unavailable(err)) => {
+            eprintln!("agentx-cli: warning: could not walk the chain to check: {err:#}");
+        }
+    }
+    anyhow::bail!("login_failed: the DID this store signs with is superseded")
+}
+
+/// What happened to the token cache, as one word — the same three the TS client's stream uses,
+/// so a machine reading either client's `--json` sees the same vocabulary.
+fn session_word(written: SessionWrite) -> &'static str {
+    match written {
+        SessionWrite::Saved => "saved",
+        SessionWrite::Skipped => "skipped",
+        SessionWrite::Failed => "failed",
+    }
+}
+
 fn cmd_did_show(agent: Option<&str>, profile: Option<&str>, json: bool) -> anyhow::Result<()> {
     let location = IdentityLocation::resolve(agent, profile)?;
     let identity = Identity::load(&location)?;
@@ -1362,7 +1587,8 @@ fn cmd_did_restore() -> anyhow::Result<()> {
     )
 }
 
-/// The host a `--target` URL names, for the allowlist.
+/// The host a `--target` URL names, for the allowlist. The bare host: the gate is about which
+/// host may be reached, and the port picks a service on it, not a different host.
 fn target_host(target: &str) -> anyhow::Result<String> {
     let url = Url::parse(target).map_err(|err| anyhow::anyhow!("--target must be a URL: {err}"))?;
     url.host_str()

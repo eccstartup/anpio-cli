@@ -95,9 +95,9 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 **每条带一个状态签**（2026-10-02）：`[已落]` / `[部分]` / `[未动]`。
 
 1. **[部分]** **CLI 参数 / 帮助 / 渲染**（~1600 行）：1193 行的命令表 + 渲染层。机械，但量在那儿。
-   已落骨架与 `did`（5 条：`create` / `show` / `register` / `resolve` / `restore`；`update` 未动）/
-   `msg`（6 条）/`group`（6 条 + `e2ee` 3 条）/`agent`（3 条）/`discover` 的面；
-   `anp` / `version` 未动。
+   已落骨架与 `did`（7 条：`create` / `show` / `register` / `resolve` / `update` / `restore`，`list`
+   未动）/ `msg`（6 条）/`group`（6 条 + `e2ee` 3 条）/`agent`（3 条）/`discover` 的面；
+   `anp`（3 条）与 `version` 也落了。剩下的只是 `did list` 与 `group` 的那几条。
 2. **[部分]** **身份存储**（~1200 行）：含 **Ethereum keystore V3**（scrypt + aes-128-ctr + keccak256）与
    **EIP-1193 web3 钱包路径**——`--wallet web3` 是 CLI 的一等路径。
    已落的是**自定格式**那一半（§0.1 第 1 条把两个客户端分开了），keystore V3 / web3 未动。
@@ -221,7 +221,7 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 | `group e2ee` | `send` | ~~做完~~（对真服务跑通；群寻址，收件进设备队列，只推 `group_event_seq`） |
 | `group e2ee` | 收包路径（`process_notice_v2` / `decrypt_received_v2`） | ~~做完~~（`msg listen` 投递驱动，对真服务跑通 commit/welcome/final-notice 与 `group.incoming`） |
 | `anp` | `show` / `sign` | ~~做完~~（离线一半：本地记录 + 一份能过 crate 验签的 ANP-02 请求） |
-| `anp` | `login` | 还没（要网络：401 挑战重签、token 会话缓存、409 走链重试） |
+| `anp` | `login` | ~~做完~~（对 rig 跑通：401 答一次、403/网页拒绝、409 走链、会话缓存按 `host:port` 合并） |
 | `agent` | `show` / `use` / `list` | ~~做完~~（含 `--agent` 的解析链） |
 | — | `version` | ~~做完~~（词形，与 `--version` 同一事实） |
 | 身份 | 换钥 / 换设备 / `update_document` | 还没 |
@@ -593,6 +593,24 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
   挂在 `did` 上的依赖方会在换钥时丢账号、挂在 `subject` 上的不会（`did show` 不摊开这一点）。
   它同时打出 `keyid`（`{did}#key-1`，peer 要找的那个）与 key 文件的权限，因为那份文件是私钥。
   文档面（`didDocument`）跟着打出来，不额外取网络——`anp show` 与 `anp sign` 都**不连网**。
+- **`anp login` 已落（2026-10-02）**。三点：
+  （a）**挑战只答一次，而且只答一个不同的 nonce。** 401 的重签被收进 `anp/request.rs::post_signed`
+  （`MAX_ATTEMPTS = 2`），所以 login 与 `did update` 那一跳共用同一份"签—发—答挑战"的实现；
+  但重试的**条件**是关键：只有 `WWW-Authenticate` 报了一个**和当前不同的** nonce 才重签。同一个
+  nonce 再挑战一次是在拒绝，不是在要 nonce，照着重发只会把同一个请求发两遍。
+  （b）**409 `did_superseded` 是一个结论，不是一次被拒的证明。** 所以它是**类型化**的
+  `LoginError::Superseded` 而不是一个字符串：peer 报的 `currentDid` 是**提示**（ANP-03 §3.2 说得
+  很直白，照着它重签就是把选凭据的权力交给 peer），于是 `login` 只把两侧原样带出来，由
+  `report_superseded` 走**我们自己的**链（`resolve_chain`）说哪个 DID 才算数——rig 里那个说谎的
+  409 因此被当场拆穿："current did" 仍是本地 DID、`assurance: none (no hops)`。退出码维持在
+  **1**：`docs/design/cli.md` §7 的 2/3 是留给 `did resolve` 的，一个登录失败没有理由去占。
+  （c）**会话缓存的键是 `host:port`，不是 host。** token 是**某一个服务**发的，同一台机器上两个
+  端口的两个服务就是两个签发方，共用一条记录等于后一次登录吃掉前一次。这正是 TS 的
+  `new URL(target).host`（带端口），也是它自己文档写 `localhost:3000` 而不是 `localhost` 的原因
+  ——rig 里 9111/9112 两条并存的记录就是这条规则的可执行证据。默认端口不写（写出来只是噪音）。
+  缓存按 host 读-改-写（跨进程文件锁，TS ADR-0001 §2.5 的同一套理由），明文 0600：这个客户端
+  没有 keystore，它的身份库本来就已经是明文 0600（§8-E）；而且**缓存写失败永远不是登录失败**，
+  token 已经在手里了，为了修一个文件去重跑登录是更坏的结果。
 - **与 TS `connectx` 并存**，`CONNECTX_HOME` 的处理见 §8-F。
 
 **Phase 2 —— 消息库**（还没动）
@@ -616,7 +634,8 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
   后继钥先暂存后投递，失败分 Settled / Ambiguous 两型决定暂存钥的生死，`--resume` 靠走链结清。见 §6）
 - [x] ~~`anp` 一族的离线一半：`show` / `sign`~~（2026-10-02；共用一份 ANP-02 字节，`sign`
   的产出过 crate 自己的验签。见 §6）
-- [ ] `anp login`（要网络的那一半：401 挑战重签、token 会话缓存、409 走链重试）
+- [x] ~~`anp login`（要网络的那一半：401 挑战重签、token 会话缓存、409 走链重试）~~（2026-10-02；
+  挑战答一次、409 作为结论走自己的链、缓存按 `host:port` 读-改-写。见 §6）
 - [x] ~~`agent` 一族：`show` / `use` / `list`~~（2026-10-02；含 `--agent` 的解析链，见 §6）
 - [x] ~~`version`~~（2026-10-02；词形与 `--version` 同一事实，见 §6）
 
