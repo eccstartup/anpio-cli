@@ -247,7 +247,7 @@ ANP 的定址单位是 **DID**，`msg send --to` 只吃 DID。
 | --- | --- | --- |
 | **一** | 单测全绿 | ✅ 150 个库侧 + 7 个命令面（`tests/cli_surface.rs`） |
 | **二** | 一个人照文档能手工跑完一条链路 | ✅ `scripts/e2e.sh` 一条命令跑完（`4245d9e`），不再是只有散文的配方 |
-| **三** | **一条命令**跑完全链路，并且 CI 每次 push 都跑 | ⚠️ 命令有了，**CI 还没接**（§5.3 下一条） |
+| **三** | **一条命令**跑完全链路，并且 CI 每次 push 都跑 | ✅ `e2e` 这个 job（`e9d14dc`）：`./scripts/e2e.sh`，GitHub 上三个 job 全绿，`e2e` 从头到尾约 70 秒 |
 
 用户那句"至少我要能跑通吧"要的是**二**，但只有做到**三**，二才不会随时间烂掉
 （文档里的手工步骤是最先过时的那一类东西）。
@@ -311,7 +311,8 @@ msg * / group * / group e2ee *  ──►  packages/service（本仓，:8787 之
       —— **2026-10-02 落地（`4245d9e`）**。`scripts/e2e.sh` 起一台 DID 主机 +
       本仓 `packages/service`，用**真二进制**走完 `did create|show|publish`、
       `me set|show`、`msg send`、`contacts add|resolve`、`group create|info|members|
-      set-remark`、`group e2ee publish|create`，逐条断言，非 0 退出，失败时把两份日志的
+      set-remark|join|leave|update-profile|send`、`group e2ee publish|create`，逐条断言，
+      非 0 退出，失败时把两份日志的
       尾部一并打出来。两条**必须在联网前发生的拒绝**也在里面（`me set` 空参、
       删掉 `session.json` 后的 `did publish`）。
       **DID 主机那里有一处与 §5.2 的字面不同的做法，说清楚**：脚本自带一台玩具主机
@@ -334,6 +335,15 @@ msg * / group * / group e2ee *  ──►  packages/service（本仓，:8787 之
       **两半都实跑过**：玩具那半全绿；awiki 那半（本机 8765 在跑）全绿，版本 1→2 是真的。
 - [ ] **把配方升成 `rust/crates/agentx-cli/tests/` 里的集成测试**，读 `AGENTXCLI_HOME`
       指向的临时目录，自己起服务、自己收尾。这一步之后第三档才成立。
+      —— **2026-10-02：这条的理由已经兑现，但走的是另一条路，所以留着等裁定。** 它给的
+      结果是"第三档才成立"，而第三档今天成立的方式是**脚本进 CI**（§5.1 已改）——
+      `e2e` job 每次 push 都跑，GitHub 上前三个 job 全绿。写这条时假定的是"配方只能是人跑
+      的脚本，所以得把它变成 `cargo test` 的一档"，CI 证明了这个假定不成立。
+      还剩的价值只有一条：**不跑脚本、只跑 `cargo test` 的人**看不见这条链路。
+      两条路：(甲) 就到这里，脚本+CI 就是第三档的载体（`cargo test` 仍只跑库侧）；
+      (乙) 再加一层"把脚本当测试"的薄测试（`#[ignore]` 默认跳过，`cargo test -- --ignored`
+      才跑），代价是同一套机制多一个入口、且 `cargo test` 会多一个需要 node 的档。
+      **建议甲**，不为一个已经有的门禁再造一个影子。**这条要用户裁一下。**
 - [ ] **覆盖要跟命令面走，不是跟"写过的测试"走。** 132 个单测长在库侧
       （身份存储、JCS 哈希、会话缓存、策略、信封），**命令面一层几乎没有测试**。
       `did publish` 的三个分支（未变 / 变了 / 没有 token）今天只在手工验证里出现过。
@@ -342,6 +352,14 @@ msg * / group * / group e2ee *  ──►  packages/service（本仓，:8787 之
       它跑**真二进制**（解析器推出来的清单与被测对象同源，什么都钉不住），覆盖九族的
       `--help`、`contacts resolve <did>` 的不读库短路、以及两条必须在联网前发生的拒绝。
       全是**不需要 DID host** 的那一半——`did publish` 三个分支仍要等 §5.2 的裁定。
+      —— 进度二：**要 DID host 的那一半落进了 `scripts/e2e.sh`**（`4245d9e` 起，此后每块
+      新命令面都跟着加）：`did create|show|publish`（含 no-op / 改一笔 / 无 token 三个分支）、
+      `me set|show`（含空参拒绝）、`msg send`、`contacts add|resolve`、`group create|info|
+      members|set-remark`、**`group join|leave|update-profile|send`**（2026-10-02 补，此前
+      这四条只有"写过"没有"跑过"）、`group e2ee publish|create`。**还差**：`group e2ee`
+      的 `get-key-package` / `add` / `remove` / `send` 四条（手工跑过，脚本里没有）、
+      `did update` 与它的 `--resume`、`anp login` 的 401 挑战那条路。这几条各自要一台
+      愿意配合的主机或第二个设备，不是能顺手塞进去的。
 - [x] ~~**负结果的测试值得单列。** 这个客户端的正确行为里有好几条"对端不支持时应该怎样"~~
       （`msg inbox` 一族对 awiki 回 `-32601` 是**正确**结果，`cli.md` §5）。
       这类断言最容易在重构里被悄悄改成"跳过"，要有测试咬住。

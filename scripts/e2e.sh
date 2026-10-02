@@ -357,6 +357,40 @@ else
   printf '    \033[32mok\033[0m   no bleed between the two books\n'
 fi
 
+# ---- 群的成员与改名 -----------------------------------------------------------
+#
+# 这几条是命令面上"写过但从没被跑过"的那部分（TODO6 §5.3 第二条）：`update-profile` 改的是
+# **群自己的**名字（存在群的主机上、所有人一样），和上面那本只有自己看得见的册子不是一件事。
+
+section "group join / leave — a second identity in the same group"
+run "$CLI" group join --agent bob "$GROUP_DID"
+expect_status "group join succeeds (the group is open-join by policy)" 0
+expect "  and names the member it activated" "did:wba:${AUTHORITY}:user:bob:"
+run "$CLI" group members --agent alice "$GROUP_DID"
+expect "  and the group now lists bob" "did:wba:${AUTHORITY}:user:bob:"
+
+section "group update-profile — the name everyone sees (P4 §7.4)"
+run "$CLI" group update-profile --agent alice "$GROUP_DID" --name "改名后的群"
+expect_status "group update-profile succeeds" 0
+run "$CLI" group info --agent alice "$GROUP_DID"
+expect "  and the group's own name has moved" "改名后的群"
+
+section "group send — a message to the group, not to one member"
+run "$CLI" group send --agent alice "$GROUP_DID" --text "hello group"
+expect_status "group send is accepted" 0
+expect "  and acknowledges the group it went to" "$GROUP_DID"
+
+section "group leave — and the member list follows"
+run "$CLI" group leave --agent bob "$GROUP_DID"
+expect_status "group leave succeeds" 0
+run "$CLI" group members --agent alice "$GROUP_DID"
+if grep -q "did:wba:${AUTHORITY}:user:bob:" "$LAST_OUT"; then
+  printf '    \033[31mFAIL\033[0m bob is still listed after leaving\n'
+  FAILED=$((FAILED + 1))
+else
+  printf '    \033[32mok\033[0m   the leaver is gone from the member list\n'
+fi
+
 # ---- P6 ----------------------------------------------------------------------
 
 section "group e2ee — the device side of P6"
