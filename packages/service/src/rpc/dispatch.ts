@@ -66,7 +66,13 @@ import {
 import { callerKeyOf, createRateLimiter } from './rateLimit'
 import { GROUP_HANDLERS } from './groups'
 import { adoptMemberDidForRequest, requestTriggersDidUpdate, type DidChainResolver } from './memberDidUpdate'
-import { ATTACHMENT_HANDLERS } from './attachments'
+import {
+  ATTACHMENT_ABORT_OBJECT,
+  ATTACHMENT_COMMIT_OBJECT,
+  ATTACHMENT_CREATE_SLOT,
+  ATTACHMENT_GET_DOWNLOAD_TICKET,
+  ATTACHMENT_HANDLERS,
+} from './attachments'
 import type { ObjectStore } from '../objects'
 import { AnpRefusal, refusal } from './refusal'
 import { INBOX_GET, INBOX_MARK_READ, MESSAGE_GET_BATCH, SYNC_DELTA, markRead, readBatch, readDelta, readInbox } from './inbox'
@@ -74,6 +80,23 @@ import { errorResponse, failureId, noResponse, parseRequestText, successResponse
 
 /** 目标就是本服务（§3.3）。一个共享的常量：它没有内容，没必要每次现造一个。 */
 const LOCAL: ForwardOutcome = { kind: 'local' }
+
+/**
+ * 会出站转发的两族（P8 §5.1、§5.3）。
+ *
+ * 表放在这里是为了让"哪些方法会出站"是一个**可数的事实**：方法表将来加一条
+ * service-scoped 的控制面方法，漏了这里就是"它静默落在本地、再响亮地失败"，而不是转发。
+ * 判断在 {@link relayFor}。
+ *
+ * `group.*` 不在这张表里，理由见 `relayFor`。
+ */
+const RELAYED_METHODS: ReadonlySet<string> = new Set([
+  DIRECT_SEND,
+  ATTACHMENT_CREATE_SLOT,
+  ATTACHMENT_COMMIT_OBJECT,
+  ATTACHMENT_ABORT_OBJECT,
+  ATTACHMENT_GET_DOWNLOAD_TICKET,
+])
 
 export interface DispatchDeps {
   /** Read for the service's own DID and for {@link DidResolution}, which becomes the
@@ -272,6 +295,14 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
         }
         const attachment = ATTACHMENT_HANDLERS[spec.name]
         if (attachment !== undefined) {
+          // 跨域那一档到此为止（P8 §3.3、§5.3）：转发已经发生过，对端就是那个**对象服务**，
+          // 槽位、对象字节与票据都在它那里。本地没有任何东西要建，也不该建——"这颗对象是
+          // 谁的"答案在对端，在本地落一行只会造出一颗谁也 download 不到的对象。
+          //
+          // 台账仍然记（`acceptOperation` 写的），所以重试拿到的是同一份答复，那正是
+          // §9.1 L630 要的。不需要 `direct.send` 那样的消息行：附件控制面本来就不产生
+          // 本地消息。
+          if (input.relayed !== undefined) return input.relayed
           return attachment({
             storage: deps.storage,
             serviceDid: deps.config.serviceDid,
@@ -604,20 +635,24 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
   /**
    * 这次调用该不该出站，以及出站的结果（P8 §3.3）。
    *
-   * **只接 `direct.send` 一条**。P8 §3.2 点的那一族是 `direct.send` / `group.*` /
-   * `attachment.*`，但另外两族今天还接不上：
+   * 规则只有一条，接了的两族共用：**请求点名的那颗目标 DID，它的公开 `ANPMessageService`
+   * 是不是本服务**。是本服务就本地办完（`relay` 认出自家入口、返回 `local`，一个 HTTP 都
+   * 不发），不是就按 §5 把**原始方法**转发过去——§3.1 L61–68 说得很直白：跨域不增加一层
+   * 新的中继协议。
    *
-   *   - `group.*` 的锚点是 `group_did`，而"是不是本服务"要先解析它的文档才判得了
-   *     （[federation.md](docs/design/federation.md) §5.1）。群 DID 文档**还没有人发布**
-   *     ——所以接上它只会让**自家**的群也解析失败。这是那条已记录的 v1 缺口，不是这里
-   *     能补的：等 Host 侧发布文档之后，这里的 `spec.name` 判断换成"这个方法的目标 DID"
-   *     即可，机制本身不用改。
-   *   - `attachment.*` 的锚点是**原始附件消息的发送者 DID**（§9.1 L565、§5.3 L249），
-   *     而不是 `meta.target.did`。C10 的 `attachment.get_download_ticket` 是域内实现，
-   *     跨域代理模式还没接。
+   * 目标 DID 一律取自 `meta.target.did`，但两族的语义不同，别把下游的发现义务和这里的
+   * 路由混起来：
    *
-   * 两族今天都落在本地受理上，且都是**响亮的失败**（群不存在、授权不在）而不是静默走错
-   * 域——C13 / 后续那一块接上时改的只是这一行判断。
+   *   - `direct.send`：`target.kind = "agent"`，`target.did` 是收件 agent（§5.1）。
+   *   - `attachment.*`：`target.kind = "service"`，`target.did` 就是那个对象服务的
+   *     `serviceDid`（§10.1 L798）。§5.2/§5.3 额外要的那句"先从**原始附件消息发送者的
+   *     DID** 解析出公开服务"，约束的是**调用方**怎么找到这个 `serviceDid`；等请求走到
+   *     我们这里，`meta.target.did` 已经写着它解析出来的结果，这一层照转即可，不重解析。
+   *
+   * `group.*` 仍是唯一没接的：它的目标是 `group_did`，而"是不是本服务"要先解析那份文档
+   * 才判得了（[federation.md](docs/design/federation.md) §5.1）。群 DID 文档今天没有托管
+   * 方，接上只会让**自家**的群也解析失败——那条缺口在 Host 侧，不在这里。等 Host 侧发布
+   * 文档之后，把 `group.*` 那几条加进 `RELAYED_METHODS` 即可，机制本身不用改。
    *
    * `replayed` 是这次调用在幂等台账上已经有过记录——**已经记过账的操作不再出站**。那份
    * 记录里的结果就是对端的答复，重试要的是它。不查这一下，每次重试都会再打扰对端一遍
@@ -631,10 +666,15 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
     key: string,
     replayed: boolean,
   ): Promise<ForwardOutcome> {
-    if (relay === undefined || spec.name !== DIRECT_SEND) return LOCAL
+    if (relay === undefined || !RELAYED_METHODS.has(spec.name)) return LOCAL
     if (replayed) return LOCAL
     const targetDid = envelope.params.meta.target?.did
     if (targetDid === undefined || targetDid === '') return LOCAL
+    // 目标写着我们自己的 `serviceDid`：这是同域的附件调用。答案本地就知道，不该让"我们的
+    // 文档解析得到我们自己的入口"变成前提——那份文档不在本服务手里
+    // （[message-service.md](docs/design/message-service.md) §13），它解析不出来时这次调用
+    // 仍该照常办。`direct.send` 走不到这里：它的目标是 agent DID，不会等于一个 serviceDid。
+    if (targetDid === deps.config.serviceDid) return LOCAL
     return relay.forward(envelope, targetDid)
   }
 

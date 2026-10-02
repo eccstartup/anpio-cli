@@ -239,6 +239,34 @@ KeyPackage 的 `did_wba_binding` Object Proof 由设备自签，验证侧从**�
   另有 C11 记的"挡住 v1 的"两条：群 DID 文档没人发布（§5.2 L220 要求解析 `group_did` 才能
   找到 Host）；`serviceDid` 文档由 `awiki-open-server` 托管，外层 `keyid` 的 fragment 必须与它
   写进去的一致（与 A7 同源）。
+
+  - ~~**B1a `attachment.*` 那一半。**~~
+    （2026-10-02 落地。**先说一处早先记错的地方**：本条原先写"附件的锚点是**原始附件消息
+    发送者 DID**，不是 `meta.target.did`"，并据此认为接不上。那是把 P8 §5.3 那句**调用方
+    的发现义务**（"caller MUST 先从原始发送者 DID 解析公开服务"）当成了域服务的**路由
+    规则**。两者是两件事：请求送到本服务手里时 `meta.target.did` 已经写着调用方解析出来
+    的那个 `serviceDid`（§10.1 L798 要求四条附件方法的 `target.did` 必须等于目标服务的
+    `serviceDid`），所以发送侧与私聊**同一条规则**——解析 `meta.target.did` 公开的
+    `ANPMessageService`，是本服务就本地办完，不是就把原始方法转过去。
+    落法是 `dispatch.ts` 新增 `RELAYED_METHODS`（五条：`direct.send` + 四条附件），
+    `relayFor` 从 `spec.name !== DIRECT_SEND` 改成查这张表。两处细节是刻意的：
+    **①** 目标写着 `config.serviceDid` 时直接返回 `local`，不走 `isOurOwnIngress`——后者
+    要求先把我们**自己**的文档解析出来，而那份文档不在本服务手里（message-service.md
+    §13），靠它判"是自己"会让一次同域附件调用在文档不可达时无端失败；
+    **②** 附件那一支在进 handler **之前**就 `if (input.relayed !== undefined) return
+    input.relayed`，本地一个字节都不落（槽位、字节、票据都在对端，本地落一行只会造出一颗
+    谁也 download 不到的对象），而不是让四个 handler 各接一个 `relayed` 参数。
+    `direct.send` 那边不同：它转发之后还要落一条**消息行**，那是它自己的台账，附件控制面
+    本来就不产生本地消息。测试 4 条（`dispatch.test.ts` 的 "an attachment control call
+    whose object service lives elsewhere"）：转发到请求点名的服务且本地没铸东西、同域
+    短路由不出站、重放不出站第二次、对端拒绝原样回且不落库。**两条验过会红**（把那个
+    early-return 关掉即 2 failed）。文档更正三处：federation.md §3.3 的规则从"私聊 `agent_did`
+    / 群 `group_did` / 附件原始发送者 DID"改成统一的 `meta.target.did`，§3.2 的出站清单划掉
+    附件、§5.2 重写为"锚点是调用方怎么找到服务，不是域服务怎么路由"；attachments.md 新增
+    §6.1，§1 加一句"本服务就是 Object Service 说的是作为目标的那一档"。）
+
+  - **B1b `group.*` 那一半。** 见 [TODO3.md](TODO3.md)——用户 2026-10-02 裁定按**选项 1**
+    走：AgentXAgent **自己发布**群 DID 文档，不依赖 awiki 托管。
 - ~~**B2（= TODO1 E4，端到端）** `connectx msg send` → `AgentXAgent` → `connectx msg listen` 收到。
   今天 P4/P5/P6 都是**方法级**测过、**没串起来端到端跑过**。A1/A2 定了之后，这条应该顺带把
   P6 也串进去。~~
@@ -342,3 +370,5 @@ KeyPackage 的 `did_wba_binding` Object Proof 由设备自签，验证侧从**�
   （2026-10-02 B2 之后：多一组，`npm test` = 207 + 693 + **3** + 620，第四组是 `packages/e2e`。
   它一个文件就 4.5 秒——每条用例都真起一个服务、真连一次 socket，所以它比别组长，但不是卡住。）
   （2026-10-02 B4 之后：CLI 那组 207 → **209**，多的是 skill 门禁的两条。）
+  （2026-10-02 B1a 之后：服务端那组 620 → **624**，多的是附件跨域的四条。总数为
+  209 + 693 + 3 + 624 = 1529。）

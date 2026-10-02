@@ -534,22 +534,23 @@ describe('accepting a direct message', () => {
   })
 })
 
-describe('a direct message whose recipient lives elsewhere (P8 §3.2)', () => {
-  /** 一条不落库、只记下被问了什么的 relay：这个文件要证的是**顺序**（转发在事务外、
-   *  拒绝不落库），不是转发本身——那是 `federation/forward.test.ts` 的事。 */
-  function recording(outcome: ForwardOutcome): { relay: Relay; asked: string[] } {
-    const asked: string[] = []
-    return {
-      asked,
-      relay: {
-        async forward(_request, targetDid): Promise<ForwardOutcome> {
-          asked.push(targetDid)
-          return outcome
-        },
+/** 一条不落库、只记下被问了什么的 relay：这里要证的是**顺序**与**该不该出站**（转发在
+ *  事务外、拒绝不落库、本地的调用不出站），不是转发本身——那是 `federation/forward.test.ts`
+ *  的事。 */
+function recording(outcome: ForwardOutcome): { relay: Relay; asked: string[] } {
+  const asked: string[] = []
+  return {
+    asked,
+    relay: {
+      async forward(_request, targetDid): Promise<ForwardOutcome> {
+        asked.push(targetDid)
+        return outcome
       },
-    }
+    },
   }
+}
 
+describe('a direct message whose recipient lives elsewhere (P8 §3.2)', () => {
   it('answers with the peer result, and files no delivery of its own', async () => {
     // 收件人不在本服务上：投递行与附件授权都是**目标 ingress** 的事（§3.1 把
     // `direct.incoming` 定成"已被目标 ingress 接受"之后的那一跳）。我们这边留下的只有
@@ -603,6 +604,102 @@ describe('a direct message whose recipient lives elsewhere (P8 §3.2)', () => {
 
     expect(retry.json?.result?.accepted).toBe(true)
     expect(asked).toEqual([receiver.did])
+  })
+})
+
+describe('an attachment control call whose object service lives elsewhere (P8 §5.3)', () => {
+  const OBJECT_SERVICE = 'did:web:objects.example'
+  /** §10.2.2 的一份最小合法正文（与 `attachments.test.ts` 的 `SLOT_BODY` 同源）。 */
+  const SLOT_BODY = {
+    attachment_id: 'att-1',
+    intended_message_security_profile: 'transport-protected',
+    object_encryption_mode: 'none',
+  }
+
+  function slotRequest(did: string): Promise<AnpRequest> {
+    return signed({
+      method: 'attachment.create_slot',
+      meta: {
+        profile: 'anp.attachment.v1',
+        security_profile: 'transport-protected',
+        sender_did: sender.did,
+        target: { kind: 'service', did },
+        operation_id: 'op-att-1',
+      },
+      body: SLOT_BODY,
+    })
+  }
+
+  it('forwards to the object service the request names, and mints nothing locally', async () => {
+    // 对象在对端，本地那一趟什么都不该做：落一行槽位只会造出一颗谁也 download 不到的对象。
+    // 判断"办没办"看答复里的基址——本地经手时 `upload_uri` 一定挂在本服务的 `publicUrl`
+    // 下，而对端那一份挂在它自己那里。
+    const { relay, asked } = recording({
+      kind: 'answered',
+      result: {
+        attachment_id: 'att-1',
+        slot_id: 'slot-elsewhere',
+        upload_uri: 'https://objects.example/anp-im/upload/tok',
+        object_uri: 'https://objects.example/anp-im/objects/obj',
+        commit_token: 'ct-elsewhere',
+        expires_at: NOW.toISOString(),
+      },
+    })
+    const h = harness({ relay })
+    const outcome = await h.call(await slotRequest(OBJECT_SERVICE))
+
+    expect(asked).toEqual([OBJECT_SERVICE])
+    expect(outcome.json?.result?.slot_id).toBe('slot-elsewhere')
+    expect(outcome.json?.result?.upload_uri).toBe('https://objects.example/anp-im/upload/tok')
+  })
+
+  it('handles a call naming its own service locally, without resolving its own document', async () => {
+    // 同域这一档不能出站，也不能靠"我们的文档解析得到我们自己的入口"——那份文档不在本服务
+    // 手里（message-service.md §13）。短路由 `relayFor` 里那次 `serviceDid` 比较给出。
+    const { relay, asked } = recording({ kind: 'answered', result: { slot_id: 'never' } })
+    const h = harness({ relay })
+    const outcome = await h.call(await slotRequest(loadConfig({}).serviceDid))
+
+    expect(asked).toEqual([])
+    expect(outcome.json?.result?.slot_id).not.toBe('never')
+    expect(String(outcome.json?.result?.upload_uri)).toMatch(/^http:\/\/127\.0\.0\.1:8787\/anp-im\/upload\//)
+  })
+
+  it('does not forward a retry of an operation it already answered', async () => {
+    const { relay, asked } = recording({
+      kind: 'answered',
+      result: {
+        attachment_id: 'att-1',
+        slot_id: 'slot-elsewhere',
+        upload_uri: 'https://objects.example/anp-im/upload/tok',
+        object_uri: 'https://objects.example/anp-im/objects/obj',
+        commit_token: 'ct-elsewhere',
+        expires_at: NOW.toISOString(),
+      },
+    })
+    const h = harness({ relay })
+    await h.call(await slotRequest(OBJECT_SERVICE))
+    const retry = await h.call({ ...(await slotRequest(OBJECT_SERVICE)), id: 'req-att-2' })
+
+    expect(retry.json?.result?.slot_id).toBe('slot-elsewhere')
+    expect(asked).toEqual([OBJECT_SERVICE])
+  })
+
+  it('returns the object service refusal unchanged, and records nothing', async () => {
+    const { relay } = recording({
+      kind: 'refused',
+      rejection: {
+        code: 6012,
+        anpCode: 'anp.attachment.object_unavailable',
+        retryable: false,
+        message: 'the object is gone',
+      },
+    })
+    const h = harness({ relay })
+    const outcome = await h.call(await slotRequest(OBJECT_SERVICE))
+
+    expect(outcome.json?.error?.code).toBe(6012)
+    expect(outcome.json?.error?.data?.anp_code).toBe('anp.attachment.object_unavailable')
   })
 })
 

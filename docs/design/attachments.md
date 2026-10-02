@@ -22,6 +22,9 @@ Access Grant。
 要求调用方 **MUST NOT** 只凭 `object_uri` 的域名猜控制面服务，在"不拆"的前提下这条
 自动成立。
 
+**"本服务就是那个 Object Service"说的是本服务作为目标时的那一档。**目标写在别处时
+（`meta.target.did` 是另一个服务的 `serviceDid`），本服务只是把原始方法转过去——见 §6.1。
+
 ## 2. 控制面四条方法的形状
 
 四条都是 **service-scoped**（§10.1 L797–799）：`meta.target.kind` **MUST** 为 `service`，
@@ -216,6 +219,25 @@ E2EE 承载下的清单归 C12 / C13，到那时要解决的就是"客户端怎�
 而 §6.4 L439 也专门提醒"外层 serviceDid 认证 **MUST NOT** 被当成业务原发者证明"——
 我们不是在把两者混为一谈，是在同域这一侧**至少要求其中一层**。本地客户端本来就带
 proof（[message-service.md](message-service.md) §5.1）。
+
+### 6.1 跨域出站：这一族现在会转发（2026-10-02）
+
+四条的 `meta.target.did` 是**目标对象服务的 `serviceDid`**（§10.1 L798），所以"该不该
+出站"和私聊是同一个问题、同一条规则：解析 `meta.target.did` 公开的
+`ANPMessageService`，是本服务就本地办完，不是就把**原始方法**转过去
+（P8 §5.3、[federation.md](federation.md) §3.3）。接法就是把这四条加进 `dispatch.ts`
+的 `RELAYED_METHODS`。
+
+**转发时本地一个字节都不落。** 槽位、对象字节、票据都在对端——在本地落一行只会造出一颗
+谁也 download 不到的对象。幂等台账仍然记（`acceptOperation` 写的），所以重试拿回的是
+对端那一份答复，与 §9.1 L630 一致。这与 `direct.send` 略有不同：那边转发之后还要落一条
+**消息行**（它是"这次受理"的台账，附件控制面本来就不产生本地消息）。所以 `dispatch.ts` 里
+附件那一支在进 handler 之前就早退，而不是让四个 handler 各自接一个 `relayed` 参数。
+
+还没接的是 **`get_download_ticket` 的两段式**：§5.3 L249 要求调用方先从**原始附件消息
+发送者的 DID** 解析出公开服务，再跨域调用。那是**调用方**的发现义务，不是本层路由
+（[federation.md](federation.md) §5.2）——请求送到这里时 `meta.target.did` 已经写着它
+解析出来的 `serviceDid`。所以这一段不是"还没做"，是本层**不该**做。
 
 ## 7. 票据是一张不透明令牌，不签名
 
