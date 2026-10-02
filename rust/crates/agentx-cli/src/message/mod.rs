@@ -12,14 +12,17 @@ pub mod channel;
 pub mod client;
 pub mod discovery;
 pub mod envelope;
+pub mod listen;
 pub mod resolve;
 pub mod rpc;
+pub mod stream;
 
 pub use channel::{
     call, call_extension, discover, extension_rejection, is_error, now_rfc3339, open_channel,
-    payload_of, policy_for, rejection, relaxed_hosts, uuid_v4, CallRequest, Channel, Endpoint,
-    Payload, Sender, CORE_BINDING, DID_SUPERSEDED, DIRECT_PROFILE, DIRECT_SEND, EXTENSION_PROFILE,
-    GET_CAPABILITIES, INBOX_GET, INBOX_MARK_READ, MESSAGE_GET_BATCH, METHOD_NOT_FOUND,
+    payload_of, policy_for, rejection, relaxed_hosts, sign_request, uuid_v4, CallRequest, Channel,
+    Endpoint, Payload, Sender, CORE_BINDING, DID_SUPERSEDED, DIRECT_PROFILE, DIRECT_SEND,
+    EXTENSION_PROFILE, GET_CAPABILITIES, GROUP_CREATE, GROUP_GET_INFO, GROUP_JOIN, GROUP_LEAVE,
+    GROUP_PROFILE, GROUP_SEND, INBOX_GET, INBOX_MARK_READ, MESSAGE_GET_BATCH, METHOD_NOT_FOUND,
     TRANSPORT_PROTECTED, UNSUPPORTED_PROFILE,
 };
 pub use client::http_client;
@@ -32,8 +35,16 @@ pub use envelope::{
     AnpOriginProof, AnpParams, AnpRequest, AnpTarget, TargetKind, JSONRPC_VERSION,
     ORIGIN_PROOF_SCHEME,
 };
+pub use listen::{
+    backoff_ms, decode_message, device_of, run_listen, view_for, ListenArgs, ListenDeps,
+    ListenEvent, ListenMessage, ListenState, ListenView,
+};
 pub use resolve::{
     assert_allowed_host, did_host, did_to_url, document_is_bound, document_url,
     is_loopback_host_name, resolve_did_document, ResolvePolicy,
 };
 pub use rpc::{post_message, post_notification, AnpResponse};
+pub use stream::{
+    stream_url, websocket_connect, ConnectFn, Frame, StreamSide, DELTA_PAGE, INCOMING_METHODS,
+    STREAM_ACK, STREAM_AUTH, STREAM_HELLO, STREAM_PROFILE, SYNC_DELTA,
+};

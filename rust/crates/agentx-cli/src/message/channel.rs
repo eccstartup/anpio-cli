@@ -21,7 +21,7 @@ use crate::identity::Identity;
 
 use super::discovery::{discover_message_service, AnpCapabilities, MessageServiceTarget};
 use super::envelope::{
-    build_message_request, AnpAuth, AnpMeta, AnpOriginProof, AnpTarget, TargetKind,
+    build_message_request, AnpAuth, AnpMeta, AnpOriginProof, AnpRequest, AnpTarget, TargetKind,
     ORIGIN_PROOF_SCHEME,
 };
 use super::resolve::{did_host, is_loopback_host_name, ResolvePolicy};
@@ -41,6 +41,16 @@ pub const DID_SUPERSEDED: &str = "anp.did_superseded";
 /// P3 §7.1.2: the three fixed values of a `direct.send`.
 pub const DIRECT_SEND: &str = "direct.send";
 pub const DIRECT_PROFILE: &str = "anp.direct.base.v1";
+
+/// P4 §5.1: the group family's Profile, and its five methods. The one thing P4 does not let
+/// this be a constant is `meta.target` — `group.create` names the service, every other
+/// method names the group (`CallRequest.target`).
+pub const GROUP_PROFILE: &str = "anp.group.base.v2";
+pub const GROUP_CREATE: &str = "group.create";
+pub const GROUP_GET_INFO: &str = "group.get_info";
+pub const GROUP_JOIN: &str = "group.join";
+pub const GROUP_LEAVE: &str = "group.leave";
+pub const GROUP_SEND: &str = "group.send";
 
 /// P1 §8.2.1: a capabilities probe explains itself under the core binding.
 pub const GET_CAPABILITIES: &str = "anp.get_capabilities";
@@ -227,6 +237,67 @@ pub struct CallRequest {
     pub operation_id: Option<String>,
 }
 
+/// Assemble and sign one Request, ready to place on any transport.
+///
+/// This is [`call`]'s first half, split out so the socket path (`message::listen`) signs
+/// **exactly** as the HTTP path does. The handshake is where a connection learns who is on
+/// it (realtime.md §4.1), so it is the last place to accept a second signing routine: two
+/// of them would be two chances to canonicalise `meta` differently from the envelope.
+///
+/// `id` pairs one request with one response (P1 §5.2). The HTTP path has no use for it and
+/// generates a fresh one; the stream does, because it has to recognise its own reply in a
+/// frame stream that also carries unsolicited Notifications.
+pub fn sign_request(sender: &Sender, id: &str, request: CallRequest) -> Result<AnpRequest> {
+    let CallRequest {
+        method,
+        profile,
+        target,
+        body,
+        message_id,
+        content_type,
+        operation_id,
+    } = request;
+
+    let meta = AnpMeta {
+        profile,
+        security_profile: TRANSPORT_PROTECTED.to_string(),
+        sender_did: Some(sender.did.clone()),
+        target: Some(target),
+        operation_id: Some(operation_id.unwrap_or_else(uuid_v4)),
+        created_at: Some(now_rfc3339()),
+        message_id,
+        content_type,
+        ..Default::default()
+    };
+
+    // P1 appendix A.3: the Signed Request Object is `{method, meta, body}`, so the SAME two
+    // values go to the signer and to the envelope builder. The signer takes `meta` as JSON,
+    // exactly as the builder will serialise it, so neither can sign one thing and send
+    // another. (`request_meta_is_what_gets_signed` pins that down.)
+    let meta_value = serde_json::to_value(&meta)?;
+    let body_value = Value::Object(body);
+    let proof = generate_rfc9421_origin_proof(
+        &method,
+        &meta_value,
+        &body_value,
+        &sender.signing_key,
+        &sender.keyid,
+        Rfc9421OriginProofGenerationOptions::default(),
+    )
+    .map_err(|err| AgentxError::MessageInvalid(format!("signing {method}: {err}")))?;
+
+    let auth = AnpAuth {
+        scheme: ORIGIN_PROOF_SCHEME.to_string(),
+        origin_proof: AnpOriginProof {
+            content_digest: proof.content_digest,
+            signature_input: proof.signature_input,
+            signature: proof.signature,
+        },
+    };
+
+    build_message_request(id, &method, meta, Some(body_value), Some(auth))
+}
+
 /// POST one signed request. The response is returned as it arrived — success and refusal
 /// are both answers, and only the caller knows which of them it can act on.
 ///
@@ -240,52 +311,9 @@ pub async fn call(
     endpoint: &Endpoint,
     request: CallRequest,
 ) -> Result<AnpResponse> {
-    let meta = AnpMeta {
-        profile: request.profile,
-        security_profile: TRANSPORT_PROTECTED.to_string(),
-        sender_did: Some(sender.did.clone()),
-        target: Some(request.target),
-        operation_id: Some(request.operation_id.unwrap_or_else(uuid_v4)),
-        created_at: Some(now_rfc3339()),
-        message_id: request.message_id,
-        content_type: request.content_type,
-        ..Default::default()
-    };
-
-    // P1 appendix A.3: the Signed Request Object is `{method, meta, body}`, so the SAME two
-    // values go to the signer and to the envelope builder. The signer takes `meta` as JSON,
-    // exactly as the builder will serialise it, so neither can sign one thing and send
-    // another. (`request_meta_is_what_gets_signed` pins that down.)
-    let meta_value = serde_json::to_value(&meta)?;
-    let body_value = Value::Object(request.body.clone());
-    let proof = generate_rfc9421_origin_proof(
-        &request.method,
-        &meta_value,
-        &body_value,
-        &sender.signing_key,
-        &sender.keyid,
-        Rfc9421OriginProofGenerationOptions::default(),
-    )
-    .map_err(|err| AgentxError::MessageInvalid(format!("signing {}: {err}", request.method)))?;
-
-    let auth = AnpAuth {
-        scheme: ORIGIN_PROOF_SCHEME.to_string(),
-        origin_proof: AnpOriginProof {
-            content_digest: proof.content_digest,
-            signature_input: proof.signature_input,
-            signature: proof.signature,
-        },
-    };
-
     // A fresh `id` per exchange: `id` pairs one request with one response, while
     // `operation_id` is what makes the business operation idempotent.
-    let envelope = build_message_request(
-        &uuid_v4(),
-        &request.method,
-        meta,
-        Some(body_value),
-        Some(auth),
-    )?;
+    let envelope = sign_request(sender, &uuid_v4(), request)?;
 
     // The endpoint is the peer's, so `post_message` applies the hop policy itself rather
     // than trusting this call site to have done it.
@@ -491,7 +519,8 @@ pub fn now_rfc3339() -> String {
 /// A UUID v4, so `operation_id` and request `id` read like the TS client's `randomUUID()`.
 /// The spec fixes no format (P1 §6.2.6 only says it must be a string), but interop with a
 /// peer that logs them is easier when both clients spell them the same way.
-pub fn uuid_v4() -> String {    let mut bytes = rand::random::<[u8; 16]>();
+pub fn uuid_v4() -> String {
+    let mut bytes = rand::random::<[u8; 16]>();
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();

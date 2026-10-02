@@ -15,13 +15,20 @@ anp = "1.0.5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 clap = { version = "4", features = ["derive"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 anyhow = "1"
 thiserror = "1"
 chrono = "0.4"
 # The HTTP hop to the service. Same feature set the `anp` crate pulls in for its own
 # DID resolution, so this introduces no second TLS stack.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# `msg listen` is the one place this client speaks WebSocket instead of HTTP (realtime.md
+# §3). Tungstenite is the standard client for it, and `rustls-tls-webpki-roots` keeps the
+# TLS stack to the rustls reqwest already brings in, with the same root store.
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
+# `SinkExt` / `StreamExt` for splitting the socket into a writer and a reader task. Already
+# in `tokio-tungstenite`'s tree, so this adds no second copy.
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 # The DID document's `proofValue` is base58-btc multibase (ANP-03 §2.5.5), while the
 # `anp` crate's `complete_w3c_proof` writes base64url. Both crates are already in
 # `anp`'s tree, so re-encoding the proof introduces no new dependency stack.

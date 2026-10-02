@@ -8,15 +8,17 @@
 use clap::{Args, Parser, Subcommand};
 use reqwest::Url;
 use serde_json::{json, Map, Value};
+use std::sync::Arc;
 
 use agentx::identity::{
     create_identity, fetch_host_service, register_identity, CreateIdentityInput, Identity,
     IdentityLocation,
 };
 use agentx::message::{
-    build_message_request, call, call_extension, discover, http_client, now_rfc3339, open_channel,
-    parse_capabilities, payload_of, policy_for, post_message, rejection, uuid_v4, AnpMeta,
-    AnpResponse, AnpTarget, CallRequest, Channel, ResolvePolicy, Sender, TargetKind, CORE_BINDING,
+    build_message_request, call, call_extension, device_of, discover, http_client, now_rfc3339,
+    open_channel, parse_capabilities, payload_of, policy_for, post_message, rejection, run_listen,
+    uuid_v4, view_for, websocket_connect, AnpMeta, AnpResponse, AnpTarget, CallRequest, Channel,
+    ConnectFn, ListenArgs, ListenDeps, ResolvePolicy, Sender, TargetKind, CORE_BINDING,
     DIRECT_PROFILE, DIRECT_SEND, DID_SUPERSEDED, GET_CAPABILITIES, INBOX_GET, INBOX_MARK_READ,
     MESSAGE_GET_BATCH, TRANSPORT_PROTECTED,
 };
@@ -190,6 +192,38 @@ enum MsgCommand {
         #[command(flatten)]
         own: OwnIdentity,
     },
+    /// Stay connected and print messages as they arrive (realtime.md).
+    ///
+    /// This is the only long-running command. The stream address is derived from the
+    /// identity's own message service by replacing its last path segment with `stream`
+    /// (`/anp-im/rpc` → `/anp-im/stream`), so a service that mounts its stream elsewhere
+    /// cannot be reached by this command.
+    ///
+    /// Nothing is stored locally: the delivery cursor lives on the service, per
+    /// `(identity, device)`, and a reconnect resumes from it. Ctrl-C exits 0.
+    Listen {
+        /// Which device this stream is. Defaults to the local `agent/profile`, so the same
+        /// machine under a different profile is a different device with its own cursor.
+        #[arg(long, value_name = "DEVICE_ID")]
+        device: Option<String>,
+        /// Start the backfill from this sequence instead of the stored cursor. A debugging
+        /// override for this run only; it is not written back.
+        #[arg(long, value_name = "SEQ")]
+        since: Option<u64>,
+        /// Confirm each message as it is printed: `inbox.mark_read` (read state) and
+        /// `stream.ack` (this device's cursor). Off by default — an unconfirmed message is
+        /// replayed on reconnect, an over-confirmed one is gone.
+        #[arg(long)]
+        ack: bool,
+        /// Backfill, print, and exit 0 — the read-only one-shot for scripts.
+        #[arg(long)]
+        once: bool,
+        /// Force NDJSON even on a terminal. Without it, a pipe is a machine too.
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        own: OwnIdentity,
+    },
 }
 
 /// How many unread ids `msg read --all` asks for at a time.
@@ -260,6 +294,27 @@ async fn main() -> anyhow::Result<()> {
                 json,
                 own,
             } => cmd_msg_read(&own, message_ids, all, json, &allow_private).await,
+            MsgCommand::Listen {
+                device,
+                since,
+                ack,
+                once,
+                json,
+                own,
+            } => {
+                cmd_msg_listen(
+                    &own,
+                    ListenOptions {
+                        device,
+                        since,
+                        ack,
+                        once,
+                        json,
+                    },
+                    &allow_private,
+                )
+                .await
+            }
         },
     }
 }
@@ -754,6 +809,89 @@ async fn unread_ids(client: &reqwest::Client, channel: &Channel) -> anyhow::Resu
         }
         skip += rows.len() as u64;
     }
+}
+
+// ---- msg listen -----------------------------------------------------------------
+
+/// `--since` is parsed by clap into a `u64`, so a value that is not a sequence number never
+/// gets past the argument parser — before an identity is opened or a document is fetched.
+struct ListenOptions {
+    device: Option<String>,
+    since: Option<u64>,
+    ack: bool,
+    once: bool,
+    json: bool,
+}
+
+async fn cmd_msg_listen(
+    own: &OwnIdentity,
+    options: ListenOptions,
+    allow_private: &[String],
+) -> anyhow::Result<()> {
+    // The identity is opened and its own service resolved before anything long-running
+    // starts, so a missing identity or an unreachable DID document fails like any other
+    // command rather than as a stream that never connects.
+    let (_client, channel) = own_channel(own, allow_private).await?;
+    let device = device_of(&channel.sender, options.device.as_deref())?;
+
+    let deps = ListenDeps {
+        connect: websocket_connect_fn(),
+        view: view_for(options.json),
+        abort: interrupt_signal(),
+        // `rand::random::<f64>()` is `[0, 1)`, which is the range the jitter expects.
+        random: Arc::new(rand::random::<f64>),
+    };
+    run_listen(
+        &channel,
+        ListenArgs {
+            device,
+            since: options.since,
+            ack: options.ack,
+            once: options.once,
+        },
+        deps,
+    )
+    .await?;
+    Ok(())
+}
+
+/// The real connect: `websocket_connect` takes `&str`, while a [`ConnectFn`] owns its `url`.
+fn websocket_connect_fn() -> ConnectFn {
+    Arc::new(|url: String| Box::pin(async move { websocket_connect(&url).await }))
+}
+
+/// An interrupt that the stream's waits observe (realtime.md §7.2).
+///
+/// SIGINT and SIGTERM both mean "stop", and both exit 0: the messages already printed are not
+/// unprinted, and a Ctrl-C is how a person ends a listener. The watch channel is what makes
+/// the exit immediate — the state machine's waits select on it, so a backoff sleep does not
+/// delay the exit by up to 30 seconds.
+fn interrupt_signal() -> tokio::sync::watch::Receiver<bool> {
+    let (fire, observe) = tokio::sync::watch::channel(false);
+    tokio::spawn(async move {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            match signal(SignalKind::terminate()) {
+                Ok(mut terminate) => {
+                    tokio::select! {
+                        _ = tokio::signal::ctrl_c() => {}
+                        _ = terminate.recv() => {}
+                    }
+                }
+                // Without SIGTERM, Ctrl-C is still handled rather than both being lost.
+                Err(_) => {
+                    let _ = tokio::signal::ctrl_c().await;
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+        let _ = fire.send(true);
+    });
+    observe
 }
 
 // ---- reading what came back ----------------------------------------------------

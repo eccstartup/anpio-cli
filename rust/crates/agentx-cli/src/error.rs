@@ -11,8 +11,7 @@ use serde_json::Value;
 pub type Result<T> = std::result::Result<T, AgentxError>;
 
 #[derive(Debug, thiserror::Error)]
-pub enum AgentxError {
-    /// The exchange completed but what came back is not something we can read as a
+pub enum AgentxError {    /// The exchange completed but what came back is not something we can read as a
     /// JSON-RPC response (P1 §5.6). Also used for a malformed request we are about to send.
     #[error("message_invalid: {0}")]
     MessageInvalid(String),
@@ -48,6 +47,26 @@ pub enum AgentxError {
 
     #[error("http: {0}")]
     Http(#[from] reqwest::Error),
+}
+
+impl AgentxError {
+    /// The stable code, the same spelling the TS client's `ConnectxError.code` uses. It is
+    /// what a machine consumer branches on when the message is prose — `msg listen`'s NDJSON
+    /// `state: error` line carries it (realtime.md §7.1) — so it deliberately does not follow
+    /// the message's wording.
+    pub fn code(&self) -> &'static str {
+        match self {
+            AgentxError::MessageInvalid(_) => "message_invalid",
+            AgentxError::MessageSendFailed(_) => "message_send_failed",
+            AgentxError::ResponseTooLarge(_) => "response_too_large",
+            AgentxError::DidInvalid(_) => "invalid_did",
+            AgentxError::DidResolveBlocked(_) => "did_resolve_blocked",
+            AgentxError::MessageServiceNotFound(_) => "message_service_not_found",
+            AgentxError::Io(_) => "io",
+            AgentxError::Json(_) => "json",
+            AgentxError::Http(_) => "http",
+        }
+    }
 }
 
 /// A JSON-RPC error object (P1 §10.2). Not an `AgentxError`: this is a peer's *answer*.
