@@ -18,8 +18,9 @@ pub mod rpc;
 pub mod stream;
 
 pub use channel::{
-    call, call_extension, discover, extension_rejection, is_error, now_rfc3339, open_channel,
-    payload_of, policy_for, rejection, relaxed_hosts, sign_request, uuid_v4, CallRequest, Channel,
+    call, call_extension, call_group, discover, extension_rejection, is_error, now_rfc3339,
+    open_channel,
+    open_channel_for, payload_of, policy_for, rejection, relaxed_hosts, sign_request, uuid_v4, CallRequest, Channel,
     Endpoint, Payload, Sender, CORE_BINDING, DID_SUPERSEDED, DIRECT_PROFILE, DIRECT_SEND,
     EXTENSION_PROFILE, GET_CAPABILITIES, GROUP_CREATE, GROUP_GET_INFO, GROUP_JOIN, GROUP_LEAVE,
     GROUP_PROFILE, GROUP_SEND, INBOX_GET, INBOX_MARK_READ, MESSAGE_GET_BATCH, METHOD_NOT_FOUND,

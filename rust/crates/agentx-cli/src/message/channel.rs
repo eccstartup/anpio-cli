@@ -210,7 +210,23 @@ pub async fn open_channel(
     allow_private_hosts: &[String],
 ) -> Result<Channel> {
     let sender = Sender::from_identity(identity)?;
-    let endpoint = discover(client, &sender.did, allow_private_hosts).await?;
+    let did = sender.did.clone();
+    open_channel_for(client, sender, &did, allow_private_hosts).await
+}
+
+/// The same resolution against a DID that is *not* the signer's own.
+///
+/// The `group` family needs this: every method but `create` is addressed to the **group's**
+/// `group_did`, whose document is what names the service to POST to (P4 §8.2.2). The two DIDs
+/// are meant to differ, so the signer is an argument rather than something read off the target
+/// — passing the target's DID here as the signer would sign as the group.
+pub async fn open_channel_for(
+    client: &reqwest::Client,
+    sender: Sender,
+    target_did: &str,
+    allow_private_hosts: &[String],
+) -> Result<Channel> {
+    let endpoint = discover(client, target_did, allow_private_hosts).await?;
     Ok(Channel { sender, endpoint })
 }
 
@@ -366,6 +382,54 @@ pub async fn call_extension(
         AnpResponse::Error { error, .. } => Err(extension_rejection(
             method,
             &channel.sender.did,
+            error.code,
+            error.data.as_ref().and_then(|data| data.anp_code.as_deref()),
+            &error.message,
+        )),
+    }
+}
+
+/// A state-changing group call of P4 `anp.group.base.v2`. [`call_extension`] is fixed to the
+/// caller's own DID because a read is addressed to the reader's own inbox; a group call is
+/// addressed to something else — and `group.create` addresses a *service* rather than a group
+/// (P4 §8.1.2) — so the target has to be a parameter. It is inside the Signed Request Object,
+/// which is why it is a parameter rather than a routing hint.
+///
+/// `subject` is the party a refusal is attributed to on the error line. It follows the TS
+/// client: a group method is answered by the group (`did:…:group:…` rejected `group.info`),
+/// while `group.create` is answered by the service, against the caller whose request it is.
+///
+/// `group.send` does not come through here: it carries a message, and therefore
+/// `message_id` and `content_type` as well (P4 §7.6).
+pub async fn call_group(
+    client: &reqwest::Client,
+    channel: &Channel,
+    method: &str,
+    target: AnpTarget,
+    body: Map<String, Value>,
+    subject: &str,
+) -> Result<Value> {
+    let response = call(
+        client,
+        &channel.sender,
+        &channel.endpoint,
+        CallRequest {
+            method: method.to_string(),
+            profile: GROUP_PROFILE.to_string(),
+            target,
+            body,
+            message_id: None,
+            content_type: None,
+            operation_id: None,
+        },
+    )
+    .await?;
+
+    match response {
+        AnpResponse::Success { result, .. } => Ok(result),
+        AnpResponse::Error { error, .. } => Err(rejection(
+            method,
+            subject,
             error.code,
             error.data.as_ref().and_then(|data| data.anp_code.as_deref()),
             &error.message,

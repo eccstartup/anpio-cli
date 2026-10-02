@@ -10,6 +10,7 @@
 //! That is what `message` is.
 
 pub mod error;
+pub mod group;
 pub mod identity;
 pub mod message;
 

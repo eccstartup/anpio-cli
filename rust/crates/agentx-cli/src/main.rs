@@ -10,17 +10,19 @@ use reqwest::Url;
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
 
+use agentx::group::{group_target, policy_of, service_target};
 use agentx::identity::{
     create_identity, fetch_host_service, register_identity, CreateIdentityInput, Identity,
     IdentityLocation,
 };
 use agentx::message::{
-    build_message_request, call, call_extension, device_of, discover, http_client, now_rfc3339,
-    open_channel, parse_capabilities, payload_of, policy_for, post_message, rejection, run_listen,
-    uuid_v4, view_for, websocket_connect, AnpMeta, AnpResponse, AnpTarget, CallRequest, Channel,
-    ConnectFn, ListenArgs, ListenDeps, ResolvePolicy, Sender, TargetKind, CORE_BINDING,
-    DIRECT_PROFILE, DIRECT_SEND, DID_SUPERSEDED, GET_CAPABILITIES, INBOX_GET, INBOX_MARK_READ,
-    MESSAGE_GET_BATCH, TRANSPORT_PROTECTED,
+    build_message_request, call, call_extension, call_group, device_of, discover, http_client,
+    now_rfc3339, open_channel, open_channel_for, parse_capabilities, payload_of, policy_for,
+    post_message, rejection, run_listen, uuid_v4, view_for, websocket_connect, AnpMeta, AnpResponse,
+    AnpTarget, CallRequest, Channel, ConnectFn, ListenArgs, ListenDeps, ResolvePolicy, Sender,
+    TargetKind, CORE_BINDING, DIRECT_PROFILE, DIRECT_SEND, DID_SUPERSEDED, GET_CAPABILITIES,
+    GROUP_CREATE, GROUP_GET_INFO, GROUP_JOIN, GROUP_LEAVE, GROUP_PROFILE, GROUP_SEND, INBOX_GET,
+    INBOX_MARK_READ, MESSAGE_GET_BATCH, TRANSPORT_PROTECTED,
 };
 
 #[derive(Parser)]
@@ -64,6 +66,16 @@ enum Command {
     Msg {
         #[command(subcommand)]
         command: MsgCommand,
+    },
+    /// Groups: make one, look at it, and join or leave (P4 `anp.group.base.v2`).
+    ///
+    /// A group is addressed by its `group_did`, which is a DID document like any other: the
+    /// host that answers for it is found by resolving that DID (P2 §9.2), so there is no
+    /// group-specific discovery to configure. The one exception is `create`, which asks a
+    /// service to make a group and therefore names that service.
+    Group {
+        #[command(subcommand)]
+        command: GroupCommand,
     },
 }
 
@@ -226,9 +238,100 @@ enum MsgCommand {
     },
 }
 
+#[derive(Subcommand)]
+enum GroupCommand {
+    /// Make a group on this identity's own message service (P4 `group.create`).
+    ///
+    /// The service is asked to create the group, so the caller must be reachable on it:
+    /// the group's creator is whoever signed the request (P4 §7.3), not a field.
+    Create {
+        /// The group's display name (`group_profile.display_name`, P4 §7.4). Left out
+        /// entirely when absent — a group with no name is better described by an absent
+        /// object than by an empty one.
+        #[arg(long)]
+        name: Option<String>,
+        /// The `group_policy` as JSON, shallow-merged over the recommended structure in
+        /// P4 §7.1 and checked against its closed sets before anything is sent.
+        #[arg(long)]
+        policy: Option<String>,
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        own: OwnIdentity,
+    },
+    /// Show a group's state and policy (P4 `group.get_info`).
+    Info {
+        #[arg(value_name = "GROUP_DID")]
+        group_did: String,
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        own: OwnIdentity,
+    },
+    /// Show a group's member list (P4 `group.get_info`, `include_member_list: true`).
+    ///
+    /// Not a separate method on the wire: P4 §7.5 makes the list an option on `get_info`, so
+    /// this is a spelling of the same call with a longer, more expensive answer.
+    Members {
+        #[arg(value_name = "GROUP_DID")]
+        group_did: String,
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        own: OwnIdentity,
+    },
+    /// Join a group (P4 `group.join`).
+    ///
+    /// The joiner is `meta.sender_did`, so there is no `--member`: the request is signed by
+    /// the identity that joins, and an identity that names someone else would be claiming an
+    /// action it cannot authorise.
+    Join {
+        #[arg(value_name = "GROUP_DID")]
+        group_did: String,
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        own: OwnIdentity,
+    },
+    /// Leave a group (P4 `group.leave`). Same reasoning as `join` about the subject.
+    ///
+    /// The last owner leaving is a decision the group has to answer, not this CLI: whether
+    /// that dissolves the group, hands it on, or is refused is §7.7's business.
+    Leave {
+        #[arg(value_name = "GROUP_DID")]
+        group_did: String,
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        own: OwnIdentity,
+    },
+    /// Send one message to a group (P4 `group.send`).
+    Send {
+        #[arg(value_name = "GROUP_DID")]
+        group_did: String,
+        /// A plain-text body. Sent as `text` under `text/plain` unless --content-type says
+        /// otherwise.
+        #[arg(long)]
+        text: Option<String>,
+        /// A JSON-object body. Sent as `payload` under `application/json` unless
+        /// --content-type says otherwise.
+        #[arg(long)]
+        body: Option<String>,
+        #[arg(long = "content-type", value_name = "MEDIA_TYPE")]
+        content_type: Option<String>,
+        /// Reuse an operation id. A retry MUST keep it unchanged (P4 §5.4), and
+        /// `message_id` follows it (P1 §6.2.6).
+        #[arg(long = "operation-id", value_name = "UUID")]
+        operation_id: Option<String>,
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        own: OwnIdentity,
+    },
+}
+
 /// How many unread ids `msg read --all` asks for at a time.
 const ALL_PAGE: u64 = 100;
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -309,6 +412,57 @@ async fn main() -> anyhow::Result<()> {
                         since,
                         ack,
                         once,
+                        json,
+                    },
+                    &allow_private,
+                )
+                .await
+            }
+        },
+        Command::Group { command } => match command {
+            GroupCommand::Create {
+                name,
+                policy,
+                json,
+                own,
+            } => cmd_group_create(&own, name, policy, json, &allow_private).await,
+            GroupCommand::Info {
+                group_did,
+                json,
+                own,
+            } => cmd_group_info(&own, &group_did, false, json, &allow_private).await,
+            GroupCommand::Members {
+                group_did,
+                json,
+                own,
+            } => cmd_group_info(&own, &group_did, true, json, &allow_private).await,
+            GroupCommand::Join {
+                group_did,
+                json,
+                own,
+            } => cmd_group_membership(&own, &group_did, GROUP_JOIN, json, &allow_private).await,
+            GroupCommand::Leave {
+                group_did,
+                json,
+                own,
+            } => cmd_group_membership(&own, &group_did, GROUP_LEAVE, json, &allow_private).await,
+            GroupCommand::Send {
+                group_did,
+                text,
+                body,
+                content_type,
+                operation_id,
+                json,
+                own,
+            } => {
+                cmd_group_send(
+                    &own,
+                    &group_did,
+                    SendPayload {
+                        text,
+                        body,
+                        content_type,
+                        operation_id,
                         json,
                     },
                     &allow_private,
@@ -894,7 +1048,299 @@ fn interrupt_signal() -> tokio::sync::watch::Receiver<bool> {
     observe
 }
 
+// ---- group ---------------------------------------------------------------------
+
+/// A call addressed to the group itself.
+///
+/// The group's own DID document names the host that answers for it, exactly as an agent's
+/// does (P2 §9.2), so there is no group-specific discovery to write — only the signer differs
+/// from the target, which is why this is not [`own_channel`].
+async fn group_channel(
+    own: &OwnIdentity,
+    group_did: &str,
+    allow_private: &[String],
+) -> anyhow::Result<(reqwest::Client, Channel)> {
+    let location = IdentityLocation::new(&own.agent, &own.profile);
+    let identity = Identity::load(&location)?;
+    let sender = Sender::from_identity(&identity)?;
+    let client = http_client()?;
+    let channel = open_channel_for(&client, sender, group_did, allow_private).await?;
+    Ok((client, channel))
+}
+
+async fn cmd_group_create(
+    own: &OwnIdentity,
+    name: Option<String>,
+    policy: Option<String>,
+    json: bool,
+    allow_private: &[String],
+) -> anyhow::Result<()> {
+    // Checked before an identity is opened or a document fetched: a policy the service would
+    // refuse should cost nothing to hear about, and this is the one group argument that has
+    // rules of its own.
+    let policy = policy_of(policy.as_deref())?;
+    let (client, channel) = own_channel(own, allow_private).await?;
+    // The target is the service, not a group: there is no group DID until this call answers.
+    let target = service_target(&channel.endpoint.target)?;
+
+    let mut body = Map::new();
+    body.insert("group_policy".to_string(), policy);
+    if let Some(name) = name.filter(|name| !name.is_empty()) {
+        body.insert("group_profile".to_string(), json!({ "display_name": name }));
+    }
+
+    let result = call_group(
+        &client,
+        &channel,
+        GROUP_CREATE,
+        target,
+        body,
+        // The service is the one answering, and the caller is who it answers about.
+        &channel.sender.did,
+    )
+    .await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+    report_group_created(&result)
+}
+
+/// `group members` IS `group.get_info` with a projection (§8.2.2), so one function serves
+/// both: asking for the roster is not a different operation, and a second call path would be
+/// a second place to get the visibility rules wrong.
+async fn cmd_group_info(
+    own: &OwnIdentity,
+    group_did: &str,
+    members: bool,
+    json: bool,
+    allow_private: &[String],
+) -> anyhow::Result<()> {
+    let (client, channel) = group_channel(own, group_did, allow_private).await?;
+
+    let mut body = Map::new();
+    if members {
+        body.insert("include_member_list".to_string(), json!(true));
+    }
+    let result = call_group(
+        &client,
+        &channel,
+        GROUP_GET_INFO,
+        group_target(group_did),
+        body,
+        group_did,
+    )
+    .await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+    if members {
+        report_roster(&result)?;
+    } else {
+        report_group_info(&result);
+    }
+    Ok(())
+}
+
+/// `join` and `leave` differ only in the method and in which field names the subject of the
+/// change (§8.3.3 / §8.6.4), so they share a body: the subject is `meta.sender_did` by
+/// construction in both (§8.3.2 / §8.6.2) — the body MUST NOT name a member, so there is
+/// nothing to pass — and the rest is the same call.
+async fn cmd_group_membership(
+    own: &OwnIdentity,
+    group_did: &str,
+    method: &str,
+    json: bool,
+    allow_private: &[String],
+) -> anyhow::Result<()> {
+    let (client, channel) = group_channel(own, group_did, allow_private).await?;
+    let result = call_group(
+        &client,
+        &channel,
+        method,
+        group_target(group_did),
+        Map::new(),
+        group_did,
+    )
+    .await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+    report_membership(&result, if method == GROUP_JOIN { "member" } else { "leaver" })
+}
+
+async fn cmd_group_send(
+    own: &OwnIdentity,
+    group_did: &str,
+    payload: SendPayload,
+    allow_private: &[String],
+) -> anyhow::Result<()> {
+    let json = payload.json;
+    let requested_operation_id = payload.operation_id;
+    let payload = payload_of(
+        payload.text.as_deref(),
+        payload.body.as_deref(),
+        payload.content_type.as_deref(),
+    )?;
+    let (client, channel) = group_channel(own, group_did, allow_private).await?;
+
+    // P1 §6.2.6: one flag pins `operation_id` and `message_id` together, so a retry keeps
+    // the pair unchanged (P4 §5.4).
+    let operation_id = requested_operation_id.unwrap_or_else(uuid_v4);
+    let content_type = payload.content_type;
+
+    let response = call(
+        &client,
+        &channel.sender,
+        &channel.endpoint,
+        CallRequest {
+            method: GROUP_SEND.to_string(),
+            profile: GROUP_PROFILE.to_string(),
+            target: group_target(group_did),
+            body: payload.body,
+            message_id: Some(operation_id.clone()),
+            content_type: Some(content_type),
+            operation_id: Some(operation_id),
+        },
+    )
+    .await?;
+
+    match response {
+        AnpResponse::Success { result, .. } => report_group_sent(&result, json),
+        // No `anp.did_superseded` retry here, unlike `msg send` (cli.md §3.4): DID continuity
+        // inside a group is member-level and host-driven — P4 §8.12 says
+        // `group.member_did_update` is not even a JSON-RPC method — and P4 defines no client
+        // path for a group DID itself, so there is nothing to verify and retry.
+        AnpResponse::Error { error, .. } => Err(rejection(
+            GROUP_SEND,
+            group_did,
+            error.code,
+            error.data.as_ref().and_then(|data| data.anp_code.as_deref()),
+            &error.message,
+        )
+        .into()),
+    }
+}
+
+/// §8.1.3: `group_did` at minimum, and the pair a caller has to keep for the next call — the
+/// group it just made, and where that group's state stands.
+fn report_group_created(result: &Value) -> anyhow::Result<()> {
+    let group_did = text_of(result.get("group_did"));
+    let Some(group_did) = group_did else {
+        anyhow::bail!("group.create answered without a group_did (P4 §8.1.3)")
+    };
+    field("group:", Some(&Value::String(group_did.to_string())));
+    field("state version:", result.get("group_state_version"));
+    field("created at:", result.get("created_at"));
+    field("creator:", result.get("creator_did"));
+    if let Some(profile) = result.get("group_profile").and_then(as_row) {
+        field("name:", profile.get("display_name"));
+    }
+    Ok(())
+}
+
+/// §8.2.3. `member_count` is a decimal string there and is printed as it arrived rather than
+/// parsed — it is the peer's number, and rounding it would be this CLI inventing a fact.
+fn report_group_info(result: &Value) {
+    field("group:", result.get("group_did"));
+    field("state version:", result.get("group_state_version"));
+    if let Some(profile) = result.get("group_profile").and_then(as_row) {
+        field("name:", profile.get("display_name"));
+        field("description:", profile.get("description"));
+        field("discoverability:", profile.get("discoverability"));
+    }
+    field("members:", result.get("member_count"));
+    match result.get("group_policy").and_then(as_row) {
+        Some(policy) => {
+            field("admission:", policy.get("admission_mode"));
+            if let Some(permissions) = policy.get("permissions").and_then(as_row) {
+                let rendered = permissions
+                    .iter()
+                    .map(|(key, value)| format!("{key}={}", value.as_str().unwrap_or(&value.to_string())))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                field("permissions:", Some(&Value::String(rendered)));
+            }
+        }
+        // §8.2.3: the policy comes back only when the caller asked AND is entitled to see it,
+        // so its absence is the service's answer and not a missing field.
+        None => field(
+            "policy:",
+            Some(&Value::String(
+                "(not returned; the service decides what this caller may see)".to_string(),
+            )),
+        ),
+    }
+}
+
+/// §7.2: `agent_did` / `role` / `status` are the minimum; `joined_at` and `added_by` are
+/// optional and printed when present.
+fn report_roster(result: &Value) -> anyhow::Result<()> {
+    let rows = rows_of(result, "member_list");
+    if rows.is_empty() {
+        println!("no members listed (the service returns a roster only to callers entitled to it)");
+        return Ok(());
+    }
+    println!("{} member{}", rows.len(), if rows.len() == 1 { "" } else { "s" });
+    for row in rows {
+        let role = text_of(row.get("role")).unwrap_or("member");
+        let status = text_of(row.get("status")).unwrap_or("unknown");
+        let agent = text_of(row.get("agent_did")).unwrap_or("(unnamed)");
+        let joined = match text_of(row.get("joined_at")) {
+            Some(joined) => format!("  joined {joined}"),
+            None => String::new(),
+        };
+        println!("  {status:<8} {role:<6} {agent}{joined}");
+    }
+    Ok(())
+}
+
+/// §8.3.3 / §8.6.4: the two answers differ in which field names the subject of the change,
+/// and reporting the wrong one would be reporting someone else.
+fn report_membership(result: &Value, subject: &str) -> anyhow::Result<()> {
+    field("group:", result.get("group_did"));
+    let named = if subject == "member" {
+        result.get("member_did")
+    } else {
+        result.get("leaver_did")
+    };
+    field(&format!("{subject}:"), named);
+    field("status:", result.get("membership_status"));
+    field("state version:", result.get("group_state_version"));
+    Ok(())
+}
+
+/// §8.9.4: `accepted` MUST be `true` — checked before the JSON is printed, because `--json`
+/// is not a reason to report a send that the group declined — and the event position is what
+/// lines this message up with what the other members saw.
+fn report_group_sent(result: &Value, json: bool) -> anyhow::Result<()> {
+    if result.get("accepted").and_then(Value::as_bool) != Some(true) {
+        anyhow::bail!("group.send answered without accepted:true (P4 §8.9.4)")
+    }
+    if json {
+        println!("{}", serde_json::to_string_pretty(result)?);
+        return Ok(());
+    }
+    field("group:", result.get("group_did"));
+    field("message id:", result.get("message_id"));
+    field("event seq:", result.get("group_event_seq"));
+    field("state version:", result.get("group_state_version"));
+    field("accepted at:", result.get("accepted_at"));
+    Ok(())
+}
+
 // ---- reading what came back ----------------------------------------------------
+
+/// A peer's string field. An empty string is treated as absent, for the same reason the TS
+/// client's `textOf` does: a service that sends `""` for an unset name is saying it has no
+/// name, and printing a blank after a label says nothing at all.
+fn text_of(value: Option<&Value>) -> Option<&str> {
+    value.and_then(Value::as_str).filter(|text| !text.is_empty())
+}
 
 fn field(label: &str, value: Option<&Value>) {
     let Some(value) = value else { return };
