@@ -9,7 +9,8 @@
 //! Method names and Profiles are in [`crate::message`] with the rest of the wire vocabulary;
 //! what is here is the policy that goes in the bodies.
 
-use anp::group_e2ee::v2_models::V2GroupKeyPackage;
+use anp::group_e2ee::v2_models::{V2GroupCreateBody, V2GroupKeyPackage};
+use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::error::{AgentxError, Result};
@@ -26,10 +27,39 @@ pub fn publish_body(key_package: &V2GroupKeyPackage) -> Result<Map<String, Value
     let mut body = Map::new();
     body.insert(
         "group_key_package".to_string(),
-        serde_json::to_value(key_package)
-            .map_err(|err| AgentxError::MessageInvalid(format!("serialising a KeyPackage: {err}")))?,
+        value_of(key_package, "a KeyPackage")?,
     );
     Ok(body)
+}
+
+/// The body of `group.e2ee.create` (P6 §9.2.3) — the crate's own six fields, unchanged.
+///
+/// There is nothing for this module to decide: §9.2.3 names `group_did`, `group_state_ref`,
+/// `suite`, `creator_key_package`, `crypto_group_id_b64u` and `epoch`, and the crate builds
+/// all six (the last two are its own MLS values, and `epoch` is the `"0"` §9.2.3 SHOULD).
+/// Re-serialising the crate's struct rather than assembling a `Map` field by field is what
+/// keeps this in step with `validate()` — the two are the same struct, so a field that moves
+/// moves in both, where a hand-written body would drift silently.
+pub fn create_body(body: &V2GroupCreateBody) -> Result<Map<String, Value>> {
+    object_of(body, "a group.e2ee.create body")
+}
+
+/// A crate model as a request body: the object form, or an error naming what could not be
+/// serialised. Serialising is the only way these cross from the crate's typed world into
+/// [`crate::message`]'s `Map<String, Value>` one, and every failure of it is the same kind —
+/// a model that cannot be written as JSON cannot be signed either.
+fn object_of<T: Serialize>(value: &T, what: &str) -> Result<Map<String, Value>> {
+    match value_of(value, what)? {
+        Value::Object(fields) => Ok(fields),
+        other => Err(AgentxError::MessageInvalid(format!(
+            "serialising {what}: expected an object, got {other}"
+        ))),
+    }
+}
+
+fn value_of<T: Serialize>(value: &T, what: &str) -> Result<Value> {
+    serde_json::to_value(value)
+        .map_err(|err| AgentxError::MessageInvalid(format!("serialising {what}: {err}")))
 }
 
 /// The body of `group.e2ee.get_key_package` (P6 §8.2.2).
@@ -74,20 +104,16 @@ pub fn get_key_package_body(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anp::group_e2ee::v2_models::{V2DidWbaBinding, V2ObjectProof};
+    use anp::group_e2ee::v2_models::{
+        V2DidWbaBinding, V2GroupStateRef, V2ObjectProof, GROUP_E2EE_MTI_SUITE_V2,
+    };
 
-    /// The one field §8.1.2 names, carrying the object unchanged.
-    ///
-    /// The package is built field by field rather than parsed from a JSON literal: the crate's
-    /// models are what the service has to accept, so if one of their fields moves this stops
-    /// compiling instead of quietly testing a shape nobody uses.
-    #[test]
-    fn a_publish_body_carries_the_object_under_the_field_the_service_reads() {
-        let package = V2GroupKeyPackage {
+    fn package() -> V2GroupKeyPackage {
+        V2GroupKeyPackage {
             key_package_id: "kp-1".to_string(),
             owner_did: "did:wba:example.com:user:test:e1_abc".to_string(),
             owner_device_id: "test/default".to_string(),
-            suite: "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519".to_string(),
+            suite: GROUP_E2EE_MTI_SUITE_V2.to_string(),
             mls_key_package_b64u: "AA".to_string(),
             did_wba_binding: V2DidWbaBinding {
                 agent_did: "did:wba:example.com:user:test:e1_abc".to_string(),
@@ -108,7 +134,17 @@ mod tests {
                 },
             },
             expires_at: Some("2026-10-09T00:00:00Z".to_string()),
-        };
+        }
+    }
+
+    /// The one field §8.1.2 names, carrying the object unchanged.
+    ///
+    /// The package is built field by field rather than parsed from a JSON literal: the crate's
+    /// models are what the service has to accept, so if one of their fields moves this stops
+    /// compiling instead of quietly testing a shape nobody uses.
+    #[test]
+    fn a_publish_body_carries_the_object_under_the_field_the_service_reads() {
+        let package = package();
 
         let body = publish_body(&package).unwrap();
         assert_eq!(body.len(), 1, "§8.1.2 names one field and nothing else");
@@ -120,6 +156,53 @@ mod tests {
             body["group_key_package"]["did_wba_binding"]["device_id"],
             Value::String("test/default".to_string()),
             "the binding travels with the object, proof and all (§8.2.3)"
+        );
+    }
+
+    /// §9.2.3's six fields, exactly as the crate built them.
+    ///
+    /// The point of the test is that nothing is added and nothing is dropped: the service
+    /// refuses an unknown shape, and the two fields this client never chooses
+    /// (`crypto_group_id_b64u`, `epoch`) are here because the crate put them there.
+    #[test]
+    fn a_create_body_is_the_crates_six_fields_unchanged() {
+        let body = create_body(&V2GroupCreateBody {
+            group_did: "did:web:svc.example:g:team".to_string(),
+            group_state_ref: V2GroupStateRef {
+                group_did: "did:web:svc.example:g:team".to_string(),
+                group_state_version: "7".to_string(),
+                policy_hash: None,
+                roster_hash: None,
+            },
+            suite: GROUP_E2EE_MTI_SUITE_V2.to_string(),
+            creator_key_package: package(),
+            crypto_group_id_b64u: "Z3JvdXA".to_string(),
+            epoch: "0".to_string(),
+        })
+        .unwrap();
+
+        let mut keys: Vec<&str> = body.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "creator_key_package",
+                "crypto_group_id_b64u",
+                "epoch",
+                "group_did",
+                "group_state_ref",
+                "suite",
+            ]
+        );
+        assert_eq!(
+            body["group_state_ref"]["group_state_version"],
+            Value::String("7".to_string()),
+            "the P4 version travels in the ref, which is where §7.2 puts it"
+        );
+        assert_eq!(
+            body["epoch"],
+            Value::String("0".to_string()),
+            "§9.2.3's SHOULD for the initial epoch is the crate's value, not this client's"
         );
     }
 

@@ -320,6 +320,26 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
   **`publish` 的请求体只有一个字段**（§8.1.2），且是**整份对象原样**（`did_wba_binding`
   连同它的 proof）——§8.2.3 把同一个对象交给后来跑 `add` 的人，任何在这条路上做的规范化
   都会改掉下游每个验签方的输入。
+- **`group e2ee create` 已落并对真服务跑通（2026-10-02）**，四条控制方法里的第一条（§9.2）。
+  三处值得记：
+  （a）**它是 service-scoped，但通道是用群的文档解析出来的**。§4.4.1 L292–293 让
+  `meta.target` 仍是**服务的** `serviceDid`（文档 §3 明说不要"顺手纠正"成 group-addressed），
+  可"服务是哪一个"只有**群的文档**说得清（`group_did = serviceDid + ":g:" + <id>`，
+  groups.md §2）——所以 `open_channel_for(group_did)` 取端点、`service_target()` 取 target，
+  而服务那边 `requireServiceTarget` 会核对 `meta.target.did` 就是它自己的 `serviceDid`。
+  （b）**三阶段正好在 `create` 上第一次露出来**（§13.6）：prepare 写本地 → 发送 → 服务说了算。
+  命令面在这一步**没有**走 `call_device`，而是直接匹配 `AnpResponse`，因为第三阶段该做哪个
+  取决于**为什么**失败：服务**拒绝**＝它没收，本地 commit 就 `abort_commit` 回滚；**传输失败**
+  则什么都不断言——请求可能已经被收下、只是回包丢了，那时回滚会让本机对一个服务认为存在的群
+  一无所知，这一档是 crate `reconcile_pending_v2` 的事，不是这里猜的。已用两个反例核过：
+  把本地 `mls/` 删掉再造同一个群，服务回 `crypto_group_mismatch`，本地 pending 转 `aborted`、
+  binding 行与 OpenMLS group 都被清掉。
+  （c）**"已经有 MLS 状态了"这件事本地先拦**。同一个群再跑一次 `create`，根本到不了网络：
+  crate 的 prepare 就回 `group.e2ee.state_not_ready: a local MLS group binding already exists`。
+  服务那两条 `cryptoGroupMismatch` / `epochConflict`（§13.5 第 5 项）因此在**本地 store 不记得**
+  时才可达——换设备、或本地状态被清过，正是它们存在的理由。
+  另外 `group_state_ref.group_state_version` 取自 P4 `group.get_info` 的当前值：§9.2.3 只校验它
+  是十进制字符串，而 §14.1 L1707 规定 `create` **MUST NOT** 推进它，所以这个数只能读、不能算。
 - **端到端怎么跑通的**（一次性脚手架，跑完即删，没有留进套件）：三条身份都挂在 awiki 上、
   文档里的 `serviceEndpoint` 也指着 awiki，而 awiki 没有 P6——所以 `group e2ee` 的
   **真阳性**必须打本仓的 `packages/service`。做法：(a) 起一台只发一份文档的玩具 DID 主机
@@ -330,7 +350,10 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
   `AGENTX_DID_DEV_HOSTS=127.0.0.1`。跑出来的：`publish` 回 `published: true` 且库里
   `group_key_packages` 真有那一行；`get-key-package` **逐枚取走**（第二句拿到的是下一枚，
   取空后回 `anp.group.e2ee.key_package_not_found`）——§8.2.4 L767 那条"发出即占住"的 MAY
-  本服务是实现了的。**顺带核到一条规范没写死的语义**：同一个 `key_package_id` 再生成一次
+  本服务是实现了的；`group create` 建群后 `e2ee create` 回 `created: true`，服务 `group_leaves`
+  多出一行 owner leaf（`state = active`、`epoch = 0`），本地 `group_mls_bindings` 是
+  `role = creator` / `status = active`、`group_mls_pending_commits` 那条转成 `finalized`。
+  **顺带核到一条规范没写死的语义**：同一个 `key_package_id` 再生成一次
   被本地 store 拒（`group.e2ee.key_package_consumed`），所以 `--key-package-id` 是**命名**，
   不是"重试取回原包"——publish 重试要么换 id、要么走 `get_key_package` 读回。
 - **第四个坑：crate 内部验文档那条路没有 `document_is_bound` 的那层回退。** §6 上面记的
@@ -343,7 +366,7 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
   `document_in_crate_form`（要的是"递给 crate 的那份"），`mls.rs` 用后者。**只换编码，
   不重写验签器**，与解析侧同一条底线。这也解释了为什么 §8-J 生成侧与解析侧会互为镜像：
   同一个 crate 的签与验在 base58 这条分支上就不自洽。
-- **未做**：`group e2ee` 的四个群作用域方法（`create` / `add` / `remove` / `send`）与收包路径
+- **未做**：`group e2ee` 剩下的三条群作用域方法（`add` / `remove` / `send`）与收包路径
   （`process_welcome_v2` / `process_commit_v2`，靠 `msg listen` 投递驱动）；身份这块还剩
   "换钥/换设备/`update_document`"。
 - 先落 **`msg`** 一族（含 `msg listen` 常驻契约），因为它是 §4 消息库的入口。
@@ -375,8 +398,8 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 **本轮不再有挂起的裁定。** 身份存储 + DID 文档发布（含挂 awiki host）已跑通（§6 Phase 1）；
 `msg` 一族的五个命令也跑通了（`send` / `caps` / `inbox` / `show` / `read`，见 §6）。
 Phase 1 到此收口：`msg listen` 与 `group` 一族都已落地（见 §6）。Phase 3 已开工：
-`group e2ee` 的两个服务作用域方法（`publish` / `get-key-package`）已落并对真服务跑通
-（见 §6），接着是它的四个群作用域方法与收包路径，然后是剩下的身份工作
+`group e2ee` 的三条服务作用域方法（`publish` / `get-key-package` / `create`）已落并对真服务跑通
+（见 §6），接着是剩下的三条群作用域方法与收包路径，然后是剩下的身份工作
 （换钥 / 换设备 / `update_document`）与 `did` / `anp` / `agent` 三族。
 
 ---

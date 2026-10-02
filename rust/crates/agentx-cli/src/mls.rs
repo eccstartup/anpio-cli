@@ -16,11 +16,18 @@
 
 use std::path::PathBuf;
 
-use anp::group_e2ee::operations::v2::{generate_key_package_v2, V2GenerateKeyPackageInput};
+use anp::group_e2ee::operations::v2::{
+    abort_commit_v2, create_group_prepare_v2, finalize_commit_v2, generate_key_package_v2,
+    V2CreateGroupInput, V2FinalizeInput, V2GenerateKeyPackageInput, V2PreparedCreate,
+};
 use anp::group_e2ee::storage::ImCoreSqliteGroupMlsStore;
-use anp::group_e2ee::v2_models::V2GroupKeyPackage;
+use anp::group_e2ee::v2_models::{
+    V2GroupCreateBody, V2GroupKeyPackage, V2GroupStateRef, V2ServiceMetadata, V2Target,
+    GROUP_E2EE_PROFILE_V2, GROUP_E2EE_SECURITY_PROFILE_V2,
+};
 use anp::PrivateKeyMaterial;
 use chrono::{Duration, Utc};
+use serde_json::Value;
 
 use crate::error::{AgentxError, Result};
 use crate::identity::{Identity, IdentityLocation};
@@ -112,12 +119,7 @@ pub fn generate_key_package(
     // the document goes in already in the form that check accepts; the alternative is a
     // document this client just resolved successfully coming back as
     // `Issuer DID document binding validation failed`.
-    let document = document_in_crate_form(&identity.did_document).ok_or_else(|| {
-        AgentxError::MessageInvalid(format!(
-            "{}'s stored DID document is not bound to its own DID",
-            identity.did
-        ))
-    })?;
+    let document = did_document_in_crate_form(identity)?;
     let now = Utc::now();
 
     let input = V2GenerateKeyPackageInput {
@@ -149,6 +151,166 @@ pub fn generate_key_package(
 /// never blocks a newer.
 pub fn new_key_package_id() -> String {
     format!("kp-{}", uuid_v4())
+}
+
+/// A fresh `pending_commit_id` for a control operation (P6 §13.6).
+///
+/// The crate's name for the **local** half of a state-changing P6 call: `create` / `add` /
+/// `remove` are three-phase — prepare (write-ahead, here), send (the service decides), then
+/// finalize or abort. The id is what ties the third phase back to the first, so it exists
+/// before anything is sent and is this client's to mint. `pc-` only distinguishes it by eye
+/// from a `kp-…` package id in the store's rows.
+pub fn new_pending_commit_id() -> String {
+    format!("pc-{}", uuid_v4())
+}
+
+/// Every `create` this client sends is initial: §9.2.1's creator is the caller, and the
+/// epoch §9.2.3 asks for starts at `0`.
+///
+/// The crate owns those two, so what is left for the caller is the group being initialised,
+/// where its P4 state stands, who signs as the creator device, and which service is being
+/// asked. `group_state_version` comes from P4 [`crate::group`]'s `group.get_info`; the
+/// service re-checks only that it is a decimal string (§9.2.3), while §14.1 L1707 is why
+/// `create` MUST NOT advance it — so the value sent is the group's current one, not one
+/// this client computes.
+pub struct CreateInput<'a> {
+    pub group_did: &'a str,
+    pub group_state_version: &'a str,
+    /// The creator's own KeyPackage — §9.2.3 requires `owner_did` / `owner_device_id` to be
+    /// this device, and `create_group_prepare_v2` refuses anything else, so it is minted here
+    /// ([`generate_key_package`]) rather than fetched: §8.2's cabinet is for adding *others*.
+    pub creator_key_package: &'a V2GroupKeyPackage,
+    /// The servicing host's `serviceDid`. §4.4.1 L292–293 keeps `create` service-scoped even
+    /// though the group now exists, so this — not `group_did` — is what goes in `meta.target`.
+    pub service_did: &'a str,
+    pub operation_id: &'a str,
+}
+
+/// A prepared `group.e2ee.create`: the wire body, plus the local handle that finishes it.
+pub struct PreparedCreate {
+    pub pending_commit_id: String,
+    pub body: V2GroupCreateBody,
+}
+
+/// Phase one of `create`: all of the MLS work, nothing on the wire.
+///
+/// The order matters — this writes to the store before the service has heard anything, which
+/// is the point (the client must not be the one to lose a commit the service accepted), and
+/// it is why a failure here costs nothing remote and a failure *after* it has to be answered
+/// by [`finalize_commit`] or [`abort_commit`].
+pub fn prepare_create(
+    location: &IdentityLocation,
+    identity: &Identity,
+    input: CreateInput<'_>,
+) -> Result<PreparedCreate> {
+    let store = store_for(location, identity)?;
+    let document = did_document_in_crate_form(identity)?;
+    let pending_commit_id = new_pending_commit_id();
+    let now = Utc::now().to_rfc3339();
+
+    let prepared: V2PreparedCreate = create_group_prepare_v2(
+        &store,
+        V2CreateGroupInput {
+            meta: V2ServiceMetadata {
+                anp_version: None,
+                profile: GROUP_E2EE_PROFILE_V2.to_string(),
+                // §4.3 L273: `create` is one of the four `group-e2ee` control methods.
+                security_profile: GROUP_E2EE_SECURITY_PROFILE_V2.to_string(),
+                sender_did: identity.did.clone(),
+                sender_device_id: identity.device_id.clone(),
+                target: V2Target {
+                    kind: "service".to_string(),
+                    did: input.service_did.to_string(),
+                },
+                operation_id: input.operation_id.to_string(),
+                created_at: Some(now.clone()),
+            },
+            group_state_ref: V2GroupStateRef {
+                group_did: input.group_did.to_string(),
+                group_state_version: input.group_state_version.to_string(),
+                // §7.2 L499 makes this a condition ("if the policy has been hashed"); this
+                // service does not hash P4 policies, so there is nothing to put here and the
+                // field stays absent rather than carrying an invented digest.
+                policy_hash: None,
+                roster_hash: None,
+            },
+            creator_key_package: input.creator_key_package.clone(),
+            creator_did_document: document,
+            now,
+            // The code gate, as in [`generate_key_package`].
+            draft_extension_negotiated: true,
+            pending_commit_id: pending_commit_id.clone(),
+            request_id: uuid_v4(),
+        },
+    )
+    .map_err(|err| AgentxError::MessageInvalid(format!("preparing group.e2ee.create: {err}")))?;
+
+    Ok(PreparedCreate {
+        pending_commit_id,
+        body: prepared.body,
+    })
+}
+
+/// Phase three, accepted: the service took the commit, so the local pending one becomes the
+/// device's state.
+///
+/// Only ever called after a success response. `finalize_commit_v2` refuses a pending commit
+/// that was aborted, and `abort_commit_v2` refuses one that was finalized — the pair is a
+/// partition, not two spellings of "clean up", which is what makes the choice structural
+/// rather than a comment. What the crate reports back (`epoch`, `crypto_group_id_b64u`) is
+/// deliberately not returned: the service's own response is the record of what it accepted,
+/// and two copies of it would be two things to disagree.
+pub fn finalize_commit(
+    location: &IdentityLocation,
+    identity: &Identity,
+    pending_commit_id: &str,
+) -> Result<()> {
+    let store = store_for(location, identity)?;
+    finalize_commit_v2(
+        &store,
+        V2FinalizeInput {
+            pending_commit_id: pending_commit_id.to_string(),
+            request_id: uuid_v4(),
+        },
+    )
+    .map(|_| ())
+    .map_err(|err| AgentxError::MessageInvalid(format!("finalising a commit: {err}")))
+}
+
+/// Phase three, refused: the service said no, so nothing of this commit survives here.
+///
+/// The caller decides when this is safe. A service *refusal* is the clear case — it never
+/// accepted anything — while a request that failed in transport may well have been accepted,
+/// and rolling back then would leave this device with no state for a group the service
+/// believes it has. The crate keeps `reconcile_pending_v2` for that ambiguity; this function
+/// is not it.
+pub fn abort_commit(
+    location: &IdentityLocation,
+    identity: &Identity,
+    pending_commit_id: &str,
+) -> Result<()> {
+    let store = store_for(location, identity)?;
+    abort_commit_v2(
+        &store,
+        V2FinalizeInput {
+            pending_commit_id: pending_commit_id.to_string(),
+            request_id: uuid_v4(),
+        },
+    )
+    .map(|_| ())
+    .map_err(|err| AgentxError::MessageInvalid(format!("aborting a commit: {err}")))
+}
+
+/// This device's DID document, in the one form the crate's own checks accept — the same
+/// conversion [`generate_key_package`] needs, for the same reason, done once here so both
+/// callers cannot drift apart on it.
+fn did_document_in_crate_form(identity: &Identity) -> Result<Value> {
+    document_in_crate_form(&identity.did_document).ok_or_else(|| {
+        AgentxError::MessageInvalid(format!(
+            "{}'s stored DID document is not bound to its own DID",
+            identity.did
+        ))
+    })
 }
 
 #[cfg(test)]

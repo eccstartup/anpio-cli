@@ -11,22 +11,26 @@ use serde_json::{json, Map, Value};
 use std::sync::Arc;
 
 use agentx::group::{group_target, policy_of, service_target};
-use agentx::group_e2ee::{get_key_package_body, publish_body};
+use agentx::group_e2ee::{create_body, get_key_package_body, publish_body};
 use agentx::identity::{
     create_identity, fetch_host_service, register_identity, CreateIdentityInput, Identity,
     IdentityLocation,
 };
 use agentx::message::{
     build_message_request, call, call_device, call_extension, call_group, device_of, discover,
-    http_client, now_rfc3339, open_channel, open_channel_for, parse_capabilities, payload_of,
-    policy_for, post_message, rejection, run_listen, uuid_v4, view_for, websocket_connect, AnpMeta,
-    AnpResponse, AnpTarget, CallRequest, Channel, ConnectFn, ListenArgs, ListenDeps, ResolvePolicy,
-    Sender, TargetKind, CORE_BINDING, DIRECT_PROFILE, DIRECT_SEND, DID_SUPERSEDED,
-    GET_CAPABILITIES, GET_KEY_PACKAGE, GROUP_CREATE, GROUP_GET_INFO, GROUP_JOIN, GROUP_LEAVE,
-    GROUP_PROFILE, GROUP_SEND, INBOX_GET, INBOX_MARK_READ, MESSAGE_GET_BATCH, PUBLISH_KEY_PACKAGE,
+    group_e2ee_security_profile, http_client, now_rfc3339, open_channel, open_channel_for,
+    parse_capabilities, payload_of, policy_for, post_message, rejection, run_listen, uuid_v4,
+    view_for, websocket_connect, AnpMeta, AnpResponse, AnpTarget, CallRequest, Channel, ConnectFn,
+    ListenArgs, ListenDeps, ResolvePolicy, Sender, TargetKind, CORE_BINDING, DIRECT_PROFILE,
+    DIRECT_SEND, DID_SUPERSEDED, GET_CAPABILITIES, GET_KEY_PACKAGE, GROUP_CREATE,
+    GROUP_E2EE_CREATE, GROUP_E2EE_PROFILE, GROUP_GET_INFO, GROUP_JOIN, GROUP_LEAVE, GROUP_PROFILE,
+    GROUP_SEND, INBOX_GET, INBOX_MARK_READ, MESSAGE_GET_BATCH, PUBLISH_KEY_PACKAGE,
     TRANSPORT_PROTECTED,
 };
-use agentx::mls::{generate_key_package, new_key_package_id};
+use agentx::mls::{
+    abort_commit, finalize_commit, generate_key_package, new_key_package_id, prepare_create,
+    CreateInput, KEY_PACKAGE_VALID_DAYS,
+};
 
 #[derive(Parser)]
 #[command(
@@ -396,6 +400,33 @@ enum GroupE2eeCommand {
         #[command(flatten)]
         own: OwnIdentity,
     },
+    /// Initialise a group's MLS state, with this device as its creator (P6 `group.e2ee.create`).
+    ///
+    /// The group itself is a P4 object — §9.2.1's premise is that `group.create` already made
+    /// it — so this is the second step, not another way to make one. It is also the one P6
+    /// control method addressed to the **service** rather than the group (§4.4.1 L292–293),
+    /// even though the group now exists; `docs/design/e2ee-group.md` §3 says to copy that
+    /// rather than "fix" it.
+    ///
+    /// The device must be the group's owner: the service checks that against the P4 state
+    /// before anything is initialised, so a refusal here is about membership, not encryption.
+    Create {
+        #[arg(value_name = "GROUP_DID")]
+        group_did: String,
+        /// Name this run's creator KeyPackage instead of letting the client mint an id. As
+        /// with `publish`, this is for naming; the local store refuses a second package under
+        /// an id it already holds.
+        #[arg(long = "key-package-id", value_name = "ID")]
+        key_package_id: Option<String>,
+        /// Reuse an operation id. §13.6's fresh-request rule makes a retry reuse it, and the
+        /// local pending commit is filed under the same value.
+        #[arg(long = "operation-id", value_name = "UUID")]
+        operation_id: Option<String>,
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        own: OwnIdentity,
+    },
 }
 
 /// How many unread ids `msg read --all` asks for at a time.
@@ -567,6 +598,23 @@ async fn main() -> anyhow::Result<()> {
                         target_device,
                         suite,
                         require_fresh,
+                        json,
+                        &allow_private,
+                    )
+                    .await
+                }
+                GroupE2eeCommand::Create {
+                    group_did,
+                    key_package_id,
+                    operation_id,
+                    json,
+                    own,
+                } => {
+                    cmd_group_e2ee_create(
+                        &own,
+                        &group_did,
+                        key_package_id,
+                        operation_id,
                         json,
                         &allow_private,
                     )
@@ -1457,6 +1505,139 @@ fn report_key_package_fetched(result: &Value) -> anyhow::Result<()> {
     field("key package:", package.get("key_package_id"));
     field("suite:", package.get("suite"));
     field("expires:", package.get("expires_at"));
+    Ok(())
+}
+
+/// Initialise the group's MLS state, with this device as its creator (§9.2).
+///
+/// Three phases, in the crate's order: prepare (local MLS state and a write-ahead record),
+/// send (the service decides), then finalize or abort. Reading P4's state first is a
+/// precondition rather than a phase — §9.2.3's `group_state_ref` carries the group's current
+/// `group_state_version`, and asking P4 for it is also the plainest way to hear that the
+/// group is not this identity's to initialise.
+///
+/// Nothing here sends a KeyPackage to the cabinet: §9.2.3 wants the *creator's* package in
+/// the body, and §8.2's publish/get pair exists for adding people who are not in the room.
+async fn cmd_group_e2ee_create(
+    own: &OwnIdentity,
+    group_did: &str,
+    key_package_id: Option<String>,
+    operation_id: Option<String>,
+    json: bool,
+    allow_private: &[String],
+) -> anyhow::Result<()> {
+    let location = IdentityLocation::new(&own.agent, &own.profile);
+    let identity = Identity::load(&location)?;
+    let client = http_client()?;
+    let sender = Sender::from_identity(&identity)?;
+    // Resolved against the **group's** DID document, unlike `group.create`: the group exists,
+    // and its document is what names the Host this call has to be addressed to (P2 §9.1).
+    let channel = open_channel_for(&client, sender, group_did, allow_private).await?;
+
+    let info = call_group(
+        &client,
+        &channel,
+        GROUP_GET_INFO,
+        group_target(group_did),
+        Map::new(),
+        group_did,
+    )
+    .await?;
+    let group_state_version = text_of(info.get("group_state_version")).ok_or_else(|| {
+        anyhow::anyhow!("group.get_info answered without a group_state_version (P4 §8.2.3)")
+    })?;
+
+    // §4.4.1 L292–293: the target is the **service**, and it must be the one that named
+    // itself in the group's document — the service refuses a `meta.target.did` that is not
+    // its own `serviceDid`.
+    let target = service_target(&channel.endpoint.target)?;
+    let operation_id = operation_id.unwrap_or_else(uuid_v4);
+    let key_package_id = key_package_id.unwrap_or_else(new_key_package_id);
+    let creator_key_package = generate_key_package(
+        &location,
+        &identity,
+        &key_package_id,
+        chrono::Duration::days(KEY_PACKAGE_VALID_DAYS),
+    )?;
+    let prepared = prepare_create(
+        &location,
+        &identity,
+        CreateInput {
+            group_did,
+            group_state_version,
+            creator_key_package: &creator_key_package,
+            service_did: &target.did,
+            operation_id: &operation_id,
+        },
+    )?;
+
+    let response = call(
+        &client,
+        &channel.sender,
+        &channel.endpoint,
+        CallRequest {
+            method: GROUP_E2EE_CREATE.to_string(),
+            profile: GROUP_E2EE_PROFILE.to_string(),
+            target,
+            body: create_body(&prepared.body)?,
+            sender_device_id: Some(channel.sender.device_id.clone()),
+            security_profile: Some(group_e2ee_security_profile(GROUP_E2EE_CREATE).to_string()),
+            message_id: None,
+            content_type: None,
+            operation_id: Some(operation_id),
+        },
+    )
+    .await?;
+
+    // The response is matched rather than run through `call_device`, because which half of
+    // §13.6's third phase applies depends on *why* it failed. A refusal means the service
+    // never took this commit, so it is rolled back here; a request that failed in transport
+    // may well have been accepted with only the answer lost, and rolling back then would
+    // leave this device with no state for a group the service believes it has. That case is
+    // the crate's `reconcile_pending_v2` to sort out, not a guess made here.
+    let result = match response {
+        AnpResponse::Success { result, .. } => {
+            finalize_commit(&location, &identity, &prepared.pending_commit_id)?;
+            result
+        }
+        AnpResponse::Error { error, .. } => {
+            if let Err(err) = abort_commit(&location, &identity, &prepared.pending_commit_id) {
+                // The refusal is what the caller needs; a rollback that failed is worth
+                // saying out loud but not worth replacing that with a worse description of
+                // the same event.
+                eprintln!("warning: rolling back the local commit failed: {err}");
+            }
+            return Err(rejection(
+                GROUP_E2EE_CREATE,
+                group_did,
+                error.code,
+                error.data.as_ref().and_then(|data| data.anp_code.as_deref()),
+                &error.message,
+            )
+            .into());
+        }
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+    report_group_e2ee_created(&result)
+}
+
+/// §9.2.4's success fields.
+///
+/// `created: true` is checked before anything is printed, as on the publish path: a service
+/// that answered without it did not report state this client can go on to add members to,
+/// and printing the rest as if it had would be reporting a group that does not exist.
+fn report_group_e2ee_created(result: &Value) -> anyhow::Result<()> {
+    if result.get("created").and_then(Value::as_bool) != Some(true) {
+        anyhow::bail!("group.e2ee.create did not report `created: true` (P6 §9.2.4)")
+    }
+    field("group:", result.get("group_did"));
+    field("crypto group:", result.get("crypto_group_id_b64u"));
+    field("epoch:", result.get("epoch"));
+    field("accepted at:", result.get("accepted_at"));
     Ok(())
 }
 
