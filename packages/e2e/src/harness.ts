@@ -4,8 +4,10 @@
 // 却从没串起来跑过一次。所以这里替掉的东西要尽可能少，且每一处替换都要说得出理由：
 //
 //   * **服务侧不替**：`loadConfig` 读环境、`createDispatch`、`createServer`、`createStreamSession`
-//     与 `main.ts` 的接线一一对应（`main.ts` 里省略的两件——`relay` 与数据面——本用例用不到，
-//     它们是跨域转发与附件上传）。这不是"照着 main.ts 抄"，是同一批模块的同一批参数。
+//     与 `main.ts` 的接线一一对应（省略的只有数据面，附件上传本套用例不碰）。这不是"照着
+//     main.ts 抄"，是同一批模块的同一批参数。**`relay` 现在是接上的**：跨域那半边（`relay` /
+//     `egress` / 群文档路由）在 `crossDomain` 世界里与 `main.ts` 逐行对应——B1b 的三族跨域
+//     机制就靠这一半才跑得起来（TODO4 §A3），单服务世界留着不接是为了让旧用例的失败面不变。
 //   * **客户端侧不替**：跑的是 `connectx` 自己的命令函数（`runMsg` / `runListen`），
 //     真的去开来宾身份、真的签 `origin_proof`、真的走 WebSocket。身份存储用
 //     `CONNECTX_HOME` 指到临时目录，这是 CLI 本来就支持的开关（`identity/paths.ts` 文件头）。
@@ -25,10 +27,14 @@ import { join } from 'node:path'
 import { didToUrl } from '@agentx/core'
 import type { Config } from '../../service/src/config'
 import { loadConfig } from '../../service/src/config'
+import { createEgress } from '../../service/src/federation/egress'
+import { createRelay, type Relay } from '../../service/src/federation/forward'
 import { createServer, RPC_PATH } from '../../service/src/http/server'
 import { openObjectStore } from '../../service/src/objects'
+import { groupDidDocument } from '../../service/src/rpc/groupDidDocument'
 import { createDispatch } from '../../service/src/rpc/dispatch'
 import { openStorage } from '../../service/src/storage/sqlite'
+import type { Storage } from '../../service/src/storage/types'
 import { createSubscriberRegistry } from '../../service/src/stream/registry'
 import { createStreamSession } from '../../service/src/stream/session'
 import { buildServiceEntry, type ServiceEntry } from '../../service/src/well-known'
@@ -97,7 +103,25 @@ export interface RunningService {
   baseUrl: string
   rpcEndpoint: string
   streamEndpoint: string
+  /** 直接读库，供断言用——"这次调用在本地落了什么"是端到端要看的另一面（§A3 的第三条）。 */
+  storage: Storage
   stop(): Promise<void>
+}
+
+export interface ServiceOptions {
+  home: string
+  /** 同一棵临时目录下多个服务各自的对象目录名。 */
+  name: string
+  didHost: string
+  /**
+   * 接上跨域那半边：`relay`（转发）、`egress`（出站）、群文档路由（`GET …/g/<id>/did.json`），
+   * 与 `main.ts` 的三处接线一一对应。
+   *
+   * 单服务世界默认不接。中继对自己命名空间的目标会短路成本地处理（`relayFor`），所以接上
+   * 也不改变既有用例的**结论**，但会多出一次"解析收件人文档"的网络往返——那正是跨域那半
+   * 边要测的东西，不该顺手加进没有第二个域可跨的用例里。
+   */
+  crossDomain?: boolean
 }
 
 /**
@@ -106,15 +130,17 @@ export interface RunningService {
  *  `serviceDid` 对（`listen.ts` 的握手）。用 `:0` 的话这两处会写着一个端口 0，不是"哪里不对"
  * 而是"看起来对、其实对不上一个真地址"。
  */
-async function startService(home: string, didHost: string): Promise<RunningService> {
+async function startService(options: ServiceOptions): Promise<RunningService> {
+  const { home, name, didHost, crossDomain = false } = options
   const port = await reservePort()
   const baseUrl = `http://127.0.0.1:${port}`
   const config = loadConfig({
     AGENTX_LISTEN: `127.0.0.1:${port}`,
     AGENTX_PUBLIC_URL: baseUrl,
-    // 一个进程一份状态，跑完即弃；对象落在临时目录里，与库是同一棵树。
+    // 一个进程一份状态，跑完即弃；对象落在临时目录里，与库是同一棵树。同一棵树下可能住着
+    // 两个服务，所以对象目录按名字分开——共用会让 B 的附件槽位出现在 A 的目录里。
     AGENTX_DB: ':memory:',
-    AGENTX_OBJECT_DIR: join(home, 'objects'),
+    AGENTX_OBJECT_DIR: join(home, name, 'objects'),
     // 本机 + 明文 http 的联调口。主机名是精确的，没有通配。
     AGENTX_DID_DEV_HOSTS: didHost.split(':')[0]!,
   } as NodeJS.ProcessEnv)
@@ -124,10 +150,17 @@ async function startService(home: string, didHost: string): Promise<RunningServi
   // `main.ts` 的接线：受理落库后把那条投递交给订阅路。少了这一步，`msg listen` 收不到推送，
   // 而"收不到"会看起来像客户端的毛病。
   const registry = createSubscriberRegistry()
+  // 跨域那半边。**不配外层签名**：本服务自己的 DID 文档不由本服务发布（§C2），所以没有
+  // 一处能让对端解析出这颗公钥，签了也验不过。P8 §2.3 对不带外层身份的调用方的处置就是
+  // "按本地调用处理"——业务层的 `origin_proof` 照旧是唯一的授权依据，也是本条用例要验的。
+  const relay: Relay | undefined = crossDomain
+    ? createRelay({ config, egress: createEgress({ config }) })
+    : undefined
   const handleRpc = createDispatch({
     config,
     storage,
     objects,
+    ...(relay !== undefined ? { relay } : {}),
     onDelivered: (record) => {
       registry.publish(record)
     },
@@ -144,6 +177,16 @@ async function startService(home: string, didHost: string): Promise<RunningServi
     handleRpc,
     handleStream: (connection, request) => session.handlersFor(connection, request),
     wellKnown: JSON.stringify(buildServiceEntry(config), null, 2),
+    // 群文档由**本服务**发布（groups.md §2.2）：群 DID 住在本服务自己的命名空间里，别的域
+    // 据此找到我们。`undefined` = 404，路由是怎么说的就怎么答。
+    ...(crossDomain
+      ? {
+          handleGroupDid: (groupDid: string) => {
+            const document = groupDidDocument(storage, config, groupDid)
+            return document === undefined ? undefined : JSON.stringify(document, null, 2)
+          },
+        }
+      : {}),
   })
   await server.listen()
 
@@ -152,6 +195,7 @@ async function startService(home: string, didHost: string): Promise<RunningServi
     baseUrl,
     rpcEndpoint: `${baseUrl}${RPC_PATH}`,
     streamEndpoint: `${baseUrl}/anp-im/stream`,
+    storage,
     async stop() {
       session.closeAll('test over')
       await server.close()
@@ -219,7 +263,7 @@ export async function startWorld(): Promise<World> {
   process.env.CONNECTX_HOME = home
 
   const didHost = await startDidHost()
-  const service = await startService(home, didHost.host)
+  const service = await startService({ home, name: 'service', didHost: didHost.host })
   return {
     service,
     didHost,
@@ -227,6 +271,46 @@ export async function startWorld(): Promise<World> {
     createAgent: (name) => createAgent({ name, didHost: didHost.host, config: service.config, didHostServer: didHost }),
     async stop() {
       await service.stop()
+      await didHost.stop()
+    },
+  }
+}
+
+/** 两个域的世界：两台真服务，同一个玩具 DID 主机，一个 `CONNECTX_HOME`。
+ *
+ *  两台服务跑在同一个 `127.0.0.1` 的不同端口上，靠 `AGENTX_DID_DEV_HOSTS=127.0.0.1` 各自
+ *  把本机 + 明文 http 的口子开着。域名层面的区分就是**端口**：`serviceDid` 是
+ *  `did:web:127.0.0.1%3A<port>`，`isOurOwnIngress` 比的是 origin，所以 A 转发到 B 不会被
+ *  当成自己的入口。 */
+export interface FederatedWorld {
+  a: RunningService
+  b: RunningService
+  didHost: DidHost
+  home: string
+  /** 立一个 `connectx` 身份，它的文档挂在玩具主机上、入口写的是**指定那台服务**。 */
+  createAgent(name: string, service: RunningService): Promise<Agent>
+  stop(): Promise<void>
+}
+
+export async function startFederatedWorld(): Promise<FederatedWorld> {
+  const home = mkdtempSync(join(tmpdir(), 'connectx-e2e-fed-'))
+  process.env.CONNECTX_HOME = home
+
+  const didHost = await startDidHost()
+  // 两台服务都接上跨域那半边：A 要有 `relay` 才转得出去，B 要有群文档路由才发得出来那份
+  // 文档（A 拿到它才能验回执）。谁用得上哪一半是运行期决定的，接线上不预先分工。
+  const a = await startService({ home, name: 'a', didHost: didHost.host, crossDomain: true })
+  const b = await startService({ home, name: 'b', didHost: didHost.host, crossDomain: true })
+  return {
+    a,
+    b,
+    didHost,
+    home,
+    createAgent: (name, service) =>
+      createAgent({ name, didHost: didHost.host, config: service.config, didHostServer: didHost }),
+    async stop() {
+      await a.stop()
+      await b.stop()
       await didHost.stop()
     },
   }

@@ -347,3 +347,15 @@ Grant 的键已经是 `(message_id, attachment_id, object_uri)`，多存一列�
    决定，本服务只能配成一致。
 3. **被取代 DID 的拒绝需要 P2 连续性来源**：§6.7 / §7.2 L492 要求重建签名重试，而
    "哪个 DID 取代了哪个"的权威答案在 P2。[groups.md](groups.md) §12 记的是同一条。
+4. **上面这些验到了什么程度。** B1b 落地时，跨域转发只有方法级测试，对端是一个回答
+   "文档指向哪"的 stub。TODO4 §A3 把 stub 换成了第二台真的 `AgentXAgent`：同一台机器、
+   两个端口、`AGENTX_DID_DEV_HOSTS` 那条联调口，A 域的 agent 对 B 域命名空间里的群发
+   `group.send`（请求交给 A，`meta.target.did` 是 B 的群 DID），验三件事——转发真的发生
+   （B 有群、有名册、有那条消息行，A 一条群行都没有）、B 签的回执在 A 域用**从网络上取回来
+   的** B 域群文档过一次 `verifyObjectProofDetailed`、A 的本地库一个群行都没落。落点是
+   `packages/e2e/src/groupFederation.test.ts`。
+   **没验到的**：真 https 与真域名（上面第 1 条，e2e 走的是 dev-host 那条口）、跨机器、以及
+   **外层签名那一半**——`egress` 的 `keyid` 必须指着本服务自己的 DID 文档，而那份文档不在
+   本服务手里（第 2 条），所以 e2e 里没有一处能解析出它，签了也验不过。P8 §2.3 对不带外层
+   身份的调用方的处置本来就是"按本地调用处理"，业务层的 `origin_proof`（由调用方真签）照旧
+   是唯一的授权依据，所以外层那半段仍由它自己的方法级测试覆盖。
