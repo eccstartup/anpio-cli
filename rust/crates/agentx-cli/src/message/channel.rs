@@ -73,6 +73,20 @@ pub const GROUP_E2EE_ADD: &str = "group.e2ee.add";
 pub const GROUP_E2EE_REMOVE: &str = "group.e2ee.remove";
 pub const GROUP_E2EE_SEND: &str = "group.e2ee.send";
 
+/// P6 §12: the two methods a **service pushes**, which no `group.e2ee.*` call above has.
+///
+/// They are the receive half of the family: `notice` carries a Commit or a Welcome (§12.2),
+/// `incoming` carries application ciphertext (§12.5). Neither is ever *sent* by a client, so
+/// they are not in the six above — §12.6 says this Profile defines no P6 history pull at all,
+/// which is what makes a live socket the only way to get either.
+///
+/// `GROUP_E2EE_INCOMING` shares its string with P4's own `group.incoming` (the TS service
+/// keeps the two apart by module, `groupEnvelopes.ts` vs `groups.ts`). A client therefore
+/// cannot tell them apart by method alone: the discriminator is the security profile P6
+/// §12.5 pins to `group-e2ee`, which is why the receive path checks it.
+pub const GROUP_E2EE_NOTICE: &str = "group.e2ee.notice";
+pub const GROUP_E2EE_INCOMING: &str = "group.incoming";
+
 /// P1 §8.2.1: a capabilities probe explains itself under the core binding.
 pub const GET_CAPABILITIES: &str = "anp.get_capabilities";
 pub const CORE_BINDING: &str = "anp.core.binding.v1";

@@ -17,17 +17,19 @@
 use std::path::PathBuf;
 
 use anp::group_e2ee::operations::v2::{
-    abort_commit_v2, add_member_prepare_v2, create_group_prepare_v2, encrypt_v2,
-    finalize_commit_v2, generate_key_package_v2, remove_member_prepare_v2, V2AddMemberInput,
-    V2CreateGroupInput, V2EncryptInput, V2FinalizeInput, V2GenerateKeyPackageInput, V2PreparedAdd,
-    V2PreparedCreate, V2PreparedRemove, V2RemoveMemberInput,
+    abort_commit_v2, add_member_prepare_v2, create_group_prepare_v2, decrypt_received_v2,
+    encrypt_v2, finalize_commit_v2, generate_key_package_v2, process_notice_v2,
+    remove_member_prepare_v2, V2AddMemberInput, V2CreateGroupInput, V2DecryptInput,
+    V2DecryptOutput, V2DidDocument, V2EncryptInput, V2FinalizeInput, V2GenerateKeyPackageInput,
+    V2PreparedAdd, V2PreparedCreate, V2PreparedRemove, V2ProcessNoticeInput,
+    V2ProcessNoticeOutput, V2RemoveMemberInput,
 };
 use anp::group_e2ee::storage::ImCoreSqliteGroupMlsStore;
 use anp::group_e2ee::v2_models::{
-    V2GroupAddBody, V2GroupApplicationPlaintext, V2GroupCipherObject, V2GroupControlMetadata,
-    V2GroupCreateBody, V2GroupKeyPackage, V2GroupRemoveBody, V2GroupSendMetadata, V2GroupStateRef,
-    V2ServiceMetadata, V2Target, GROUP_CIPHER_CONTENT_TYPE_V2, GROUP_E2EE_PROFILE_V2,
-    GROUP_E2EE_SECURITY_PROFILE_V2,
+    V2E2eeNotice, V2GroupAddBody, V2GroupApplicationPlaintext, V2GroupCipherObject,
+    V2GroupControlMetadata, V2GroupCreateBody, V2GroupKeyPackage, V2GroupNoticeMetadata,
+    V2GroupRemoveBody, V2GroupSendMetadata, V2GroupStateRef, V2ServiceMetadata, V2Target,
+    GROUP_CIPHER_CONTENT_TYPE_V2, GROUP_E2EE_PROFILE_V2, GROUP_E2EE_SECURITY_PROFILE_V2,
 };
 use anp::PrivateKeyMaterial;
 use chrono::{Duration, Utc};
@@ -563,6 +565,98 @@ pub fn send_message(
         },
     )
     .map_err(|err| AgentxError::MessageInvalid(format!("encrypting a group message: {err}")))
+}
+
+/// Apply one `group.e2ee.notice` to this device's MLS state (P6 §12.2).
+///
+/// The single entry point for both notice kinds: the crate branches on
+/// `notice.notice_type` itself — `welcome-delivery` joins the group (and validates **every**
+/// leaf in the tree, which is why `member_documents` has to cover all of them, not just the
+/// sender), `commit-delivery` advances an existing one. A device the notice names as its
+/// subject with `subject_status: removed` comes out with `self_removed: true`, which is how
+/// the caller learns to stop listening for that group.
+///
+/// The crate makes this **idempotent per `meta.operation_id`**: it files a receipt before
+/// applying and returns the stored output for a repeat. That is what makes the push-only,
+/// no-ack delivery safe to redeliver — the service deletes its queue row after a successful
+/// socket write (`groupEnvelopes.ts` §6.1), so at-least-once is the guarantee, and the
+/// deduplication has to live here.
+///
+/// `member_documents` is [`V2DidDocument`] pairs — the agent DID and its whole document,
+/// fetched by the caller with [`crate::message::resolve_did_document`] and converted with
+/// [`crate::message::document_in_crate_form`]. It is a parameter rather than fetched here for
+/// the same reason as everywhere else (client-mls.md §5 #4): this module owns the store, not
+/// the network.
+pub fn process_notice(
+    location: &IdentityLocation,
+    identity: &Identity,
+    meta: V2GroupNoticeMetadata,
+    notice: V2E2eeNotice,
+    member_documents: Vec<V2DidDocument>,
+) -> Result<V2ProcessNoticeOutput> {
+    let store = store_for(location, identity)?;
+    process_notice_v2(
+        &store,
+        V2ProcessNoticeInput {
+            recipient_did: identity.did.clone(),
+            recipient_device_id: identity.device_id.clone(),
+            meta,
+            notice,
+            member_documents,
+            now: Utc::now().to_rfc3339(),
+            draft_extension_negotiated: true,
+            request_id: uuid_v4(),
+        },
+    )
+    .map_err(|err| AgentxError::MessageInvalid(format!("processing a group notice: {err}")))
+}
+
+/// What decrypting one `group.incoming` needs beyond the identity (P6 §12.5).
+///
+/// The `originating_meta` is the **sender's** `V2GroupSendMetadata`, not the envelope's
+/// `V2GroupNoticeMetadata`-shaped one: §12.5 keeps `sender_did` / `sender_device_id` /
+/// `message_id` / `operation_id` / `content_type` from the accepted `send` precisely so the
+/// receiver can rebuild this. The `group_cipher_object` is the accepted body's object
+/// byte-for-byte (§12.6 forbids re-encoding), and `sender_did_document` is that sender's
+/// document — needed to check the leaf binding the ciphertext was signed under.
+pub struct DecryptInput {
+    pub originating_meta: V2GroupSendMetadata,
+    pub group_cipher_object: V2GroupCipherObject,
+    pub sender_did_document: Value,
+}
+
+/// Decrypt one delivered `group.incoming` (P6 §12.5).
+///
+/// `decrypt_received_…` rather than the plain `decrypt_v2`: the received variant admits an
+/// exact-input recovery result, which is the shape a **durably received** input has — one
+/// that came off a queue the service may deliver twice. The strict variant is for a caller
+/// that has not stored the input and can afford to treat a repeat as a failure; a listener
+/// cannot, because the redelivery is the service's normal behaviour, not an error.
+pub fn decrypt_received(
+    location: &IdentityLocation,
+    identity: &Identity,
+    input: DecryptInput,
+) -> Result<V2DecryptOutput> {
+    let store = store_for(location, identity)?;
+    let DecryptInput {
+        originating_meta,
+        group_cipher_object,
+        sender_did_document,
+    } = input;
+    decrypt_received_v2(
+        &store,
+        V2DecryptInput {
+            recipient_did: identity.did.clone(),
+            recipient_device_id: identity.device_id.clone(),
+            originating_meta,
+            group_cipher_object,
+            sender_did_document,
+            now: Utc::now().to_rfc3339(),
+            draft_extension_negotiated: true,
+            request_id: uuid_v4(),
+        },
+    )
+    .map_err(|err| AgentxError::MessageInvalid(format!("decrypting a group message: {err}")))
 }
 
 /// Phase three, accepted: the service took the commit, so the local pending one becomes the

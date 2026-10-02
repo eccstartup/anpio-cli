@@ -10,12 +10,14 @@
 //! what is here is the policy that goes in the bodies.
 
 use anp::group_e2ee::v2_models::{
-    V2GroupAddBody, V2GroupCipherObject, V2GroupCreateBody, V2GroupKeyPackage, V2GroupRemoveBody,
+    V2E2eeNotice, V2GroupAddBody, V2GroupCipherObject, V2GroupCreateBody, V2GroupKeyPackage,
+    V2GroupNoticeMetadata, V2GroupRemoveBody, V2GroupSendMetadata, V2Target,
 };
 use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::error::{AgentxError, Result};
+use crate::message::{GROUP_E2EE_INCOMING, GROUP_E2EE_NOTICE};
 
 /// The body of `group.e2ee.publish_key_package` (P6 §8.1.2).
 ///
@@ -100,6 +102,169 @@ fn value_of<T: Serialize>(value: &T, what: &str) -> Result<Value> {
         .map_err(|err| AgentxError::MessageInvalid(format!("serialising {what}: {err}")))
 }
 
+// ---- reading the two pushed frames (P6 §12) ------------------------------------
+//
+// The other direction of the six request bodies above: a service pushes a bare Notification
+// `{jsonrpc, method, params}`, with no `id` and no signature — §13.6 is explicit that a notice
+// MUST NOT carry an `origin_proof`, and §12.5 keeps an `incoming`'s accepted proof inside
+// `params.auth`, which is not what either parser reads.
+//
+// Neither frame deserialises straight into the crate's model, and for the same reason: the
+// crate's metas `deny_unknown_fields`, while §12's envelopes deliberately carry a bit more
+// than the model has slots for (`message_id` on a notice, `recipient_device_id` on an
+// `incoming`). So each is read field by field, into exactly the struct the crate's `validate()`
+// was written against — a superset would be refused, and a dropped field is one the crate
+// never looks at.
+
+/// A pushed frame's `params`, or an error naming the method that was expected.
+fn params_of<'a>(frame: &'a Value, method: &str) -> Result<&'a Map<String, Value>> {
+    let row = frame.as_object().ok_or_else(|| {
+        AgentxError::MessageInvalid(format!("a pushed {method} frame must be a JSON object"))
+    })?;
+    let seen = row.get("method").and_then(Value::as_str).unwrap_or("");
+    if seen != method {
+        return Err(AgentxError::MessageInvalid(format!(
+            "expected a {method} frame, got {}",
+            if seen.is_empty() { "(no method)" } else { seen }
+        )));
+    }
+    row.get("params")
+        .and_then(Value::as_object)
+        .ok_or_else(|| AgentxError::MessageInvalid(format!("a {method} frame must carry params")))
+}
+
+fn object_field<'a>(fields: &'a Map<String, Value>, key: &str, method: &str) -> Result<&'a Map<String, Value>> {
+    fields
+        .get(key)
+        .and_then(Value::as_object)
+        .ok_or_else(|| AgentxError::MessageInvalid(format!("a {method} frame has no {key}")))
+}
+
+/// A field the crate's `validate()` requires, so its absence is reported here rather than
+/// surfacing later as a generic state error.
+fn required(fields: &Map<String, Value>, key: &str, method: &str) -> Result<String> {
+    fields
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            AgentxError::MessageInvalid(format!("a {method} frame has no {key}"))
+        })
+}
+
+/// A field the crate's model carries as `Option`. A JSON `null` and an absent key are the same
+/// thing here, and both mean "not present" — the crate's own `deserialize_present` is why an
+/// explicit `null` must not be passed through as `Some(null)`.
+fn optional(fields: &Map<String, Value>, key: &str) -> Option<String> {
+    fields.get(key).and_then(Value::as_str).map(str::to_string)
+}
+
+fn target_of(fields: &Map<String, Value>, method: &str) -> Result<V2Target> {
+    let target = object_field(fields, "target", method)?;
+    Ok(V2Target {
+        kind: required(target, "kind", method)?,
+        did: required(target, "did", method)?,
+    })
+}
+
+/// One `group.e2ee.notice`: the metadata and the notice body (P6 §12.2).
+///
+/// `meta.target` is the **recipient** agent here and stays that way — the crate's
+/// `validate_notice_outer` wants `meta.target.did == recipient_did`, and §12.2.2 builds the
+/// notice's target exactly so.
+pub fn notice_of_frame(frame: &Value) -> Result<(V2GroupNoticeMetadata, V2E2eeNotice)> {
+    let params = params_of(frame, GROUP_E2EE_NOTICE)?;
+    let meta = object_field(params, "meta", GROUP_E2EE_NOTICE)?;
+    let body = object_field(params, "body", GROUP_E2EE_NOTICE)?;
+
+    let metadata = V2GroupNoticeMetadata {
+        anp_version: optional(meta, "anp_version"),
+        profile: required(meta, "profile", GROUP_E2EE_NOTICE)?,
+        security_profile: required(meta, "security_profile", GROUP_E2EE_NOTICE)?,
+        sender_did: required(meta, "sender_did", GROUP_E2EE_NOTICE)?,
+        target: target_of(meta, GROUP_E2EE_NOTICE)?,
+        recipient_device_id: required(meta, "recipient_device_id", GROUP_E2EE_NOTICE)?,
+        operation_id: required(meta, "operation_id", GROUP_E2EE_NOTICE)?,
+        created_at: optional(meta, "created_at"),
+    };
+
+    let notice: V2E2eeNotice = serde_json::from_value(Value::Object(body.clone())).map_err(|err| {
+        AgentxError::MessageInvalid(format!("a {GROUP_E2EE_NOTICE} body is not a P6 notice: {err}"))
+    })?;
+    Ok((metadata, notice))
+}
+
+/// One `group.incoming` carrying P6 ciphertext: what [`crate::mls::decrypt_received`] needs,
+/// plus the two ordering fields a rendered line shows (P6 §12.5).
+pub struct IncomingFrame {
+    pub meta: V2GroupSendMetadata,
+    pub cipher: V2GroupCipherObject,
+    /// §12.5: the same value in every leaf's copy of one accepted `send` — it is how a member
+    /// lines this message up with what the others saw, the same way `group.send`'s response
+    /// does for the sender.
+    pub group_event_seq: Option<String>,
+    pub accepted_at: Option<String>,
+}
+
+/// One P6 `group.incoming`: reconstruct the sender's metadata, and take the cipher object
+/// (P6 §12.5).
+///
+/// The reconstruction is the whole point of this function, because the envelope's `meta` is
+/// **not** the metadata the ciphertext was authenticated under. §12.5 re-targets each leaf's
+/// copy at the receiving agent, so `meta.target` names the *recipient* — while `target.did` is
+/// part of the `send`'s authenticated data (§7.5's `group_send_authenticated_data_v2`, which
+/// the receiver re-derives and compares). The original target was the **group**, and the one
+/// place §12.5 leaves that value is `body.group_did`. Reading the envelope's target here would
+/// decrypt against the wrong bytes and be reported as a cipher failure.
+///
+/// Everything else is preserved rather than invented: `sender_did` / `sender_device_id` /
+/// `message_id` / `operation_id` / `content_type` are the accepted `send`'s own (L1486–1487),
+/// and `created_at` is the one field §13.6 moves aside into `origin_context` — it is not in the
+/// authenticated data, so the delivery timestamp the envelope carries is fine.
+pub fn incoming_of_frame(frame: &Value) -> Result<IncomingFrame> {
+    let params = params_of(frame, GROUP_E2EE_INCOMING)?;
+    let meta = object_field(params, "meta", GROUP_E2EE_INCOMING)?;
+    let body = object_field(params, "body", GROUP_E2EE_INCOMING)?;
+
+    let group_did = required(body, "group_did", GROUP_E2EE_INCOMING)?;
+    let cipher: V2GroupCipherObject = serde_json::from_value(
+        body.get("group_cipher_object")
+            .cloned()
+            .ok_or_else(|| {
+                AgentxError::MessageInvalid(format!(
+                    "a {GROUP_E2EE_INCOMING} frame has no group_cipher_object"
+                ))
+            })?,
+    )
+    .map_err(|err| {
+        AgentxError::MessageInvalid(format!(
+            "a {GROUP_E2EE_INCOMING} frame's cipher object is not a V2GroupCipherObject: {err}"
+        ))
+    })?;
+
+    Ok(IncomingFrame {
+        meta: V2GroupSendMetadata {
+            anp_version: optional(meta, "anp_version"),
+            profile: required(meta, "profile", GROUP_E2EE_INCOMING)?,
+            security_profile: required(meta, "security_profile", GROUP_E2EE_INCOMING)?,
+            sender_did: required(meta, "sender_did", GROUP_E2EE_INCOMING)?,
+            sender_device_id: required(meta, "sender_device_id", GROUP_E2EE_INCOMING)?,
+            target: V2Target {
+                kind: "group".to_string(),
+                did: group_did,
+            },
+            operation_id: required(meta, "operation_id", GROUP_E2EE_INCOMING)?,
+            message_id: required(meta, "message_id", GROUP_E2EE_INCOMING)?,
+            content_type: required(meta, "content_type", GROUP_E2EE_INCOMING)?,
+            created_at: optional(meta, "created_at"),
+        },
+        cipher,
+        group_event_seq: optional(body, "group_event_seq"),
+        accepted_at: optional(body, "accepted_at"),
+    })
+}
+
 /// The body of `group.e2ee.get_key_package` (P6 §8.2.2).
 ///
 /// The two fields the lookup is by, plus the two MAYs when the caller asked for them. Both
@@ -145,6 +310,7 @@ mod tests {
     use anp::group_e2ee::v2_models::{
         V2DidWbaBinding, V2GroupStateRef, V2ObjectProof, GROUP_E2EE_MTI_SUITE_V2,
     };
+    use serde_json::json;
 
     fn package() -> V2GroupKeyPackage {
         V2GroupKeyPackage {
@@ -415,5 +581,212 @@ mod tests {
             get_key_package_body("did:wba:example.com:user:peer:e1_x", "peer/default", Some(""), false)
                 .unwrap_err();
         assert!(err.to_string().contains("--suite"), "{err}");
+    }
+
+    // ---- the pushed frames -----------------------------------------------------
+    //
+    // The literals below are the envelopes `packages/service/src/rpc/groupEnvelopes.ts`
+    // builds, field for field — a fixture invented here would only prove this file agrees
+    // with itself.
+
+    const GROUP: &str = "did:web:svc.example:g:team";
+    const CAROL: &str = "did:wba:example.com:user:carol:e1_carol";
+
+    fn state_ref() -> Value {
+        json!({ "group_did": GROUP, "group_state_version": "7" })
+    }
+
+    /// The commit half of an `add`: §12.2.2's envelope, `subject_status: active`.
+    #[test]
+    fn a_commit_notice_frame_reads_into_the_crates_notice() {
+        let frame = json!({
+            "jsonrpc": "2.0",
+            "method": "group.e2ee.notice",
+            "params": {
+                "meta": {
+                    "profile": "anp.group.e2ee.v2",
+                    "security_profile": "transport-protected",
+                    "sender_did": GROUP,
+                    "target": { "kind": "agent", "did": CAROL },
+                    "recipient_device_id": "carol/default",
+                    // The one field the crate's notice metadata has no slot for; it must be
+                    // dropped rather than refused (the crate's metas deny unknown fields).
+                    "message_id": "bXNn",
+                    "operation_id": "b3A",
+                    "created_at": "2026-10-02T00:00:00Z"
+                },
+                "body": {
+                    "notice_id": "bnQ",
+                    "notice_type": "commit-delivery",
+                    "group_did": GROUP,
+                    "group_state_ref": state_ref(),
+                    "crypto_group_id_b64u": "Z3JvdXA",
+                    "epoch": "1",
+                    "subject_did": CAROL,
+                    "subject_device_id": "carol/default",
+                    "subject_status": "active",
+                    "commit_b64u": "Y29tbWl0"
+                }
+            }
+        });
+
+        let (meta, notice) = notice_of_frame(&frame).unwrap();
+        assert_eq!(meta.sender_did, GROUP, "§12.2.2: the group is the sender");
+        assert_eq!(meta.target.did, CAROL, "…and the recipient is the target");
+        assert_eq!(meta.operation_id, "b3A");
+        assert_eq!(notice.notice_type, "commit-delivery");
+        assert_eq!(notice.subject_status, "active");
+        assert_eq!(notice.commit_b64u.as_deref(), Some("Y29tbWl0"));
+        assert!(notice.welcome_b64u.is_none(), "a commit carries no Welcome");
+    }
+
+    /// The welcome half: the same envelope with the two Welcome objects and no commit.
+    #[test]
+    fn a_welcome_notice_frame_reads_both_welcome_objects() {
+        let frame = json!({
+            "jsonrpc": "2.0",
+            "method": "group.e2ee.notice",
+            "params": {
+                "meta": {
+                    "profile": "anp.group.e2ee.v2",
+                    "security_profile": "transport-protected",
+                    "sender_did": GROUP,
+                    "target": { "kind": "agent", "did": CAROL },
+                    "recipient_device_id": "carol/default",
+                    "message_id": "bXNn",
+                    "operation_id": "b3A",
+                    "created_at": "2026-10-02T00:00:00Z"
+                },
+                "body": {
+                    "notice_id": "bnQ",
+                    "notice_type": "welcome-delivery",
+                    "group_did": GROUP,
+                    "group_state_ref": state_ref(),
+                    "crypto_group_id_b64u": "Z3JvdXA",
+                    "epoch": "1",
+                    "subject_did": CAROL,
+                    "subject_device_id": "carol/default",
+                    // Both welcome objects §12.4 sends, and the status the crate's own
+                    // `validate_notice_outer` insists on for a welcome.
+                    "subject_status": "active",
+                    "welcome_b64u": "d2VsY29tZQ",
+                    "ratchet_tree_b64u": "dHJlZQ"
+                }
+            }
+        });
+
+        let (_, notice) = notice_of_frame(&frame).unwrap();
+        assert_eq!(notice.notice_type, "welcome-delivery");
+        assert_eq!(notice.welcome_b64u.as_deref(), Some("d2VsY29tZQ"));
+        assert_eq!(notice.ratchet_tree_b64u.as_deref(), Some("dHJlZQ"));
+        assert_eq!(
+            notice.subject_did, CAROL,
+            "§12.4: the Welcome's subject must be the recipient (the crate checks it)"
+        );
+    }
+
+    /// An `incoming` frame's meta is re-targeted at the group, and the crate accepts it.
+    ///
+    /// The assertion that matters is the last one: the crate's own AAD builder both validates
+    /// the reconstructed metadata and insists `group_state_ref.group_did == meta.target.did`.
+    /// If the envelope's own target (the recipient agent, per §12.5) were passed through, that
+    /// check would fail here rather than as an unexplained decrypt failure at the service.
+    #[test]
+    fn an_incoming_frame_is_retargeted_at_the_group_for_the_aad() {
+        let cipher = V2GroupCipherObject {
+            crypto_group_id_b64u: "Z3JvdXA".to_string(),
+            epoch: "2".to_string(),
+            private_message_b64u: "AA".to_string(),
+            group_state_ref: V2GroupStateRef {
+                group_did: GROUP.to_string(),
+                group_state_version: "7".to_string(),
+                policy_hash: None,
+                roster_hash: None,
+            },
+            // Base64url, because the AAD builder below validates the object it is handed —
+            // the values are the wire vector's, so this fixture also proves those parse.
+            epoch_authenticator: Some("ZXBvY2gtYXV0aA".to_string()),
+        };
+        let frame = json!({
+            "jsonrpc": "2.0",
+            "method": "group.incoming",
+            "params": {
+                "meta": {
+                    "profile": "anp.group.e2ee.v2",
+                    "security_profile": "group-e2ee",
+                    "sender_did": "did:wba:example.com:user:bob:e1_bob",
+                    "sender_device_id": "bob/default",
+                    "target": { "kind": "agent", "did": CAROL },
+                    "recipient_device_id": "carol/default",
+                    "message_id": "bXNn",
+                    "operation_id": "b3A",
+                    "content_type": "application/anp-group-cipher+json",
+                    "created_at": "2026-10-02T00:00:00Z"
+                },
+                "auth": { "scheme": "anp", "origin_proof": {}, "origin_context": {} },
+                "body": {
+                    "group_did": GROUP,
+                    "group_state_version": "7",
+                    "group_event_seq": "4",
+                    "accepted_at": "2026-10-02T00:00:00Z",
+                    "group_receipt": {},
+                    "group_cipher_object": serde_json::to_value(&cipher).unwrap()
+                }
+            }
+        });
+
+        let incoming = incoming_of_frame(&frame).unwrap();
+        assert_eq!(
+            incoming.meta.sender_did,
+            "did:wba:example.com:user:bob:e1_bob",
+            "§12.5 L1486: the sender's pair is preserved as the sender's"
+        );
+        assert_eq!(
+            incoming.meta.target.kind, "group",
+            "the envelope's target names the recipient; the send's named the group"
+        );
+        assert_eq!(incoming.meta.target.did, GROUP);
+        assert_eq!(incoming.group_event_seq.as_deref(), Some("4"));
+        assert_eq!(incoming.cipher.epoch, "2");
+
+        anp::group_e2ee::group_send_authenticated_data_v2(&incoming.meta, &incoming.cipher)
+            .expect("the reconstructed metadata is what the ciphertext was authenticated under");
+    }
+
+    /// A frame for a method this parser is not for is refused, and says which it saw.
+    #[test]
+    fn a_frame_for_another_method_is_refused() {
+        let frame = json!({
+            "jsonrpc": "2.0",
+            "method": "direct.incoming",
+            "params": { "meta": {}, "body": {} }
+        });
+        let err = notice_of_frame(&frame).unwrap_err();
+        assert!(err.to_string().contains("direct.incoming"), "{err}");
+        assert!(err.to_string().contains("group.e2ee.notice"), "{err}");
+    }
+
+    /// A notice with no `operation_id` is refused here rather than deeper in.
+    ///
+    /// The crate receipts notices on that id, so a missing one is not a body it can take —
+    /// and the error should name the field, not the state machine that tripped over it.
+    #[test]
+    fn a_notice_without_the_fields_the_crate_needs_is_refused() {
+        let frame = json!({
+            "jsonrpc": "2.0",
+            "method": "group.e2ee.notice",
+            "params": {
+                "meta": {
+                    "profile": "anp.group.e2ee.v2",
+                    "security_profile": "transport-protected",
+                    "sender_did": GROUP,
+                    "target": { "kind": "agent", "did": CAROL },
+                    "recipient_device_id": "carol/default"
+                },
+                "body": {}
+            }
+        });
+        let err = notice_of_frame(&frame).unwrap_err();
+        assert!(err.to_string().contains("operation_id"), "{err}");
     }
 }
