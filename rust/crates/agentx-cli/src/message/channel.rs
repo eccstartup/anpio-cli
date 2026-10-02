@@ -100,12 +100,25 @@ pub const INBOX_GET: &str = "inbox.get";
 pub const INBOX_MARK_READ: &str = "inbox.mark_read";
 pub const MESSAGE_GET_BATCH: &str = "message.get_batch";
 
-/// The extension surface's own Profile. P1 §6.2.2 makes `meta.profile` MUST and calls it
-/// "the single Profile this request is to be read under", so a read request has to name one
-/// — and no normative Profile interprets `inbox.get`. The `x_` prefix is the namespace P1
-/// §12 leaves for extensions, and it is what keeps this value out of the `profiles[]` a
+/// TODO6 §3: the address book's three methods, on the same self-addressed shape as the three
+/// above. They live here rather than in `contacts.rs` so that every method name this client
+/// sends over the extension transport is in one place, next to the Profile each is read under.
+pub const CONTACTS_LIST: &str = "contacts.list";
+pub const CONTACTS_PUT: &str = "contacts.put";
+pub const CONTACTS_REMOVE: &str = "contacts.remove";
+
+/// The pick-up surface's Profile. P1 §6.2.2 makes `meta.profile` MUST and calls it "the
+/// single Profile this request is to be read under", so a read request has to name one —
+/// and no normative Profile interprets `inbox.get`. The `x_` prefix is the namespace P1
+/// §12 leaves for extensions, and it is what keeps these values out of the `profiles[]` a
 /// service advertises as its specification conformance.
-pub const EXTENSION_PROFILE: &str = "x_agentx.inbox.v1";
+///
+/// One Profile per family, not one for all extensions: the service advertises them separately
+/// (`x_agentx.inbox.v1` and `x_agentx.contacts.v1` are two entries in
+/// `capabilities.extensionProfiles`), and a client that named the wrong one would be asking to
+/// be read under a Profile that does not define the method.
+pub const INBOX_PROFILE: &str = "x_agentx.inbox.v1";
+pub const CONTACTS_PROFILE: &str = "x_agentx.contacts.v1";
 
 // ---- the outbound network policy ---------------------------------------------
 
@@ -429,10 +442,16 @@ pub async fn call(
 /// the same appendix requires an endpoint-local method to have its target modelling written
 /// down by its Profile — which is message-service.md §9.1.1. Reading one's own inbox is
 /// addressed to oneself, so `target.did` and `sender_did` are the same DID.
+///
+/// `profile` is passed in rather than fixed here because each extension family is read under
+/// its own Profile (`INBOX_PROFILE`, `CONTACTS_PROFILE`); the service keys its method table by
+/// the pair, so a call that named the other family's Profile would be refused as an
+/// unsupported profile rather than silently honoured.
 pub async fn call_extension(
     client: &reqwest::Client,
     channel: &Channel,
     method: &str,
+    profile: &str,
     body: Map<String, Value>,
 ) -> Result<Value> {
     let response = call(
@@ -441,7 +460,7 @@ pub async fn call_extension(
         &channel.endpoint,
         CallRequest {
             method: method.to_string(),
-            profile: EXTENSION_PROFILE.to_string(),
+            profile: profile.to_string(),
             target: AnpTarget {
                 kind: TargetKind::Agent,
                 did: channel.sender.did.clone(),
@@ -698,8 +717,9 @@ pub fn extension_rejection(
     }
     let named = anp_code.map(str::to_string).unwrap_or_else(|| format!("JSON-RPC error {code}"));
     AgentxError::MessageInvalid(format!(
-        "{identity} does not implement {method} ({named}): the inbox / history / read-state \
-         methods are an implementation extension, not defined by the ANP message specification"
+        "{identity} does not implement {method} ({named}): the inbox / history / read-state / \
+         address-book methods are an implementation extension, not defined by the ANP message \
+         specification"
     ))
 }
 

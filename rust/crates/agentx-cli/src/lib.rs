@@ -10,6 +10,7 @@
 //! That is what `message` is.
 
 pub mod anp;
+pub mod contacts;
 pub mod error;
 pub mod group;
 pub mod group_e2ee;

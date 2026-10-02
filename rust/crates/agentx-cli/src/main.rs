@@ -10,6 +10,10 @@ use reqwest::Url;
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
 
+use agentx::contacts::{
+    ambiguous_name_error, book_from_json, looks_like_a_did, lookup, not_a_did_error,
+    unknown_name_error, Contact, Lookup,
+};
 use agentx::group::{group_target, policy_of, service_target};
 use agentx::group_receive::GroupReceiver;
 use agentx::group_e2ee::{
@@ -32,11 +36,12 @@ use agentx::message::{
     open_channel, open_channel_for, parse_capabilities, payload_of, policy_for, post_message,
     resolve_did_document, rejection, run_listen, uuid_v4, view_for, websocket_connect, AnpMeta,
     AnpResponse, AnpTarget, CallRequest, Channel, ConnectFn, ListenArgs, ListenDeps, ResolvePolicy,
-    Sender, TargetKind, CORE_BINDING, DIRECT_PROFILE, DIRECT_SEND, DID_SUPERSEDED,
+    Sender, TargetKind, CONTACTS_LIST, CONTACTS_PROFILE, CONTACTS_PUT, CONTACTS_REMOVE,
+    CORE_BINDING, DIRECT_PROFILE, DIRECT_SEND, DID_SUPERSEDED,
     GET_CAPABILITIES, GET_KEY_PACKAGE, GROUP_CREATE, GROUP_E2EE_ADD, GROUP_E2EE_CREATE,
     GROUP_E2EE_PROFILE, GROUP_E2EE_REMOVE, GROUP_E2EE_SEND, GROUP_GET_INFO, GROUP_JOIN,
     GROUP_LEAVE, GROUP_PROFILE, GROUP_SEND, GROUP_UPDATE_PROFILE, INBOX_GET, INBOX_MARK_READ,
-    MESSAGE_GET_BATCH, PUBLISH_KEY_PACKAGE, TRANSPORT_PROTECTED,
+    INBOX_PROFILE, MESSAGE_GET_BATCH, PUBLISH_KEY_PACKAGE, TRANSPORT_PROTECTED,
 };
 use agentx::mls::{
     abort_commit, application_plaintext, device_signing_key, finalize_commit, generate_key_package,
@@ -120,6 +125,20 @@ enum Command {
     Anp {
         #[command(subcommand)]
         command: AnpCommand,
+    },
+    /// Names for DIDs, so a message can be addressed to a person rather than a string
+    /// (TODO6 §3).
+    ///
+    /// ANP addresses by DID; people, and the agents relaying for them, address by name. This
+    /// family is the layer between the two, and `resolve` is the one to reach for from a
+    /// script: name in, DID out.
+    ///
+    /// The book lives in the message service's own store, not in this machine's, so the rows
+    /// follow the identity rather than the installation — and every row is keyed to the
+    /// identity that wrote it, so no other identity's `contacts list` can see it.
+    Contacts {
+        #[command(subcommand)]
+        command: ContactsCommand,
     },
     /// The host's profile for this identity: nickname, blurb, avatar.
     ///
@@ -434,10 +453,12 @@ impl OwnIdentity {
 
 #[derive(Subcommand)]
 enum MsgCommand {
-    /// Send one direct message to a DID (P3 `direct.send`).
+    /// Send one direct message to a DID or a contact name (P3 `direct.send`).
     Send {
-        /// The recipient's DID. Its own document names the service it is delivered to.
-        #[arg(long, value_name = "DID")]
+        /// The recipient's DID, or a name from the address book (TODO6 §3). A DID-shaped
+        /// argument is used as given; anything else is looked up, and a name that two
+        /// contacts answer to is refused rather than guessed.
+        #[arg(long, value_name = "DID|NAME")]
         to: String,
         /// A plain-text body. Sent as `text` under `text/plain` unless --content-type says
         /// otherwise.
@@ -534,6 +555,82 @@ enum MsgCommand {
         #[arg(long)]
         once: bool,
         /// Force NDJSON even on a terminal. Without it, a pipe is a machine too.
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        own: OwnIdentity,
+    },
+}
+
+#[derive(Subcommand)]
+enum ContactsCommand {
+    /// Every contact this identity has, ordered by subject.
+    List {
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        own: OwnIdentity,
+    },
+    /// Put a DID in the book, or change the name it is already filed under.
+    ///
+    /// Adding and renaming are one operation because they are one row: the key is the peer's
+    /// stable subject, derived from the DID, so a second `add` for the same person lands on
+    /// the existing entry instead of creating a duplicate.
+    ///
+    /// Without `--remark`, an entry that already has a name keeps it. The wire's own rule is
+    /// "absent means clear", so the client has to be the one to decide otherwise — and
+    /// `add <did>` run twice must not quietly erase the name the first run gave.
+    Add {
+        /// The peer's DID. Not a name — the name is what `--remark` is for.
+        #[arg(value_name = "DID")]
+        did: String,
+        /// What to call them. Left out, a new entry has no name: usable by DID, and waiting
+        /// for one.
+        #[arg(long, value_name = "NAME")]
+        remark: Option<String>,
+        /// Drop the name and keep the entry. The explicit form of what an absent `--remark`
+        /// deliberately does not do.
+        #[arg(long = "clear-remark", conflicts_with = "remark")]
+        clear_remark: bool,
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        own: OwnIdentity,
+    },
+    /// Rename a contact: the same row, a new remark.
+    ///
+    /// Takes a name or a DID, resolving a name the same way `msg send --to` does — so a name
+    /// that two contacts answer to is refused here too, rather than renaming the wrong one.
+    SetRemark {
+        /// The name to rename, or the DID.
+        #[arg(value_name = "NAME")]
+        name: String,
+        #[arg(value_name = "REMARK")]
+        remark: String,
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        own: OwnIdentity,
+    },
+    /// Take a contact out of the book. A name or a DID, as in `set-remark`.
+    Remove {
+        #[arg(value_name = "NAME")]
+        name: String,
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        own: OwnIdentity,
+    },
+    /// Turn a name into a DID. Name in, DID out, and nothing else on stdout.
+    ///
+    /// This is the one to call from an agent: the answer is a single line a script can use as
+    /// `msg send --to`, and a name that does not resolve is an error rather than an empty
+    /// result. A DID passed in comes back unchanged — the text form is its own answer, and
+    /// `--json` says so with `"source": "argument"`.
+    Resolve {
+        #[arg(value_name = "NAME")]
+        name: String,
+        /// The whole row instead of the bare DID, for a caller that wants the subject too.
         #[arg(long)]
         json: bool,
         #[command(flatten)]
@@ -943,6 +1040,21 @@ async fn main() -> anyhow::Result<()> {
                     &allow_private,
                 )
                 .await
+            }
+        },
+        Command::Contacts { command } => match command {
+            ContactsCommand::List { json, own } => cmd_contacts_list(&own, json, &allow_private).await,
+            ContactsCommand::Add { did, remark, clear_remark, json, own } => {
+                cmd_contacts_add(&own, &did, remark, clear_remark, json, &allow_private).await
+            }
+            ContactsCommand::SetRemark { name, remark, json, own } => {
+                cmd_contacts_set_remark(&own, &name, &remark, json, &allow_private).await
+            }
+            ContactsCommand::Remove { name, json, own } => {
+                cmd_contacts_remove(&own, &name, json, &allow_private).await
+            }
+            ContactsCommand::Resolve { name, json, own } => {
+                cmd_contacts_resolve(&own, &name, json, &allow_private).await
             }
         },
         Command::Group { command } => match command {
@@ -2437,9 +2549,37 @@ async fn cmd_msg_send(
     let sender = Sender::from_identity(&identity)?;
     let client = http_client()?;
 
+    // TODO6 §3.3: `--to` takes a name or a DID, and the shape of the argument decides which.
+    // A DID goes straight to discovery — it is already unambiguous, and the common
+    // `--to <did>` path should not pay a book round trip to be told so. Anything else is a
+    // name, and only the book can turn a name into an address.
+    let (to, named) = if looks_like_a_did(to) {
+        (to.to_string(), None)
+    } else {
+        let channel = open_channel(&client, &identity, allow_private).await?;
+        let book = fetch_contacts(&client, &channel).await?;
+        match lookup(&book, to) {
+            Lookup::One(contact) => (contact.did.clone(), Some(contact)),
+            // §3.3: refusing is the point. "Send to the wrong Alice" is the most expensive
+            // mistake this surface can make, and picking one of two is how it happens.
+            Lookup::Ambiguous(candidates) => return Err(ambiguous_name_error(to, &candidates).into()),
+            Lookup::None { .. } => return Err(unknown_name_error(to).into()),
+        }
+    };
+
     // The recipient's own document names the service that accepts its mail, so discovery is
     // per attempt and the policy is the target's, not ours.
-    let endpoint = discover(&client, to, allow_private).await?;
+    let endpoint = discover(&client, &to, allow_private).await?;
+
+    // A name that resolved is not visible in the peer's answer beyond `target_did`, so the
+    // resolution is printed where a human is reading. `--json` stays the peer's response
+    // verbatim; a script that wants to check first runs `contacts resolve`.
+    if !json {
+        if let Some(contact) = &named {
+            field("to:", Some(&json!(to)));
+            field("named:", Some(&json!(contact.name())));
+        }
+    }
 
     // P1 §6.2.6: for a message operation the sender SHOULD make `operation_id` the
     // `message_id`, and P3 §5.5 requires a retry to keep that pair unchanged. One flag
@@ -2484,7 +2624,7 @@ async fn cmd_msg_send(
                      Resolve the successor's DID first and send to that, or use the TS client."
                 )
             }
-            Err(rejection(DIRECT_SEND, to, error.code, anp_code, &error.message).into())
+            Err(rejection(DIRECT_SEND, &to, error.code, anp_code, &error.message).into())
         }
     }
 }
@@ -2624,7 +2764,7 @@ async fn cmd_msg_inbox(
     if include_read {
         body.insert("include_read".to_string(), json!(true));
     }
-    let result = call_extension(&client, &channel, INBOX_GET, body).await?;
+    let result = call_extension(&client, &channel, INBOX_GET, INBOX_PROFILE, body).await?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&result)?);
@@ -2659,7 +2799,7 @@ async fn cmd_msg_show(
 
     let mut body = Map::new();
     body.insert("message_ids".to_string(), json!([id]));
-    let result = call_extension(&client, &channel, MESSAGE_GET_BATCH, body).await?;
+    let result = call_extension(&client, &channel, MESSAGE_GET_BATCH, INBOX_PROFILE, body).await?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&result)?);
@@ -2720,7 +2860,7 @@ async fn cmd_msg_read(
     let mut body = Map::new();
     let count = message_ids.len();
     body.insert("message_ids".to_string(), json!(message_ids));
-    let result = call_extension(&client, &channel, INBOX_MARK_READ, body).await?;
+    let result = call_extension(&client, &channel, INBOX_MARK_READ, INBOX_PROFILE, body).await?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&result)?);
@@ -2746,7 +2886,7 @@ async fn unread_ids(client: &reqwest::Client, channel: &Channel) -> anyhow::Resu
         body.insert("limit".to_string(), json!(ALL_PAGE));
         body.insert("skip".to_string(), json!(skip));
         body.insert("include_read".to_string(), json!(false));
-        let page = call_extension(client, channel, INBOX_GET, body).await?;
+        let page = call_extension(client, channel, INBOX_GET, INBOX_PROFILE, body).await?;
 
         let rows = rows_of(&page, "messages");
         for row in &rows {
@@ -2760,6 +2900,229 @@ async fn unread_ids(client: &reqwest::Client, channel: &Channel) -> anyhow::Resu
             return Ok(ids);
         }
         skip += rows.len() as u64;
+    }
+}
+
+// ---- contacts (TODO6 §3) --------------------------------------------------------
+
+/// The whole book, as the identity in use has it.
+///
+/// One call and no paging: `contacts.list` takes no body and answers the whole table, which
+/// is what makes "two contacts answer to this name" answerable at all — a name can only be
+/// ambiguous against the full book, so a paged reader could call one Alice unique by having
+/// stopped before the other.
+async fn fetch_contacts(client: &reqwest::Client, channel: &Channel) -> anyhow::Result<Vec<Contact>> {
+    let result = call_extension(client, channel, CONTACTS_LIST, CONTACTS_PROFILE, Map::new()).await?;
+    Ok(book_from_json(&result)?)
+}
+
+/// A name or a DID as the DID to act on, over an already-fetched book.
+///
+/// The book is a parameter rather than fetched here so that a command which resolves and then
+/// writes reads it once; two reads would be able to disagree about a row that changed in
+/// between, and the disagreement would look like the wrong contact being renamed.
+fn resolve_did(book: &[Contact], input: &str) -> anyhow::Result<String> {
+    match lookup(book, input) {
+        Lookup::One(contact) => Ok(contact.did),
+        Lookup::Ambiguous(candidates) => Err(ambiguous_name_error(input, &candidates).into()),
+        Lookup::None { did_shaped: true } => Ok(input.to_string()),
+        Lookup::None { did_shaped: false } => Err(unknown_name_error(input).into()),
+    }
+}
+
+/// One row back out as JSON, in the shape the service used. `--json` here and the service's
+/// own answer are then the same document rather than two spellings of it.
+fn contact_json(contact: &Contact) -> Value {
+    json!({
+        "subject": contact.subject,
+        "did": contact.did,
+        "remark": contact.remark,
+        "created_at": contact.created_at,
+        "updated_at": contact.updated_at,
+    })
+}
+
+async fn cmd_contacts_list(
+    own: &OwnIdentity,
+    json: bool,
+    allow_private: &[String],
+) -> anyhow::Result<()> {
+    let (client, channel) = own_channel(own, allow_private).await?;
+    let book = fetch_contacts(&client, &channel).await?;
+
+    if json {
+        let rows: Vec<Value> = book.iter().map(contact_json).collect();
+        println!("{}", serde_json::to_string_pretty(&json!({ "contacts": rows }))?);
+        return Ok(());
+    }
+    if book.is_empty() {
+        println!("no contacts; add one with `agentx-cli contacts add <did> --remark <name>`");
+        return Ok(());
+    }
+    println!("{} contact{}", book.len(), if book.len() == 1 { "" } else { "s" });
+    for contact in &book {
+        println!("{}\t{}", contact.name(), contact.did);
+    }
+    Ok(())
+}
+
+async fn cmd_contacts_add(
+    own: &OwnIdentity,
+    did: &str,
+    remark: Option<String>,
+    clear_remark: bool,
+    json: bool,
+    allow_private: &[String],
+) -> anyhow::Result<()> {
+    // Checked before anything is opened: `subject_of` is total, so the service would take a
+    // name here and file it under a key no DID will ever match. See `not_a_did_error`.
+    if !looks_like_a_did(did) {
+        return Err(not_a_did_error(did).into());
+    }
+    if remark.as_deref() == Some("") {
+        anyhow::bail!("--remark cannot be empty; leave it out, or pass --clear-remark to drop one")
+    }
+
+    let (client, channel) = own_channel(own, allow_private).await?;
+    let book = fetch_contacts(&client, &channel).await?;
+    let subject = subject_of(did);
+    let existing = book.iter().find(|contact| contact.subject == subject);
+
+    // On the wire an absent `remark` clears it, which would make a second `add <did>` erase
+    // the name the first one wrote. So the decision belongs here: with no `--remark` and no
+    // `--clear-remark`, an existing remark is sent back unchanged — the update still happens
+    // (the DID is refreshed), the name is not touched.
+    let requested = match (&remark, clear_remark) {
+        (Some(name), _) => Some(name.clone()),
+        (None, true) => None,
+        (None, false) => existing.and_then(|contact| contact.remark.clone()),
+    };
+    let kept = remark.is_none() && !clear_remark && requested.is_some();
+
+    let mut body = Map::new();
+    body.insert("did".to_string(), json!(did));
+    if let Some(name) = &requested {
+        body.insert("remark".to_string(), json!(name));
+    }
+    let result = call_extension(&client, &channel, CONTACTS_PUT, CONTACTS_PROFILE, body).await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+    let created = result.get("created").and_then(Value::as_bool).unwrap_or(false);
+    let stored = result.get("contact").map(Contact::from_json).transpose()?;
+    let name = stored.as_ref().and_then(|contact| contact.remark.clone());
+    let verb = if created { "added" } else { "updated" };
+    match &name {
+        Some(name) if kept => println!("{verb} {did} (remark {name} unchanged)"),
+        Some(name) => println!("{verb} {name}\t{did}"),
+        None => println!("{verb} {did} (no remark)"),
+    }
+    Ok(())
+}
+
+async fn cmd_contacts_set_remark(
+    own: &OwnIdentity,
+    name: &str,
+    remark: &str,
+    json: bool,
+    allow_private: &[String],
+) -> anyhow::Result<()> {
+    if remark.is_empty() {
+        anyhow::bail!("a remark cannot be empty; `contacts add <did> --clear-remark` is how one is dropped")
+    }
+    let (client, channel) = own_channel(own, allow_private).await?;
+    let book = fetch_contacts(&client, &channel).await?;
+    // Resolved against the same book `--to` uses, so a name two contacts answer to is refused
+    // here rather than renaming whichever one came first.
+    let did = resolve_did(&book, name)?;
+
+    let mut body = Map::new();
+    body.insert("did".to_string(), json!(did));
+    body.insert("remark".to_string(), json!(remark));
+    let result = call_extension(&client, &channel, CONTACTS_PUT, CONTACTS_PROFILE, body).await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+    println!("{remark}\t{did}");
+    Ok(())
+}
+
+async fn cmd_contacts_remove(
+    own: &OwnIdentity,
+    name: &str,
+    json: bool,
+    allow_private: &[String],
+) -> anyhow::Result<()> {
+    let (client, channel) = own_channel(own, allow_private).await?;
+    let book = fetch_contacts(&client, &channel).await?;
+    let did = resolve_did(&book, name)?;
+
+    let mut body = Map::new();
+    body.insert("subject".to_string(), json!(subject_of(&did)));
+    let result = call_extension(&client, &channel, CONTACTS_REMOVE, CONTACTS_PROFILE, body).await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+    if result.get("removed").and_then(Value::as_bool) != Some(true) {
+        // Only reachable with a DID that was already gone — a name got this far by resolving
+        // to a row. Saying nothing was removed is the honest answer, and it is an error
+        // because the command did not do what it was asked to.
+        anyhow::bail!("{did} was not in the book; nothing to remove")
+    }
+    println!("removed\t{did}");
+    Ok(())
+}
+
+async fn cmd_contacts_resolve(
+    own: &OwnIdentity,
+    name: &str,
+    json: bool,
+    allow_private: &[String],
+) -> anyhow::Result<()> {
+    // A DID needs no book: it is already its own answer, and a caller that holds one is common
+    // enough to be worth not opening an identity for. This also makes the command total, which
+    // is the point of it — an agent can run `resolve` on whatever string it was handed,
+    // without first deciding which of the two it has.
+    if looks_like_a_did(name) {
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "did": name,
+                    "subject": subject_of(name),
+                    "remark": Value::Null,
+                    "source": "argument",
+                }))?
+            );
+        } else {
+            println!("{name}");
+        }
+        return Ok(());
+    }
+
+    let (client, channel) = own_channel(own, allow_private).await?;
+    let book = fetch_contacts(&client, &channel).await?;
+    match lookup(&book, name) {
+        Lookup::One(contact) => {
+            if json {
+                let mut row = contact_json(&contact);
+                row["source"] = json!("contacts");
+                println!("{}", serde_json::to_string_pretty(&row)?);
+            } else {
+                // The bare DID and nothing else: the answer is what a script feeds to
+                // `msg send --to`, and a decoration on stdout would be something to strip.
+                println!("{}", contact.did);
+            }
+            Ok(())
+        }
+        Lookup::Ambiguous(candidates) => Err(ambiguous_name_error(name, &candidates).into()),
+        Lookup::None { .. } => Err(unknown_name_error(name).into()),
     }
 }
 
