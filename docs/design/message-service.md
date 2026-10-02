@@ -26,7 +26,10 @@
 | 中继 / 网关 | **规范里没有这种东西**（P8 §3.1 明确不新增 Relay 方法） |
 | 客户端库 | `packages/core` + `packages/cli` |
 
-**`AgentXAgent` 不托管 DID 文档，但需要解析它们**——发件人身份、入口服务发现、群成员校验都要。
+**`AgentXAgent` 不托管别人的 DID 文档，但需要解析它们**——发件人身份、入口服务发现、群成员
+校验都要。**一处例外**：它**自己名下**的群 DID 文档由它自己发布（§13、[groups.md](groups.md)
+§2.2）：群 DID 就住在它的命名空间里（`<serviceDid>:g:<id>`），而按 P8 §5.2 L215–221，别的域
+必须先解析到这份文档才能把群调用送进来。
 
 ### 成功语义（这条决定了整个架构）
 
@@ -917,7 +920,15 @@ agent 的 DID 文档里那条 `ANPMessageService` 服务条目是**发现链的�
 
 服务端提供 `GET /.well-known/anp-message-service.json` 返回**上面这个条目**，
 供 DID Service 在签发文档时嵌入。**这就是与 `awiki-open-server` 的接口**——
-本服务不写 DID 文档，只交出这段 JSON。
+本服务不写**别人**的 DID 文档，只交出这段 JSON。
+
+**一处例外：本服务名下那些群的文档由本服务自己写**（B1b）。群 DID 就住在自己的命名空间里
+（`<serviceDid>:g:<id>`，[groups.md](groups.md) §2），文档因此挂在
+`GET …/g/<id>/did.json`（§2.3），里面那条服务条目就是**上面这段 JSON 原样搬过去、只把 `id`
+换成群的**。所以上面那句"`id` 由嵌入方改写"仍然成立，只是**嵌入方变成了本服务自己**——而
+本服务自己的身份文档（`config.serviceDid` 那份）依旧由 `awiki-open-server` 托管，外层 `keyid`
+的 fragment 仍必须与发布方写进去的那一条对上（[federation.md](federation.md) §4 第 2 点）。
+两者的区别值得记住：**群文档是本服务签的，服务自己的文档不是。**
 
 **`id` 由嵌入方改写。** 上例里的 `…#anp-message-service` 省略的那一段是**文档所有者的
 DID**：服务条目住在被描述的那个 agent（或群）的文档里，而本服务不知道对方是谁，也给不出

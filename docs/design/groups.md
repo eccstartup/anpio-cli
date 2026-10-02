@@ -62,8 +62,8 @@ awiki 的社交应用，这条接缝迟早要收回来。所以本服务从"只�
 ### 2.1 群自己的钥：随创建而生，与群行同生同死
 
 `group.create` 铸一把 per-group 的 Ed25519 私钥，存进 `group_keys` 表，与群行**同一个**
-`BEGIN IMMEDIATE` 事务。它是这份群的签名钥：本文 §7 的 `group_receipt.proof` 与 §2 那份
-（B1b 之后要发布的）DID 文档都由它签。
+`BEGIN IMMEDIATE` 事务。它是这份群的签名钥：本文 §7 的 `group_receipt.proof` 与 §2.2 那份
+DID 文档都由它签。
 
 三条取舍：
 

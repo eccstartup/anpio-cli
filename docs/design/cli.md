@@ -90,7 +90,9 @@ connectx did update  --target <uri> | --resume
 connectx did restore
 ```
 
-`did` 是**唯一会写 DID 文档**的地方。`connectx` 在这里是 `awiki-open-server` 的客户端。
+`did` 是**客户端侧**唯一会写 DID 文档的地方。`connectx` 在这里是 `awiki-open-server` 的客户端。
+（服务端也写 DID 文档，但只写**自己名下那些群**的——`GET …/g/<id>/did.json`，见
+[groups.md](groups.md) §2.2；服务自己的身份文档仍由 DID Service 托管。）
 
 ### 3.2 `anp` —— ANP server 的对端（去 ZK）
 
