@@ -230,7 +230,7 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 | 身份 | 换钥 / `update_document` | ~~做完~~（换钥是 `did update`；`update_document` 是 `did publish`，见 §6） |
 | 身份 | 换设备 | ~~不做~~（本机 awiki host 对它回 `device_key_or_root_change_not_supported` / `device_enrollment_or_removal_not_supported`，`replace_did` 直接 `not_supported`——不是没做，是对端没有这条路，见 §6） |
 | 库侧 | 信封 / 那一跳 HTTP / SSRF 逐跳 / 身份存储 / MLS store | ~~做完~~ |
-| 库侧 | 消息库 `messages.db`（§4、Phase 2） | **设计已定**（TODO6 §7，`a5727d4` → [client-messages.md](docs/design/client-messages.md)）；**实现没动** |
+| 库侧 | 消息库 `messages.db`（§4、Phase 2） | **设计已定 + 写入侧落地**（TODO6 §7，`a5727d4` 设计 → [client-messages.md](docs/design/client-messages.md)，`a04cc5e`/`5c3d5d8` 实现）；**读侧没动** |
 | 收束 | Phase 4：`packages/e2e` 覆盖新客户端 / 命令面定稿 / TS CLI 冻结 | 还没 |
 
 **Phase 0 —— 先证那条缝（spike，不进仓库）** —— [x] ~~已做完（2026-10-02）~~
@@ -667,12 +667,18 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
   别把它当成待办——按 §1 的判据，一条没有对端的命令行不是缺口，是噪音。
 - **与 TS `connectx` 并存**，`CONNECTX_HOME` 的处理见 §8-F。
 
-**Phase 2 —— 消息库**（设计已定，实现没动）
+**Phase 2 —— 消息库**（设计已定；写入侧落地，读侧没动）
 - [x] ~~`messages.db`（§4）+ 本地游标 + 与 `mls/` 的分工；read 状态与对账规则落定。~~
       —— **2026-10-02（`a5727d4`）**：落在 [docs/design/client-messages.md](docs/design/client-messages.md)
       （TODO6 §7）。方向按 §0.1 第 2、3 条执行；两处补充是这一步才看出来的：
       **没有跨库事务所以"落库 → 推游标 → ack"的先后是契约**，以及**换钥之后服务端
       `deliveries.owner_did` 不会跟着走**（这一半要服务端补）。
+      —— **2026-10-02 续（`a04cc5e`、`5c3d5d8`）**：写入侧实现完
+      （`crate::messages` + 挂在 `ListenView` 外面的 `RecordingView`）。
+      读侧是刻意的下一步，见下面那条。
+- [ ] 写出侧：`msg send` / `group send` / `group e2ee send` **成功之后**各落一行（`direction: out`）。
+      这一条与读侧无关，两件都能先做。
+- [ ] 读侧待裁定：`msg inbox` 变本地优先 / 新增 `msg history` / 加 `--local`（那份文档 §8）。
 - [ ] 这一步**触及服务端**（ack / 保留 / 补拉），与"把服务做好"合并做。
 
 **Phase 3 —— 逐族补齐**（每族一次提交）

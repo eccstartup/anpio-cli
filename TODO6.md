@@ -508,6 +508,20 @@ cargo run --manifest-path rust/Cargo.toml -- me set --agent e2ealice
       **一行代码还没写**：§7 记了动手前三件事（`rusqlite 0.32.1` 已在树里、零构建成本；
       写入口挂在事件消费那一侧），§8 建议**先只写、不改读**——`msg inbox` 要不要变成本地优先
       是一次要用户裁定的动作（三种做法见那份文档 §8）。
+      —— **2026-10-02 续（`a04cc5e`、`5c3d5d8`、`4a98d3b`、`9b0a2af`）：写入侧已落地**。
+      `crate::messages` 是库（`MessageStore`：表、去重、单事务里"先落行后推游标"），
+      `RecordingView` 是那个挂法——包在 `ListenView` 外面，`cmd_msg_listen` 里装配，于是
+      **到消费侧才落库**，终端看到的一个字不变；写失败只在 stderr 说一句、不退出，
+      因为那一行的游标没前进、下次重连服务端会重放。P6 的 §12 帧走设备队列、没有交付号，
+      所以只落行不动游标。**读侧仍然一行没动**（`msg inbox` 还是只问服务端），§7 第 3 条待裁定。
+      落地的过程改掉了这份文档两处，都是实现逼出来的：
+      (a) **`epoch` 换成了 `group_state_version`**——P6 每条消息的版本是密文自己指名的
+      `group_state_ref.group_state_version`（`anp` 1.0.5 的 `V2GroupStateRef`，十进制字符串），
+      本地 epoch 是 crate 的状态、两个文件各滚各的；对账要问的正是"对面在哪一版上加的密"。
+      两列在库里都是 INTEGER（服务端自己的就是整数列，它还得自增前一个），转不动就拒整行。
+      (b) **补上 `messages.endpoint`**：换了服务之后同一个会话里躺着两套编号，
+      没有这一列 `service_seq` 就是一串没有命名空间的数字。
+      顺带修掉 realtime.md 里第三、第四份已经过期的"本地不存游标 / 尚未落地"。
 - [x] ~~**命令面定稿**：六族 24 条 + `did publish` / `me` + §3、§4 新增的，一起冻结形状。~~
       —— **2026-10-02 完成（`053c73e`）：定稿落成一份 50 个页面的清单**（九族 + 各子命令，
       `group e2ee` 六条在内），在 `rust/crates/agentx-cli/tests/cli_surface.rs` 的
