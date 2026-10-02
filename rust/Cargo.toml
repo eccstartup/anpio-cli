@@ -50,3 +50,9 @@ base64 = "0.22"
 ed25519-dalek = { version = "=2.1.1", features = ["rand_core"] }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 rand = "0.8"
+# The local message record (`messages.db`, TODO6 §7). **The same version and the same
+# `bundled` feature the `anp` crate's `mls` feature already builds** — so this adds no
+# second copy of SQLite's C source to the build, which is the one cost client-mls.md §5 #1
+# worried about. Kept in step with `Cargo.lock` deliberately: a different version here
+# would silently compile a second SQLite.
+rusqlite = { version = "0.32", features = ["bundled"] }

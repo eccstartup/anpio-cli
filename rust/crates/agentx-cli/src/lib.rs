@@ -18,6 +18,7 @@ pub mod group_receive;
 pub mod group_remarks;
 pub mod identity;
 pub mod message;
+pub mod messages;
 pub mod mls;
 
 pub use error::{AgentxError, Result};

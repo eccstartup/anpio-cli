@@ -74,6 +74,14 @@ pub struct ListenMessage {
     /// nothing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// When the body carried a JSON `payload`, that object — **not serialized**, because the
+    /// line a consumer reads already has it: `text` above is the same value pretty-printed,
+    /// which is what a renderer wants. This field exists for the local record
+    /// (client-messages.md §3), which keeps §7.4's distinction between "the text was this
+    /// string" and "the payload was this object" instead of flattening it. So when this is
+    /// set, `text` is a rendering of it and not a second body.
+    #[serde(skip_serializing)]
+    pub payload: Option<Value>,
     /// When the service accepted it, as the service reported it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accepted_at: Option<String>,
@@ -160,6 +168,9 @@ pub fn decode_message(frame: &Value, seq: u64) -> Option<ListenMessage> {
         content_type: string_at(meta, "content_type")
             .unwrap_or_else(|| "application/octet-stream".to_string()),
         text: body_text(body),
+        // §7.4's second arm, kept as the object it was so the local record can tell the two
+        // arms apart (`body_text` above renders it into a line).
+        payload: body.and_then(|body| body.get("payload")).cloned(),
         accepted_at: string_at(meta, "created_at"),
     })
 }
@@ -1392,6 +1403,7 @@ mod tests {
                     from: "did:wba:localhost%3A8765:user:alice".to_string(),
                     message_id: "m-1".to_string(),
                     group_event_seq: None,
+                    group_state_version: "3".to_string(),
                     accepted_at: None,
                     content_type: "text/plain".to_string(),
                     text: Some("group hello".to_string()),
@@ -1590,6 +1602,7 @@ mod tests {
             group_did: Some("did:wba:example.com:group:team".to_string()),
             content_type: "text/plain".to_string(),
             text: Some("attachment sent".to_string()),
+            payload: None,
             accepted_at: None,
         };
         let rendered = render_message(&message);
@@ -1608,6 +1621,7 @@ mod tests {
             group_did: None,
             content_type: "application/octet-stream".to_string(),
             text: None,
+            payload: None,
             accepted_at: None,
         };
         assert!(render_message(&message).contains("(application/octet-stream body, not rendered)"));
@@ -1622,6 +1636,7 @@ mod tests {
             from: "did:wba:example.com:user:bob".to_string(),
             message_id: "m".to_string(),
             group_event_seq: Some("7".to_string()),
+            group_state_version: "3".to_string(),
             accepted_at: None,
             content_type: "text/plain".to_string(),
             text: Some("secret".to_string()),
@@ -1699,6 +1714,7 @@ mod tests {
             group_did: None,
             content_type: "text/plain".to_string(),
             text: Some("hello".to_string()),
+            payload: None,
             accepted_at: Some("2026-10-02T00:00:00Z".to_string()),
         });
         assert_eq!(

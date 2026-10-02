@@ -68,6 +68,11 @@ pub enum GroupEvent {
         /// §12.5: the same value in every leaf's copy of one accepted `send`. The ordering
         /// field, exactly as `group.send`'s response reports it for the sender (§8.9.4).
         group_event_seq: Option<String>,
+        /// §12.5: the group state this ciphertext was encrypted against — the cipher's own
+        /// `group_state_ref.group_state_version`, passed through untouched. A decimal string,
+        /// and **not** the crate's stored epoch: it identifies the state the *sender* held, so
+        /// it is the only version a locally recorded row can be reconciled on later.
+        group_state_version: String,
         accepted_at: Option<String>,
         content_type: String,
         /// §7.4's exactly-one-of, as it came out of the ciphertext. A JSON `payload` is shown
@@ -195,6 +200,8 @@ impl GroupReceiver {
     async fn message(&self, frame: &Value) -> Result<GroupEvent> {
         let incoming = incoming_of_frame(frame)?;
         let group_did = incoming.cipher.group_state_ref.group_did.clone();
+        // Read before `incoming.cipher` moves into `DecryptInput` below.
+        let group_state_version = incoming.cipher.group_state_ref.group_state_version.clone();
         let sender_did_document = self.document_of(&incoming.meta.sender_did).await?;
 
         let plaintext: V2GroupApplicationPlaintext = decrypt_received(
@@ -213,6 +220,7 @@ impl GroupReceiver {
             from: incoming.meta.sender_did,
             message_id: incoming.meta.message_id,
             group_event_seq: incoming.group_event_seq,
+            group_state_version,
             accepted_at: incoming.accepted_at,
             content_type: plaintext.application_content_type.clone(),
             text: plaintext.text,
