@@ -1,14 +1,16 @@
-// A3c —— P4 §8.12 的两条触发路里，**请求触发**的那一条。
+// A3c —— P4 §8.12 的触发路，以及它们共用的那一段受理前验证。
 //
-// 场景是"对端的 DID 换了，我们还没同步"，而它下一步就拿着新 DID 来办事。规范把这件事写成
-// 一个宿主动作而不是一个方法：`group.member_did_update` 被调用 MUST 回 `-32601`（§8.12
-// L934），所以**没有任何客户端能让它发生**——它只能由 Host 自己在一件别的事的路上顺手做完。
-// 规范点名了两种顺手：一条新 DID 发起的请求（本条），以及往旧 DID 投递时发现了合规的后继
-// （投递触发）。
+// 场景是"对端的 DID 换了，我们还没同步"，而它下一步就拿着新 DID 来办事、或者我们正往那个旧
+// DID 投东西。规范把这件事写成一个宿主动作而不是一个方法：`group.member_did_update` 被调用
+// MUST 回 `-32601`（§8.12 L934），所以**没有任何客户端能让它发生**——它只能由 Host 自己在一件
+// 别的事的路上顺手做完。规范点名了三条路（§8.12 L946 "MAY trigger …" 那一句）：一条新 DID
+// 发起的请求（{@link adoptMemberDidForRequest}）、往旧 DID 投递时发现了合规的后继
+// （{@link adoptMemberDidForDelivery}），以及定时刷新（A3c-4，尚未落地，见 TODO2.md）。前两条
+// 都收敛到 `groups.ts` 的 `applyMemberDidUpdate`，靠 §8.12 那个确定性操作标识幂等收敛。
 //
 // 这个文件拥有三件事：
 //
-//   1. **触发面**。§8.12 L946 逐字列了五个方法：`group.send`、`group.leave`、
+//   1. **请求触发的触发面**。§8.12 L946 逐字列了五个方法：`group.send`、`group.leave`、
 //      `group.update_profile`、`group.update_policy`，以及**私有群的** `group.get_info`。
 //      多一个都不做：`group.create` 那时还没有名册，`group.join` / `group.add` 的目标是别人，
 //      `group.remove` 要的是调用方已有的权限。
@@ -223,4 +225,95 @@ function predecessorCandidates(storage: Storage, groupDid: string, actorDid: str
     }
   }
   return candidates
+}
+
+// ---- 投递触发 ----------------------------------------------------------------
+
+export interface MemberDidDeliveryTriggerInput {
+  storage: Storage
+  config: Config
+  groupDid: string
+  /** 队列行上那个 DID，也就是**名册里当前存着的那个**——要投递的目标。 */
+  recipientDid: string
+  acceptedAt: string
+  /** 测试注入点，见 {@link DidChainResolver}。 */
+  resolveChain?: DidChainResolver
+  log?: (line: string) => void
+}
+
+/**
+ * §8.12 L946：**投递触发**。与 {@link adoptMemberDidForRequest} 是同一件事的两个方向——那边
+ * 来的是一个**新 DID 发起的请求**（所以要从名册往前找它的前身），这边是我们正要往一个**名册里
+ * 的旧 DID** 投东西（所以那个旧 DID 就是起点，往前走的步子是直接读出来的）。
+ *
+ * 规范把它写成 MAY（"MAY trigger an update when … delivery fails …"），触发面因此很宽；本服务
+ * 只在**投递前那次资格复核**上顺路问一次，理由记在 `delivery/deviceQueue.ts` 那处调用。
+ *
+ * 一条也不成立时**静默返回 `false`**，让这次投递照常往下走。与请求触发同一个取舍：这里的每
+ * 一条"不成立"都不是投递的错误，而是"这次投递不构成一次换 DID"，不该把一次正常的投递变成失败。
+ */
+export async function adoptMemberDidForDelivery(
+  input: MemberDidDeliveryTriggerInput,
+): Promise<boolean> {
+  const { storage, groupDid, recipientDid } = input
+  const log = input.log ?? ((line: string): void => void process.stderr.write(`${line}\n`))
+
+  const group = storage.group(groupDid)
+  // 不托管这个群：没有名册可改。（队列行理论上不会指到一个我们不托管的群，但读完再判比假设便宜。）
+  if (group === undefined) return false
+
+  // §8.12 第 1 条：恰好一条 `active` 且当前 DID 是这个旧 DID 的记录。不是 active（已移除 /
+  // 已离开）就没有要补的名册事实，§8.12 的原子那一段也明确要求改名针对一条 active 记录。
+  const member = storage.groupMember(groupDid, recipientDid)
+  if (member === undefined || member.membershipStatus !== 'active') return false
+
+  // §8.12 第 2 条：从**记录里当前存着的那个 DID**出发走完整的转移链。
+  const resolveChain = input.resolveChain ?? chainResolverFor(input.config)
+  let chain: DidChain
+  try {
+    chain = await resolveChain(recipientDid)
+  } catch (err) {
+    // 链断了、成环了、超长、或对端 DID 服务器不可达。前三种是 §8.12 第 4 条要拒的，最后一种
+    // 是"现在判不了"——三种都不采纳，投递本身接下去照常走（合格就投，不合格由资格复核那一层
+    // 丢弃）。与请求触发同一处置。
+    log(
+      `anp: could not resolve the DID chain of ${recipientDid} for ${groupDid}: ${err instanceof Error ? err.message : String(err)}`,
+    )
+    return false
+  }
+  // 名册里那个 DID 就是当前的：没有要补的事。（这是绝大多数投递走的那条路。）
+  if (!chain.superseded) return false
+  // §8.12 第 3 条：档位。用户裁定按甲——只收这两档，与请求触发同一口径。
+  if (!ACCEPTED_ASSURANCES.includes(chain.assurance)) {
+    log(
+      `anp: refusing the DID update of ${groupDid} member ${recipientDid} -> ${chain.currentDid}: assurance ${chain.assurance} is below policy`,
+    )
+    return false
+  }
+  // §8.12 第 4 条："confirm that the new DID does not belong to another active member"。请求触发
+  // 那一侧靠"候选唯一"兜住，这边没有候选可言（起点就是确定的一行），所以直接查新 DID。
+  const clash = storage.groupMember(groupDid, chain.currentDid)
+  if (clash !== undefined && clash.membershipStatus === 'active') {
+    log(
+      `anp: ${chain.currentDid} is already an active member of ${groupDid}; not adopting it as the successor of ${recipientDid}`,
+    )
+    return false
+  }
+
+  // §8.12 第 5 条的比较并交换，以及 "after acceptance" 那一整段。返回 `false` 表示另一条触发路
+  // （一次并发请求，或定时刷新）已经改完了——那是收敛，不是失败。
+  const applied = applyMemberDidUpdate({
+    storage,
+    hostServiceDid: input.config.serviceDid,
+    groupDid,
+    previousDid: recipientDid,
+    subjectDid: chain.currentDid,
+    acceptedAt: input.acceptedAt,
+  })
+  if (applied) {
+    log(
+      `anp: ${groupDid} member ${recipientDid} -> ${chain.currentDid} (assurance ${chain.assurance}, operation ${memberDidUpdateOperationId(groupDid, recipientDid, chain.currentDid)}, via delivery)`,
+    )
+  }
+  return applied
 }

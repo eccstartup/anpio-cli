@@ -19,6 +19,8 @@
 //      已撤销的设备投递新的服务数据。两个例外也在这里：§12.3 的最终 Remove 通知（它生来就是发
 //      给一台已经不在群里的设备的），以及**已经被移除的那条 leaf 队列里已经入队的信封**
 //      （§12.3 选定的 SHOULD 那条：让它们按序投完，最终通知压在最后）。
+//      §8.12 的**投递触发**也挂在这一层（`deliver()` 里那次资格复核之前）：正要投的这个旧 DID
+//      也许已经有合规后继，那样先把名册改过来再说（`rpc/memberDidUpdate.ts`）。
 //   3. **本地投递**。收件人就住在本服务上时不走 HTTP 回环（与 P4 worker 同一条理由），而是
 //      直接推给它自己那条 WebSocket 订阅——P6 的信封在 `deliveries` 里没有行，所以这里没有
 //      第二条路可走（[e2ee-group.md] §6 记了为什么不给它写行）。设备不在线不当成失败：推一次
@@ -49,6 +51,7 @@ import type { Config } from '../config'
 import { isOurOwnIngress } from '../http/server'
 import { checkDevice, isRejection } from '../rpc/eligibility'
 import { GROUP_E2EE_DEVICE } from '../rpc/groupE2ee'
+import { adoptMemberDidForDelivery, type DidChainResolver } from '../rpc/memberDidUpdate'
 import type { Storage, StoredDeviceEnvelope } from '../storage/types'
 import type { SubscriberRegistry } from '../stream/registry'
 
@@ -72,6 +75,9 @@ export interface DeviceQueueOptions {
   /** 默认 core 的 `DidDeviceResolver`。与 {@link locator} 同一个理由可换：投递前的资格复核
    *  要读对方的 `deviceManifest`，测试不该为此上网。 */
   deviceResolver?: DeviceResolver
+  /** §8.12 投递触发用的转移链解析（`rpc/memberDidUpdate.ts`）。默认就是那个模块自己的实现，
+   *  可换是为了让测试不必上网——与 {@link deviceResolver} 同一个理由。 */
+  chainResolver?: DidChainResolver
   locateOptions?: LocateOptions
   log?: (line: string) => void
   now?: () => Date
@@ -105,6 +111,7 @@ export function createDeviceQueueWorker(options: DeviceQueueOptions): DeviceQueu
   const { config, storage, registry } = options
   const locator = options.locator ?? new DidServiceLocator()
   const deviceResolver = options.deviceResolver ?? new DidDeviceResolver()
+  const chainResolver = options.chainResolver
   const locateOptions = options.locateOptions ?? config.didResolution
   const log = options.log ?? ((line: string): void => void process.stderr.write(`${line}\n`))
   const now = options.now ?? ((): Date => new Date())
@@ -186,6 +193,26 @@ export function createDeviceQueueWorker(options: DeviceQueueOptions): DeviceQueu
       // 一次投递失败，应当记一次尝试、退避重试。只有文档取回来了、而它里面没有这台设备
       // （或它的钥引用不再被授权），才是一个**判定**。
       if (step === 'check') {
+        // §8.12 L946 的**投递触发**（MAY）：这个收件人的 DID 也许已经有合规的后继，名册该先改
+        // 过来。问在资格复核**之前**，是因为"主人换了 DID"与"设备被撤销"在资格复核那里可能长
+        // 得一样（都读不到当前文档），而处置相反：前者只改名册、群随之按 §10.5 暂停，后者才
+        // 丢弃。这次解析与紧接着的 `checkDevice` 共用同一份文档缓存（`config.didResolution`），
+        // 所以热路径上没有多出来的网络往返。
+        //
+        // 采纳之后就停手：名册搬到了新 DID，旧 DID 的 leaf 还在投影里，§10.5 的暂停成立，这条
+        // 信封留在队里——它等的不是时间是一次控制动作（owner 按编排退役旧 leaf），之后走 §12.3
+        // 的例外（被移除 leaf 的已入队信封按序投完）。重排没有意义，所以返回 `false`。
+        const adopted = await adoptMemberDidForDelivery({
+          storage,
+          config,
+          groupDid: row.groupDid,
+          recipientDid: row.recipientDid,
+          acceptedAt: at.toISOString(),
+          ...(chainResolver !== undefined ? { resolveChain: chainResolver } : {}),
+          log,
+        })
+        if (adopted) return false
+
         const outcome = await checkDevice({
           resolver: deviceResolver,
           requirement: GROUP_E2EE_DEVICE,

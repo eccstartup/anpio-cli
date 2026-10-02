@@ -2,9 +2,20 @@
 // 所以"这一轮到底发了几封、发给谁、发的是哪一份字节"全部可观测。
 
 import { describe, expect, it } from 'vitest'
-import type { DeviceEntry, DeviceResolver, LocateOptions, ServiceEntry, ServiceLocator } from '@agentx/core'
+import {
+  stableSubjectId,
+  subjectOf,
+  type DeviceEntry,
+  type DeviceResolver,
+  type DidChain,
+  type DidChainAssurance,
+  type LocateOptions,
+  type ServiceEntry,
+  type ServiceLocator,
+} from '@agentx/core'
 import { loadConfig } from '../config'
 import { GROUP_E2EE_DEVICE } from '../rpc/groupE2ee'
+import type { DidChainResolver } from '../rpc/memberDidUpdate'
 import { openStorage } from '../storage/sqlite'
 import type { Storage, StoredDeviceEnvelope } from '../storage/types'
 import { createSubscriberRegistry } from '../stream/registry'
@@ -13,6 +24,7 @@ import { createDeviceQueueWorker } from './deviceQueue'
 
 const GROUP = 'did:wba:host.example:group:g1:e1_grp'
 const ALICE = 'did:wba:peer.example:user:alice:e1_aaa'
+const ALICE_SUCCESSOR = 'did:wba:peer.example:user:alice:e2_ccc'
 const BOB = 'did:wba:peer.example:user:bob:e1_bbb'
 const ALICE_DEVICE = 'dev-alice-1'
 const BOB_DEVICE = 'dev-bob-1'
@@ -68,6 +80,21 @@ function policy(handler: (url: string, init: RequestInit) => Promise<Response>, 
   }
 }
 
+/** §8.12 投递触发读的那条转移链。`currentDid === did` 就是"没换"。 */
+function chainResolverTo(currentDid: string, assurance: DidChainAssurance = 'verified'): DidChainResolver {
+  return async (did: string): Promise<DidChain> => ({
+    did,
+    subject: subjectOf(currentDid),
+    stableSubjectId: stableSubjectId(currentDid),
+    currentDid,
+    superseded: currentDid !== did,
+    assurance,
+    document: {},
+    docUrl: `https://peer.example/${currentDid}`,
+    hops: [],
+  })
+}
+
 /** 一条 leaf 的投影，加上它所属的 P4 成员行。`status` 传非 active 就是 §10.4 那个"整个成员
  *  要在 MLS 那边收尾"的中间态。 */
 function seedLeaf(
@@ -105,6 +132,22 @@ function envelope(deviceId: string, kind = 'incoming'): string {
   })
 }
 
+/** P4 群那一行。§8.12 的改名要推两个计数器（`advanceGroupCounters`），所以走投递触发那条
+ *  路的测试必须先有这一行——共用的 `seedLeaf` 不建它，免得动到别处那些只需要投影的用例。 */
+function seedGroup(storage: Storage): void {
+  if (storage.group(GROUP) !== undefined) return
+  storage.insertGroup({
+    groupDid: GROUP,
+    hostServiceDid: 'did:wba:host.example',
+    groupStateVersion: 1,
+    groupEventSeq: 1,
+    groupProfileJson: JSON.stringify({ group_name: 'g1', discoverability: 'private' }),
+    groupPolicyJson: JSON.stringify({}),
+    createdAt: NOW.toISOString(),
+    creatorDid: ALICE,
+  })
+}
+
 interface Harness {
   storage: Storage
   logs: string[]
@@ -123,6 +166,7 @@ function harness(
   overrides: {
     locator?: ServiceLocator
     deviceResolver?: DeviceResolver
+    chainResolver?: DidChainResolver
     locateOptions?: LocateOptions
     maxAttempts?: number
     maxQueueAgeMs?: number
@@ -140,6 +184,7 @@ function harness(
     registry,
     locator: overrides.locator ?? locatorOf([PEER]),
     deviceResolver: overrides.deviceResolver ?? deviceResolverOf('eligible'),
+    ...(overrides.chainResolver !== undefined ? { chainResolver: overrides.chainResolver } : {}),
     locateOptions: overrides.locateOptions ?? policy(async () => new Response('', { status: 200 })),
     log: (line) => logs.push(line),
     now: () => new Date(clock),
@@ -540,5 +585,127 @@ describe('retention is bounded (§12.6)', () => {
 
     expect(posted).toEqual([ALICE_DEVICE])
     expect(queued(h.storage)).toEqual([])
+  })
+})
+
+// ---- §8.12 的投递触发 --------------------------------------------------------
+//
+// 场景：名册里存的是旧 DID，我们正要往它投东西，而它其实已经有合规后继了。规范把这件事写成
+// 一条 MAY（§8.12 L946 "MAY trigger an update when … delivery fails …"），本服务只在投递前
+// 那次资格复核上顺路问一次。采纳之后旧 DID 的 leaf 还在、§10.5 的暂停成立，这条信封留在队里，
+// 等 owner 按编排退役旧 leaf。
+
+describe('adopting a member DID change on the delivery path (§8.12)', () => {
+  it('updates the roster and holds the envelope when the roster DID has a verified successor', async () => {
+    let posted = 0
+    const h = harness({
+      chainResolver: chainResolverTo(ALICE_SUCCESSOR),
+      locateOptions: policy(async () => {
+        posted += 1
+        return new Response('', { status: 200 })
+      }),
+    })
+    seedGroup(h.storage)
+    seedLeaf(h.storage, ALICE, ALICE_DEVICE)
+    h.enqueue(ALICE, ALICE_DEVICE)
+
+    await h.worker.runOnce()
+
+    // §8.12 "after acceptance"：名册搬到了新 DID，旧行没了，`role` 这些靠"改一行"保留。
+    expect(h.storage.groupMember(GROUP, ALICE)).toBeUndefined()
+    expect(h.storage.groupMember(GROUP, ALICE_SUCCESSOR)?.membershipStatus).toBe('active')
+    // 旧 DID 的 leaf 一行不动——§10.5 的暂停正是靠它成立。
+    expect(h.storage.groupLeaf(GROUP, ALICE, ALICE_DEVICE)?.state).toBe('active')
+    expect(h.storage.groupDidUpdate(GROUP)?.progress).toBe('add-pending')
+    // 这条信封既没出去，也还在队里：它等的是一次控制动作，不是时间。
+    expect(posted).toBe(0)
+    expect(queued(h.storage)).toHaveLength(1)
+    expect(h.logs.some((line) => line.includes('via delivery'))).toBe(true)
+  })
+
+  it('delivers normally when the roster DID is not superseded', async () => {
+    const posted: string[] = []
+    const h = harness({
+      chainResolver: chainResolverTo(ALICE),
+      locateOptions: policy(async (_url, init) => {
+        posted.push(JSON.parse(String(init.body)).params.meta.recipient_device_id)
+        return new Response('', { status: 200 })
+      }),
+    })
+    seedGroup(h.storage)
+    seedLeaf(h.storage, ALICE, ALICE_DEVICE)
+    h.enqueue(ALICE, ALICE_DEVICE)
+
+    await h.worker.runOnce()
+
+    expect(posted).toEqual([ALICE_DEVICE])
+    expect(h.storage.groupMember(GROUP, ALICE)?.membershipStatus).toBe('active')
+    expect(h.storage.groupDidUpdate(GROUP)).toBeUndefined()
+  })
+
+  it('refuses a successor below the assurance policy, and delivers to the old leaf instead', async () => {
+    // 用户裁定按甲：只收 verified / recovery_verified。`provider_asserted` 不建立连续性，
+    // 名册不动，投递照常。
+    const posted: string[] = []
+    const h = harness({
+      chainResolver: chainResolverTo(ALICE_SUCCESSOR, 'provider_asserted'),
+      locateOptions: policy(async (_url, init) => {
+        posted.push(JSON.parse(String(init.body)).params.meta.recipient_device_id)
+        return new Response('', { status: 200 })
+      }),
+    })
+    seedGroup(h.storage)
+    seedLeaf(h.storage, ALICE, ALICE_DEVICE)
+    h.enqueue(ALICE, ALICE_DEVICE)
+
+    await h.worker.runOnce()
+
+    expect(posted).toEqual([ALICE_DEVICE])
+    expect(h.storage.groupMember(GROUP, ALICE)?.membershipStatus).toBe('active')
+    expect(h.storage.groupMember(GROUP, ALICE_SUCCESSOR)).toBeUndefined()
+    expect(h.logs.some((line) => line.includes('assurance provider_asserted'))).toBe(true)
+  })
+
+  it('does not adopt a successor that is already an active member (§8.12 item 4)', async () => {
+    let posted = 0
+    const h = harness({
+      chainResolver: chainResolverTo(ALICE_SUCCESSOR),
+      locateOptions: policy(async () => {
+        posted += 1
+        return new Response('', { status: 200 })
+      }),
+    })
+    seedGroup(h.storage)
+    seedLeaf(h.storage, ALICE, ALICE_DEVICE)
+    seedLeaf(h.storage, ALICE_SUCCESSOR, 'dev-alice-2')
+    h.enqueue(ALICE, ALICE_DEVICE)
+
+    await h.worker.runOnce()
+
+    // 两行都还在：新 DID 已经是一行 active 成员，采纳会让它在名册里有两个答案。
+    expect(h.storage.groupMember(GROUP, ALICE)?.membershipStatus).toBe('active')
+    expect(h.storage.groupMember(GROUP, ALICE_SUCCESSOR)?.membershipStatus).toBe('active')
+    expect(posted).toBe(1)
+  })
+
+  it('leaves the roster alone when the recipient is no longer an active member', async () => {
+    // §8.12 第 1 条：没有 active 记录就没有要补的名册事实；这条 leaf 的队列由 §10.4 的
+    // 中间态按住（`projected()` 回 `hold`），投递触发那一步根本走不到。
+    let posted = 0
+    const h = harness({
+      chainResolver: chainResolverTo(ALICE_SUCCESSOR),
+      locateOptions: policy(async () => {
+        posted += 1
+        return new Response('', { status: 200 })
+      }),
+    })
+    seedGroup(h.storage)
+    seedLeaf(h.storage, ALICE, ALICE_DEVICE, 'active', 'removed')
+    h.enqueue(ALICE, ALICE_DEVICE)
+
+    await h.worker.runOnce()
+
+    expect(posted).toBe(0)
+    expect(h.storage.groupMember(GROUP, ALICE_SUCCESSOR)).toBeUndefined()
   })
 })
