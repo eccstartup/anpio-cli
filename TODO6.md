@@ -75,16 +75,31 @@
       `b24f14d`（did / agent 与约定）、`88090a1`（msg）、`8198e23`（group 含 e2ee）、
       `2be3599`（contacts / me / anp / discover / version）。选加成而不是重写，是为了
       不把已有的"为什么"降级成一张表。
-- [ ] `vercel/reference/cli.md` 与 `vercel/en/reference/cli.md`：按 2.1 的裁定改写，
+- [x] **`vercel/reference/cli.md` 与 `vercel/en/reference/cli.md`：按 2.1 的裁定改写**，
       并**同时改 `see` 指向的那批页面**（`cli.md` §3 记的门禁只管"链接还活着"，
       不管内容一致——所以这条是人手的活，别指望门禁替你发现）。
+      —— 2026-10-02 完成（`aad660b`）：两页重写成 `agentx-cli`（怎么装、store 根、身份选择链、
+      退出码与 `Error: <码>: <人话>`、逐族表 `did`/`agent`、`msg`、`contacts`、`group`（含
+      `e2ee`）、`anp`、`me`、`discover`/`version`，以及调用方必须接住的那几条拒绝）。
+      页面顶部有一句"`connectx` 已冻结、其余指南仍是 connectx 写法、正在迁移"——站点对自己的
+      过渡状态说实话，而不是自相矛盾。导航标签、站点描述与**八处**入站链接文本一并改名；
+      `npx vitepress build` 全页渲染、无死链。
+- [ ] **文档站其余页面里的 `connectx` 例子还没换。** 参考页已指向 `agentx-cli`，但
+      `quickstart.md`、`introduction.md`、`messages.md`、`realtime.md`、`groups.md`、`e2ee.md`、
+      `deploy.md` 的**正文**仍在教 `npx connectx …`（各自 ×2 语言）。按 2.1 的裁定
+      （`connectx`"不再是文档入口"）这些都该换，但那是一次跨十来页的正文改写，且 `quickstart`
+      的安装那段要从 `npx` 改成"从源码 build"，**需要你点头再动**：甲=现在就整体换；
+      乙=只在各页加一句"另有 `agentx-cli`，见参考页"，正文维持现状。
 - [ ] `skill/connectx/SKILL.md`：按 2.1 改名/重写，并**把 `help.test.ts` 的门禁跟着改**
       （它拿 skill 里逐字给出的调用去和命令面对账，命令面变了它就该红）。
 - [ ] `docs/design/cli.md` §8 的存储布局：现在是 `~/.connectx/` + `key.json`（keystore V3），
       与 Rust 的 `~/.agentx-cli/<agent>/<profile>/{identity.json,session.json}` **不同**。
       要么写两段，要么写一段并把差异点名。
-- [ ] **`did publish` 与 `me` 还没有任何用户文档。** 它们不在 `cli.md` §3 的命令面里
+- [x] ~~**`did publish` 与 `me` 还没有任何用户文档。**~~ 它们不在 `cli.md` §3 的命令面里
       （那节列的是 `connectx`），也不在文档站上。文档要跟上。
+      —— 2026-10-02 完成：`rust/README.md` 的 `did`/`me` 条（`b24f14d` 起）已逐条写清
+      （`did publish` 的三步、CAS、重签、忽略 `proof` 的比对；`me` 的字段映射与"只发点过名的
+      字段"），文档站的参考页（`aad660b`）也各有一节。
 - [ ] **§3 与 §4 的每一条命令，落地时同时写文档。** 命令面和文档在同一次改动里，
       别攒着——TODO5 攒了一次，结果就是 `did publish` / `me` 至今无文档。
       —— 进度：**§3 的 `contacts` 一族已随 `cf4b7dd` 落地**，文档同批写完
