@@ -11,4 +11,8 @@ mod store;
 
 pub use did::{create_identity, CreateIdentityInput};
 pub use host::{fetch_host_service, register_identity, HostService};
-pub use store::{store_root, Identity, IdentityLocation, StoredKeyPair, HOME_ENV};
+pub use store::{
+    assert_segment, current_agent_path, list_identities, read_current_agent, resolve_agent_id,
+    resolve_agent_id_with_source, resolve_profile_name, select_current_agent, store_root, AgentSource, Identity,
+    IdentityLocation, StoredIdentitySummary, StoredKeyPair, AGENT_ENV, HOME_ENV, PROFILE_ENV,
+};

@@ -16,8 +16,9 @@ use agentx::group_e2ee::{
     add_body, create_body, get_key_package_body, publish_body, remove_body, send_body,
 };
 use agentx::identity::{
-    create_identity, fetch_host_service, register_identity, CreateIdentityInput, Identity,
-    IdentityLocation,
+    create_identity, current_agent_path, fetch_host_service, list_identities, read_current_agent,
+    register_identity, resolve_agent_id, resolve_agent_id_with_source, select_current_agent, CreateIdentityInput,
+    Identity, IdentityLocation,
 };
 use agentx::message::{
     build_message_request, call, call_device, call_extension, call_group, device_of, did_host,
@@ -76,6 +77,20 @@ enum Command {
         #[command(subcommand)]
         command: DidCommand,
     },
+    /// Which local agent every later command acts as.
+    ///
+    /// The selection is one file at the store root (`<store root>/current-agent`), so it is
+    /// machine-wide rather than per-process — including for another agent's commands. That
+    /// is the point: naming the agent on every invocation was the alternative. `--agent`
+    /// and `$AGENTXCLI_AGENT` stay ABOVE it, so a script that names an agent cannot be
+    /// redirected by a selection left lying in the store.
+    ///
+    /// There is no `unset`: overwriting the selection with another `agent use` is how it
+    /// moves, and deleting that one file is how it is dropped.
+    Agent {
+        #[command(subcommand)]
+        command: AgentCommand,
+    },
     /// Messages: send one, and read the ones that arrived.
     Msg {
         #[command(subcommand)]
@@ -109,38 +124,90 @@ enum DidCommand {
         #[arg(long)]
         handle: String,
         /// The local agent name — the DID path segment and the store directory.
+        ///
+        /// Unlike the other subcommands this one does NOT consult `$AGENTXCLI_AGENT` or
+        /// the current agent: `create` names a NEW identity, and who happens to be
+        /// selected must not decide where a second one is written. Left out, the handle
+        /// is used.
         #[arg(long)]
         agent: Option<String>,
-        #[arg(long, default_value = "default")]
-        profile: String,
+        #[arg(long)]
+        profile: Option<String>,
     },
     /// Show the identity on file.
     Show {
-        #[arg(long, default_value = "default")]
-        agent: String,
-        #[arg(long, default_value = "default")]
-        profile: String,
+        /// `--agent` > `$AGENTXCLI_AGENT` > the current agent > `default`.
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
+        profile: Option<String>,
         /// Print the whole thing, DID document included.
         #[arg(long)]
         json: bool,
     },
     /// Publish (or re-publish) an identity's DID document to its host.
     Register {
-        #[arg(long, default_value = "default")]
-        agent: String,
-        #[arg(long, default_value = "default")]
-        profile: String,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
+        profile: Option<String>,
+    },
+}
+
+/// The store's CURRENT agent — the id a command acts as when neither `--agent` nor
+/// `$AGENTXCLI_AGENT` names one.
+#[derive(Subcommand)]
+enum AgentCommand {
+    /// Which agent is in force, and which step of the chain said so.
+    ///
+    /// The chain itself is `resolve_agent_id`; what this reports is WHICH step spoke,
+    /// because that is the question the command exists to answer — "why is it acting as
+    /// that one" is otherwise a guess about the shell.
+    Show {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Make this agent the current one.
+    ///
+    /// An id with no identity is accepted on purpose — selecting an agent and then creating
+    /// its key is the order a new agent is born in — but it is said out loud, because every
+    /// later command would otherwise fail with "no identity" and no explanation.
+    Use {
+        /// The agent id to select.
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// The agents this machine can act as, with the current one marked.
+    ///
+    /// Reads the store; contacts nothing. Answers both "which exist" and "which one is in
+    /// force".
+    List {
+        #[arg(long)]
+        json: bool,
     },
 }
 
 /// The identity a command acts as. Its `--agent`/`--profile` also name the store directory
 /// and the default device (`realtime.md` §5.4), so the two are always asked for together.
+///
+/// Both are optional: leaving one out falls through the resolution chain in
+/// `identity::store` rather than pinning the literal `default`, which is what makes the
+/// current agent (`agentx-cli agent use`) mean anything.
 #[derive(Args)]
 struct OwnIdentity {
-    #[arg(long, default_value = "default")]
-    agent: String,
-    #[arg(long, default_value = "default")]
-    profile: String,
+    #[arg(long)]
+    agent: Option<String>,
+    #[arg(long)]
+    profile: Option<String>,
+}
+
+impl OwnIdentity {
+    /// The store location these two flags name, after the chain that fills in what was
+    /// left out.
+    fn location(&self) -> anyhow::Result<IdentityLocation> {
+        IdentityLocation::resolve(self.agent.as_deref(), self.profile.as_deref())
+    }
 }
 
 #[derive(Subcommand)]
@@ -541,16 +608,18 @@ async fn main() -> anyhow::Result<()> {
                 handle,
                 agent,
                 profile,
-            } => {
-                cmd_did_create(&host, &handle, agent.unwrap_or_else(|| handle.clone()), &profile)
-                    .await
-            }
+            } => cmd_did_create(&host, &handle, agent, profile.as_deref()).await,
             DidCommand::Show {
                 agent,
                 profile,
                 json,
-            } => cmd_did_show(&agent, &profile, json),
-            DidCommand::Register { agent, profile } => cmd_did_register(&agent, &profile).await,
+            } => cmd_did_show(agent.as_deref(), profile.as_deref(), json),
+            DidCommand::Register { agent, profile } => cmd_did_register(agent.as_deref(), profile.as_deref()).await,
+        },
+        Command::Agent { command } => match command {
+            AgentCommand::Show { json } => cmd_agent_show(json),
+            AgentCommand::Use { id, json } => cmd_agent_use(&id, json),
+            AgentCommand::List { json } => cmd_agent_list(json),
         },
         Command::Msg { command } => match command {
             MsgCommand::Send {
@@ -853,8 +922,18 @@ async fn cmd_discover(endpoint: &str, allow_private: &[String]) -> anyhow::Resul
     }
 }
 
-async fn cmd_did_create(host: &str, handle: &str, agent: String, profile: &str) -> anyhow::Result<()> {
-    let location = IdentityLocation::new(agent, profile);
+async fn cmd_did_create(
+    host: &str,
+    handle: &str,
+    agent: Option<String>,
+    profile: Option<&str>,
+) -> anyhow::Result<()> {
+    // The agent is NOT run through `resolve_agent_id`: `create` names a new identity, and
+    // the current selection must not decide where a second one lands. No `--agent` means
+    // the handle, which is what the DID path segment will be. The profile still resolves
+    // through `$AGENTXCLI_PROFILE`, because a profile is not part of the address.
+    let agent = agent.unwrap_or_else(|| handle.to_string());
+    let location = IdentityLocation::resolve(Some(&agent), profile)?;
     let base = Url::parse(host).map_err(|err| anyhow::anyhow!("--host must be a URL: {err}"))?;
     let client = http_client()?;
 
@@ -887,8 +966,8 @@ async fn cmd_did_create(host: &str, handle: &str, agent: String, profile: &str) 
     Ok(())
 }
 
-fn cmd_did_show(agent: &str, profile: &str, json: bool) -> anyhow::Result<()> {
-    let location = IdentityLocation::new(agent, profile);
+fn cmd_did_show(agent: Option<&str>, profile: Option<&str>, json: bool) -> anyhow::Result<()> {
+    let location = IdentityLocation::resolve(agent, profile)?;
     let identity = Identity::load(&location)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&identity)?);
@@ -913,14 +992,105 @@ fn cmd_did_show(agent: &str, profile: &str, json: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cmd_did_register(agent: &str, profile: &str) -> anyhow::Result<()> {
-    let location = IdentityLocation::new(agent, profile);
+async fn cmd_did_register(agent: Option<&str>, profile: Option<&str>) -> anyhow::Result<()> {
+    let location = IdentityLocation::resolve(agent, profile)?;
     let identity = Identity::load(&location)?;
     let base = Url::parse(&identity.did_host)
         .map_err(|err| anyhow::anyhow!("the stored host is not a URL: {err}"))?;
     let client = http_client()?;
     register_identity(&client, &base, &identity).await?;
     println!("registered {} with {}", identity.did, identity.did_host);
+    Ok(())
+}
+
+// ---- agent show / use / list ----------------------------------------------------
+
+/// `agentx-cli agent show` — which agent is in force, and which step said so.
+///
+/// Reported through `resolve_agent_id_with_source` rather than by re-walking the chain
+/// here: two copies of the order would drift, and the one that drifted would be the one
+/// that explains the other.
+fn cmd_agent_show(json: bool) -> anyhow::Result<()> {
+    let (agent, source) = resolve_agent_id_with_source(None)?;
+    let file = current_agent_path();
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "agent": agent,
+                "source": source,
+                "file": file,
+            }))?
+        );
+        return Ok(());
+    }
+    println!("{:<8} {}", "agent:", agent);
+    println!("{:<8} {}", "source:", source.describe());
+    Ok(())
+}
+
+/// `agentx-cli agent use <id>` — make this agent the current one.
+fn cmd_agent_use(id: &str, json: bool) -> anyhow::Result<()> {
+    let path = select_current_agent(id)?;
+    let agent = resolve_agent_id(None)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({ "agent": agent, "file": path }))?
+        );
+    } else {
+        println!("current agent: {agent}");
+    }
+    // Said out loud rather than refused: selecting an agent and then creating its identity
+    // is the order a new agent is born in — and without this line, every later command
+    // would fail with "no identity" and no hint about which agent it meant.
+    let stored = list_identities()?;
+    if !stored.iter().any(|entry| entry.agent == agent) {
+        eprintln!(
+            "warning: no identity is stored for agent \"{agent}\" yet; `agentx-cli agent list` \
+             shows what is here. Run: agentx-cli did create"
+        );
+    }
+    Ok(())
+}
+
+/// `agentx-cli agent list` — the identities this machine can act as, current one marked.
+fn cmd_agent_list(json: bool) -> anyhow::Result<()> {
+    let identities = list_identities()?;
+    let current = read_current_agent()?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "current": current,
+                "identities": identities,
+            }))?
+        );
+        return Ok(());
+    }
+    if identities.is_empty() && current.is_none() {
+        println!("No agents are stored. Run: agentx-cli did create");
+        return Ok(());
+    }
+    let mark = |agent: &str| if Some(agent) == current.as_deref() { "current " } else { "        " };
+    for entry in &identities {
+        println!(
+            "{}{}/{}  {}  {}",
+            mark(&entry.agent),
+            entry.agent,
+            entry.profile,
+            entry.handle.as_deref().unwrap_or("-"),
+            entry.dir.display()
+        );
+    }
+    // A selection with nothing stored belongs here too: it is the agent every later command
+    // acts as, and "no identity stored" is the whole explanation for the failure that
+    // follows. Without this row the list would look like it had forgotten the selection.
+    if let Some(current) = current.as_deref() {
+        if !identities.iter().any(|entry| entry.agent == current) {
+            println!("{}{}  no identity stored", mark(current), current);
+        }
+    }
     Ok(())
 }
 
@@ -953,7 +1123,7 @@ async fn cmd_msg_send(
         payload.body.as_deref(),
         payload.content_type.as_deref(),
     )?;
-    let location = IdentityLocation::new(&own.agent, &own.profile);
+    let location = own.location()?;
     let identity = Identity::load(&location)?;
     let sender = Sender::from_identity(&identity)?;
     let client = http_client()?;
@@ -1115,7 +1285,7 @@ async fn own_channel(
     own: &OwnIdentity,
     allow_private: &[String],
 ) -> anyhow::Result<(reqwest::Client, Channel)> {
-    let location = IdentityLocation::new(&own.agent, &own.profile);
+    let location = own.location()?;
     let identity = Identity::load(&location)?;
     let client = http_client()?;
     let channel = open_channel(&client, &identity, allow_private).await?;
@@ -1304,7 +1474,7 @@ async fn cmd_msg_listen(
     // The identity is opened and its own service resolved before anything long-running
     // starts, so a missing identity or an unreachable DID document fails like any other
     // command rather than as a stream that never connects.
-    let location = IdentityLocation::new(&own.agent, &own.profile);
+    let location = own.location()?;
     let identity = Identity::load(&location)?;
     let client = http_client()?;
     let channel = open_channel(&client, &identity, allow_private).await?;
@@ -1394,7 +1564,7 @@ async fn group_channel(
     group_did: &str,
     allow_private: &[String],
 ) -> anyhow::Result<(reqwest::Client, Channel)> {
-    let location = IdentityLocation::new(&own.agent, &own.profile);
+    let location = own.location()?;
     let identity = Identity::load(&location)?;
     let sender = Sender::from_identity(&identity)?;
     let client = http_client()?;
@@ -1577,7 +1747,7 @@ async fn cmd_group_e2ee_publish(
     json: bool,
     allow_private: &[String],
 ) -> anyhow::Result<()> {
-    let location = IdentityLocation::new(&own.agent, &own.profile);
+    let location = own.location()?;
     let identity = Identity::load(&location)?;
     let key_package_id = key_package_id.unwrap_or_else(new_key_package_id);
 
@@ -1646,7 +1816,7 @@ async fn cmd_group_e2ee_get_key_package(
     json: bool,
     allow_private: &[String],
 ) -> anyhow::Result<()> {
-    let location = IdentityLocation::new(&own.agent, &own.profile);
+    let location = own.location()?;
     let identity = Identity::load(&location)?;
 
     let client = http_client()?;
@@ -1706,7 +1876,7 @@ async fn cmd_group_e2ee_create(
     json: bool,
     allow_private: &[String],
 ) -> anyhow::Result<()> {
-    let location = IdentityLocation::new(&own.agent, &own.profile);
+    let location = own.location()?;
     let identity = Identity::load(&location)?;
     let client = http_client()?;
     let sender = Sender::from_identity(&identity)?;
@@ -1847,7 +2017,7 @@ async fn cmd_group_e2ee_add(
     json: bool,
     allow_private: &[String],
 ) -> anyhow::Result<()> {
-    let location = IdentityLocation::new(&own.agent, &own.profile);
+    let location = own.location()?;
     let identity = Identity::load(&location)?;
     let client = http_client()?;
 
@@ -2014,7 +2184,7 @@ async fn cmd_group_e2ee_remove(
     json: bool,
     allow_private: &[String],
 ) -> anyhow::Result<()> {
-    let location = IdentityLocation::new(&own.agent, &own.profile);
+    let location = own.location()?;
     let identity = Identity::load(&location)?;
     let client = http_client()?;
 
@@ -2150,7 +2320,7 @@ async fn cmd_group_e2ee_send(
         json,
     } = payload;
     let plaintext = application_plaintext(text.as_deref(), body.as_deref(), content_type.as_deref())?;
-    let location = IdentityLocation::new(&own.agent, &own.profile);
+    let location = own.location()?;
     let identity = Identity::load(&location)?;
     let client = http_client()?;
 
