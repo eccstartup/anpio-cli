@@ -210,6 +210,20 @@ KeyPackage 的 `did_wba_binding` Object Proof 由设备自签，验证侧从**�
   `anp.group.base.v2`，**没有 `anp.group.e2ee.v2`**——即它今天不对外声明 P6 能力；以及它的 SDK
   锁在 anp 1.0.3（见 A2 残留）。要谈的就是一句：**让服务器接受一份由对端签名、端点指向别处
   的 `ANPMessageService` 文档**，放开后面这些都会跟着动。）
+  （2026-10-02 第二段：**这条不用去跟上游谈了**——用户已经 fork 了 `awiki-open-server`，明确说
+  "可以按照 fork 出来的代码继续修复和更新，不一定等上游去调整"。所以放开这件事改成我们自己
+  在 fork 里做。落法是 `adc796c`（`main`，**未推**）：新增开关
+  `AWIKI_ALLOW_PEER_DECLARED_MESSAGE_SERVICE`（默认 `False`，`app/settings.py:34`），打开后
+  `user_compat/core.py` 的 `_ensure_anp_message_service` 改走 `_check_peer_declared_message_service`
+  ——只检查**形状**（`serviceDid` 是 `did:` 开头、`serviceEndpoint` 是带 host 的 http/https URL），
+  不再要求等于服务器自己。刻意**不**要求 https：传输策略归解析方，不归发布方，发布侧硬要求
+  https 只会把内网/自签部署挡在门外。默认关掉是刻意的——这是把"端点归谁"的裁决权从服务器
+  让给签名方，属于放开而不是修 bug，不该在没打招呼的情况下对所有部署生效。
+  **部署还差一步（运维侧，不是代码）：在需要接受对端端点的那台服务器上设
+  `AWIKI_ALLOW_PEER_DECLARED_MESSAGE_SERVICE=1`。** 测试两条，都验过会红：一条走通
+  "对端声明的 `did:wba:awiki.info` / `https://awiki.info/anp-im/rpc` 原样保留并发布"，
+  一条把 `serviceDid: "agentx.example"`、`serviceEndpoint` 为 `""` / `"not-a-url"` / `"https://"`
+  逐个打回。按用户口径这条路是"独立出来"，后续 fork 与上游分叉是预期内的，不是要回收的债。）
 
 **A1 与 A2 是前置**：这两个不定，P6 在真实 DID 网里跑不起来，其余几条都只是能力边界。
 （2026-10-02：**两条都清了**——A1 按 (i) 落地（`7028711`），A2 结在上游 1.0.x，我方不改代码。
@@ -269,6 +283,16 @@ KeyPackage 的 `did_wba_binding` Object Proof 由设备自签，验证侧从**�
   整套顺序在本地从 `rm -rf packages/*/dist` 起验过一遍。e2e 也在里面——它最慢，但它是唯一一个
   能发现"两半各自都对、拼起来不对"的那组。）
 - **B7（= TODO1 E5 剩最后一步）** 文档站的 Vercel 连接要你的账号，我做不了。
+  （2026-10-02 用户说"需要我做什么直接提就好了"，已把要做的三步交出去。仓库这一侧是齐的，
+  不用改：`vercel/` 是自包含的 VitePress 站点，自带 `vercel.json`（`buildCommand: npm run docs:build`、
+  `outputDirectory: .vitepress/dist`、`cleanUrls: true`），`npm run docs:build` 在本地刚跑过，
+  9.2s 出 6.3M。**只差账号侧三步**：① GitHub 上授权 Vercel 访问 `eccstartup/AgentX`；
+  ② 新建 Project 时把 **Root Directory 设成 `vercel/`**（不是仓库根——根是 npm workspaces，
+  Vercel 按根装会去装四个包的依赖，白装）；③ 部署完把拿到的域名给我。
+  拿到域名后还有两处要跟着改，都是今天就知道的坏链：`packages/cli/src/help/commands.ts:1072`
+  的 `DOCS_BASE` 现在指着 `github.com/eccstartup/connectx/blob/master/githubpages`——那是**旧仓库
+  旧路径**，本仓库的 `See:` 行因此条条是死链；以及 `docs/design/cli.md` §3 提到的"文档门禁"
+  在本仓库并不存在。等域名定下来一并处理，避免先写一个又要改的地址。）
 
 ---
 
@@ -284,9 +308,24 @@ KeyPackage 的 `did_wba_binding` Object Proof 由设备自签，验证侧从**�
   TODO1 D4 已定"内嵌进 `connectx`"（与官方 SDK 同向，官方明写群 MLS 是库调用、不是子进程调用）。
   v1 不受影响，但要真跑群 E2EE 就得写 Rust crate → Node 的 napi 绑定。这是**独立的一块**，
   规模不小，需要你定什么时候开。
-- **C3 群 DID 文档的发布路径。**
+- ~~**C3 群 DID 文档的发布路径。**
   §5.2 L220 要求解析 `group_did` 才能找到 Host，而今天没人发布群 DID 文档。这与 A7 是同一类
-  问题（谁来托管、托管在哪），要一起定。
+  问题（谁来托管、托管在哪），要一起定。~~
+  （2026-10-02 核过：**这条的前提是错的，不需要做任何事**。原先的判断只看了
+  `group_did_documents` 这张表，没注意 `hosted_group_create` 在同一个事务里**也**往
+  `did_documents` 写了一份（`messaging/groups/service.py:531-533`），而 `resolve_did_path`
+  （`app/routes.py:590`）读的正是 `did_documents`——所以群 DID 文档是**发得出来、解析得到**的，
+  `tests/test_group_host.py:152` 就在钉这件事（建组后按
+  `/groups/<grp>/<e1_fp>/did.json` 取回，断言 `id` 是 `group_did`、
+  `service[0].serviceDid` 是托管服务器自己）。群文档里也不含成员名册，只有 id + 一把验证钥 +
+  一条 `ANPMessageService` 服务项，所以"公开可解析"不泄露成员关系。我方这一侧同样无需改动：
+  `didToUrl` 对这种 DID 的映射是 `https://<host>/groups/<grp>/<e1_fp>/did.json`
+  （`packages/core/src/crypto/resolveDid.ts:520`），与服务器的路由严丝合缝；而
+  `packages/service/src` 里没有任何 `groups:` DID 的签发逻辑——
+  `AgentXAgent` 不托管群、只按 `ServiceLocator` 统一解析群 DID 去找 Host，与 B3 收敛后的
+  口径一致。剩下真正未决的只有"谁来托管"这个设计问题，而它的答案是自洽的：**群挂在谁身上，
+  谁的服务器就发布它的文档**，awiki 已经这么做了。上游要不要把这个行为固化成规范条文，
+  是上游的事，不是本仓库的缺口。）
 
 ---
 
