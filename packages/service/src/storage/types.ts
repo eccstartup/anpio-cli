@@ -395,6 +395,30 @@ export interface StoredDownloadTicket {
   consumedAt?: string
 }
 
+/**
+ * One line of somebody's address book (TODO6 §3, `x_agentx.contacts.v1`).
+ *
+ * `subject` is the stable identity and `did` is where that identity currently lives — the
+ * pair is the whole point of the table (TODO6 §3.2). A key update moves the DID and leaves
+ * the subject where it was, so keying a remark on the DID would make it vanish at exactly
+ * the moment the two names come apart; a row is therefore re-`put` under the same subject
+ * with the new DID, and `remark` survives because nothing looked at `did` to find it.
+ *
+ * `remark` is the name the OWNER gave this peer — not `nickname`, which the peer gives
+ * itself and which lives on its own DID host. It is nullable: adding somebody before
+ * naming them is a normal state.
+ */
+export interface StoredContact {
+  ownerDid: string
+  /** core's `stableSubjectId(did)` — the protocol's "this is still the same party". */
+  subject: string
+  /** Where that subject currently lives. A column, never a key. */
+  did: string
+  remark?: string
+  createdAt: string
+  updatedAt: string
+}
+
 export interface OutboxEntry {
   seq: number
   /** The recipient's DID, NOT a resolved endpoint. The push resolves it through the
@@ -816,6 +840,27 @@ export interface Storage {
    * with answers that no longer mean anything.
    */
   consumeHttpNonce(keyid: string, nonce: string, expiresAt: string, now: string): boolean
+
+  // ---- address book (TODO6 §3) -----------------------------------------------
+  //
+  // A row layer, and nothing more: name matching — how `contacts resolve Alice` picks a row,
+  // and what it does when two rows answer to "Alice" — belongs to the caller that knows what
+  // a name is. Doing a `LIKE` here would put half of that rule in SQL, where the "list the
+  // candidates" half cannot live.
+
+  /** Every row of `ownerDid`'s address book, ordered by subject.
+   *
+   *  The whole book rather than a lookup: a person's address book is small, and the client
+   *  has to hold it anyway to answer "which of these is Alice" — a per-name round trip would
+   *  be one network call per keystroke of an agent's reasoning. */
+  contacts(ownerDid: string): StoredContact[]
+  /** Insert or replace one row. The key is `(ownerDid, subject)`, so this is how a row's
+   *  `did` is brought up to date after a key update — and why `createdAt` is only written
+   *  on the insert. */
+  upsertContact(contact: StoredContact): void
+  /** Drop one row. Returns whether one was there, so `contacts.remove` can answer honestly
+   *  instead of reporting success for a no-op. */
+  removeContact(ownerDid: string, subject: string): boolean
 
   close(): void
 }

@@ -20,6 +20,7 @@ import type {
   StoredAttachmentGrant,
   StoredAttachmentObject,
   StoredAttachmentSlot,
+  StoredContact,
   StoredDeviceEnvelope,
   StoredDownloadTicket,
   StoredGroup,
@@ -416,6 +417,19 @@ function toDeviceEnvelope(row: Row): StoredDeviceEnvelope {
   const lastError = maybeText(row.last_error)
   if (lastError !== undefined) envelope.lastError = lastError
   return envelope
+}
+
+function toContact(row: Row): StoredContact {
+  const contact: StoredContact = {
+    ownerDid: text(row.owner_did),
+    subject: text(row.subject),
+    did: text(row.did),
+    createdAt: text(row.created_at),
+    updatedAt: text(row.updated_at),
+  }
+  const remark = maybeText(row.remark)
+  if (remark !== undefined) contact.remark = remark
+  return contact
 }
 
 /**
@@ -1439,6 +1453,47 @@ class SqliteStorage implements Storage {
       ).run(keyid, nonce, expiresAt, now)
       return result.changes > 0
     })
+  }
+
+  // ---- address book (TODO6 §3) -------------------------------------------------
+
+  contacts(ownerDid: string): StoredContact[] {
+    const rows = this.stmt('SELECT * FROM contacts WHERE owner_did = ? ORDER BY subject').all(
+      ownerDid,
+    ) as Row[]
+    return rows.map(toContact)
+  }
+
+  upsertContact(contact: StoredContact): void {
+    // 一句话写完整行：`did` 与 `remark` 都以**这次的**值为准，所以一次换钥之后的 re-put
+    // 只挪 `did`；`created_at` 靠 DO UPDATE 那句保持不动——它是"这一行什么时候进来的"，
+    // 不是"这一行最后一次被摸是什么时候"（那是 `updated_at`）。
+    //
+    // `remark` 缺省写 NULL 而不是留着旧值：`contacts.put` 的语义是"这一行现在长这样"。
+    // 想保留旧备注的调用方要自己把它带上。
+    this.stmt(
+      `INSERT INTO contacts (owner_did, subject, did, remark, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT (owner_did, subject) DO UPDATE SET
+         did = excluded.did,
+         remark = excluded.remark,
+         updated_at = excluded.updated_at`,
+    ).run(
+      contact.ownerDid,
+      contact.subject,
+      contact.did,
+      contact.remark ?? null,
+      contact.createdAt,
+      contact.updatedAt,
+    )
+  }
+
+  removeContact(ownerDid: string, subject: string): boolean {
+    const result = this.stmt('DELETE FROM contacts WHERE owner_did = ? AND subject = ?').run(
+      ownerDid,
+      subject,
+    )
+    return result.changes > 0
   }
 
   close(): void {

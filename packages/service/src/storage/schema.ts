@@ -63,8 +63,12 @@
  *  v11: `group_keys` is new — the per-group Ed25519 key B1b-A1 mints at `group.create`.
  *  Like v3/v6/v8/v9 it arrives through the `IF NOT EXISTS` pass and needs no migration step
  *  of its own; the version moves for the usual reason. **This is the first table in this
- *  database whose contents are key material** — see the table's own comment. */
-export const SCHEMA_VERSION = 11
+ *  database whose contents are key material** — see the table's own comment.
+ *
+ *  v12: `contacts` is new — the address book TODO6 §3 adds, keyed by `(owner_did, subject)`.
+ *  Like v3/v6/v8/v9/v11 it arrives through the `IF NOT EXISTS` pass and needs no migration
+ *  step of its own; the version moves for the usual reason. */
+export const SCHEMA_VERSION = 12
 
 export const SCHEMA: readonly string[] = [
   // ---- idempotency -----------------------------------------------------------
@@ -446,4 +450,33 @@ export const SCHEMA: readonly string[] = [
      PRIMARY KEY (keyid, nonce)
    )`,
   `CREATE INDEX IF NOT EXISTS http_nonces_expiry ON http_nonces (expires_at)`,
+
+  // ---- address book (TODO6 §3) ------------------------------------------------
+  // 通讯录：**某个人**给**别的 agent** 起的备注。与上面每一张表都不同，它的内容不是协议
+  // 事实、也不为协议服务——ANP 里没有"备注"这个概念，也不该有（TODO6 §3.2 那张表把
+  // remark / nickname / subject 三者分开，只有 subject 是协议给的）。
+  //
+  // 因为它是**某个人自己的**记忆，第一段键是 `owner_did`：本服务可能同时托着很多 agent，
+  // 而 A 给 B 起的备注不能让 C 看见。授权由 `self-addressed` 那条目标绑定保证
+  //（`rpc/methods.ts` 的 `checkMethod`：`target.did` MUST 等于 `sender_did`），所以
+  // `owner_did` 永远是**验过签的那一个**，不是请求方自己写的话。
+  //
+  // 第二段键是 `subject`（core 的 `stableSubjectId`），**不是 `did`**——那是整节的支点
+  //（TODO6 §3.2）：换钥会把 `did` 挪走（`did update` 就是干这个的），备注挂 `did` 上就会
+  // 在换钥时静默消失。`did` 是这一行的一**列**，由 `contacts.put` 每次写进来。
+  //
+  // 没有 `nickname` / `avatar` 列：那两样是**对方自己起的**，住在对方 DID 的主机上
+  //（`get_me`），随他随时改。抄一份到这里就等于让本库多一份会过期、且没人负责刷新的事实
+  //（TODO6 §3.3 那条"不做 ③"的理由）。要显示名字，取 remark；没有 remark 就显示 DID。
+  //
+  // `remark` 可为 NULL：把一个人加进通讯录而先不起名，是一个正常状态，不是缺值。
+  `CREATE TABLE IF NOT EXISTS contacts (
+     owner_did   TEXT NOT NULL,
+     subject     TEXT NOT NULL,
+     did         TEXT NOT NULL,
+     remark      TEXT,
+     created_at  TEXT NOT NULL,
+     updated_at  TEXT NOT NULL,
+     PRIMARY KEY (owner_did, subject)
+   )`,
 ]
