@@ -192,11 +192,18 @@ export interface StoredGroupLeaf {
  */
 export interface StoredGroupDidUpdate {
   groupDid: string
-  /** The `group_state_ref` of the P4 `member-did-updated` being carried out, serialized. */
+  /** The identity of the P4 `member-did-updated` being carried out: its `group_state_ref`
+   *  (`group_did` + `group_state_version`) **and** the two DIDs, serialized. The DIDs are in
+   *  here rather than being re-derived because §10.5 needs them on every step of the
+   *  orchestration — the new DID to recognise the Adds that belong to it, the old one to
+   *  refuse a Remove aimed anywhere else. */
   eventRefJson: string
-  /** `add-pending` | `remove-pending`. */
+  /** `add-pending` | `remove-pending`. Flips to `remove-pending` on the first accepted
+   *  Remove, which §10.5 makes the observable end of the Add phase: it forbids a Remove
+   *  before every selected Add has succeeded, and the Host cannot count the owner's Adds. */
   progress: string
-  /** The exact `(did, device)` pairs still to do, serialized. */
+  /** The exact `(did, device)` pairs still to do, serialized. For a DID update that is the
+   *  old DID's leaves — the Removes that retire it. */
   expectedJson: string
   /** The ones already done, serialized. */
   doneJson: string
@@ -535,23 +542,20 @@ export interface Storage {
    *  `joined_at` and `added_by` therefore survive **by construction** rather than by being
    *  copied across, and a copy is a place the next edit can silently drop one of them.
    *
+   *  The **Leaf projection is deliberately left alone**. `group_leaves` says which `(did,
+   *  device)` currently holds an MLS leaf, and only `group.e2ee.add` / `remove` change that —
+   *  so renaming those rows here would assert leaves under the new DID before the owner ever
+   *  Added them. Two things break if it does: `group.e2ee.send` would stop looking paused
+   *  (§10.5's gate is "an active leaf whose DID is no longer an active member"), and the next
+   *  `group.incoming` would be addressed to a device that holds no MLS state for the group.
+   *  The old DID's leaves are retired by the P6 orchestration, not by this rename.
+   *
    *  A non-active row already sitting on the new DID is removed first: §8.12 item 4 only
    *  forbids the new DID belonging to another *active* member, so a stale `removed` row is
    *  legal input, and without this the rename would collide on the primary key instead of
    *  converging. An **active** row on the new DID is a code error — the caller checked for it
    *  — and throws rather than deleting a live membership to make room for this one. */
   renameGroupMember(groupDid: string, fromDid: string, toDid: string, stateVersion: number): boolean
-  /** Move a member's rows of the Leaf projection onto the new DID, in the same transaction.
-   *  Returns how many rows moved.
-   *
-   *  The projection has to follow the roster: `group_leaves.member_did` is what the delivery
-   *  queue addresses a member's devices by (§12.6 item 3), so rows left on the old DID would
-   *  keep a superseded address alive in exactly the place §8.12 requires to be switched off.
-   *
-   *  Devices the NEW DID already has a row for are dropped rather than moved — the row
-   *  already there is the current one, and both for one `(did, device)` would make "is this
-   *  device a leaf" a question with two answers. */
-  renameGroupLeaves(groupDid: string, fromDid: string, toDid: string): number
 
   /** Append one `group.state_changed` event. `eventSeq` is the value
    *  {@link Storage.advanceGroupCounters} just returned, which is what makes the events

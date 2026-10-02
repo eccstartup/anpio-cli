@@ -480,12 +480,19 @@ export interface MemberDidUpdateInput {
 }
 
 /**
- * §8.12 "after acceptance, the Host MUST atomically" 那一段的全部内容：改成员行、搬 Leaf
- * 投影、推进两个计数器、停用旧 DID、落一个 `member-did-updated` 事件、按 §8.11 通知出去。
+ * §8.12 "after acceptance, the Host MUST atomically" 那一段的全部内容：改成员行、推进两个
+ * 计数器、停用旧 DID、落一个 `member-did-updated` 事件、按 §8.11 通知出去，并在**有密码学侧
+ * 收尾要做**时开一条 §10.5 的编排记录。
  *
  * **验证不在这里**。规范把"要不要接受"写成受理前的五条（§8.12 L940–946），那五条里有网络
  * 往返，所以它们在事务外由调用方完成（`memberDidUpdate.ts`）；这个函数拿到的是已经判定过
  * 的一对 DID，只负责把它**原子地**落下去。
+ *
+ * **Leaf 投影一行都不动**，这是有意的：`group_leaves` 是"哪个 `(did, device)` 现在握着 MLS
+ * leaf"，而只有 `group.e2ee.add` / `remove` 能改这件事。旧 DID 的 leaf 留在这里，正是 §10.5
+ * 那条暂停判据的可观测形态（"投影里还有一条 active leaf，它的 DID 已经不是一个 active 成员
+ * 了"），于是改名之后群**自动**进入暂停——不需要另外告诉谁。它由 owner 按 §10.5 编排、
+ * 用 `group.e2ee.remove` 逐个退役。
  *
  * 返回值是"这一对 DID 是不是**我**改的"：`false` 表示成员行已经不是 `previousDid` 了。那
  * 不是错误，正是 §8.12 第 5 条那条 compare-and-swap 要区分的东西——定时刷新与一次请求同时
@@ -500,11 +507,18 @@ export function applyMemberDidUpdate(input: MemberDidUpdateInput): boolean {
     // 是别的状态、或别人先改完了）就什么都不做。
     if (member === undefined || member.membershipStatus !== 'active') return false
 
+    // §10.5 要移除的是**旧 DID 名下**的那些 leaf。改名只碰成员行，所以这一读在改名前后都一样，
+    // 但读在**前面**：它同时回答"这次更新有没有密码学侧要收尾"——没有旧 leaf 就没有中间 epoch，
+    // 也就没有要暂停的东西（那种情况只是"这个成员还没上过设备"，与 DID 更新无关）。
+    const retired = storage
+      .activeGroupLeaves(groupDid)
+      .filter((leaf) => leaf.memberDid === previousDid)
+      .map((leaf): [string, string] => [leaf.memberDid, leaf.memberDeviceId])
+
     const { groupStateVersion, groupEventSeq } = storage.advanceGroupCounters(groupDid, true)
     // §8.12：只换 `agent_did`，`role` / `status` / `joined_at` / `added_by` / active 计数
     // 全部保留——由访问器只写那两列来保证，不靠这里逐个抄过去。
     storage.renameGroupMember(groupDid, previousDid, subjectDid, groupStateVersion)
-    storage.renameGroupLeaves(groupDid, previousDid, subjectDid)
 
     const operationId = memberDidUpdateOperationId(groupDid, previousDid, subjectDid)
     // §7.10.2 L595：`payload_digest` 要覆盖**被受理的这次旧→新状态变更**。这里没有一份签名的
@@ -550,6 +564,27 @@ export function applyMemberDidUpdate(input: MemberDidUpdateInput): boolean {
       previousSubjectDid: previousDid,
       membershipStatus: 'active',
     })
+
+    // §10.5 / §11.10.3：**Group Host SHOULD 持久化**"DID 更新编排现在在 Add 还是 Remove"。
+    // `expected` 是那批必须被 Remove 掉的旧 DID leaf，`done` 是已经移除掉的——两个都在本服务
+    // 能观测到的东西里，不需要问任何人对端做了什么。进度一开始是 `add-pending`：owner 得先
+    // 把新 DID 的设备 Add 进来，那些 Add 会创建新 leaf；§10.5 禁止第一个 Remove 早于全部
+    // Add 成功，所以第一次被接受的 Remove 就是"Add 阶段结束了"的信号。
+    if (retired.length > 0) {
+      storage.upsertGroupDidUpdate({
+        groupDid,
+        eventRefJson: JSON.stringify({
+          group_did: groupDid,
+          group_state_version: String(groupStateVersion),
+          previous_subject_did: previousDid,
+          subject_did: subjectDid,
+        }),
+        progress: 'add-pending',
+        expectedJson: JSON.stringify(retired),
+        doneJson: JSON.stringify([]),
+        startedAt: input.acceptedAt,
+      })
+    }
     return true
   })
 }

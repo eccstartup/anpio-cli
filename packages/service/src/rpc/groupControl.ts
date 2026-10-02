@@ -415,23 +415,140 @@ function requireCurrentOwnerLeaf(storage: Storage, groupDid: string, did: string
 /**
  * §10.4 L1074 与 §10.5 L1094：该不该暂停新的 `group.e2ee.send`。
  *
- * 判据是**从投影现算**的：投影里有一条 active leaf，它的 `member_did` 已经不是 P4 `active`
- * 成员了。那正是"整个 P4 成员变 `removed` / `left`，而 MLS 那边还没收尾"这句话的可观测
- * 形态——`create` / `add` / `remove` 建立 leaf 时那个 DID 是 active 的，它变成非 active
- * 之后必须由 owner 依次 Remove，在最后一个 Remove 被接受之前，群里的 epoch 落在中间态
- * （§10.5 L1094 的"中间的 epoch MUST NOT 承载应用消息"）。
+ * 两个证人，任一成立即暂停：
  *
- * **单台设备被撤销不触发**：那台设备的 DID 仍然是 active 成员，所以这条判不出来，也
- * 不该判——§10.4 L1074 逐字要求此时 Host **MUST NOT** 暂停其它合法发送。
+ *   - **投影**。投影里有一条 active leaf，它的 `member_did` 已经不是 P4 `active` 成员了。
+ *     那正是"整个 P4 成员变 `removed` / `left`，而 MLS 那边还没收尾"这句话的可观测形态——
+ *     `create` / `add` / `remove` 建立 leaf 时那个 DID 是 active 的，它变成非 active 之后
+ *     必须由 owner 依次 Remove。**DID 更新也走这一条**：§8.12 的改名只换成员行、不动 leaf，所以
+ *     旧 DID 的 leaf 从改名那一刻起就落进这句话里，直到最后一次 Remove 把它变成 `terminal`。
+ *   - **编排行**（§10.5 的 `group_did_updates`，§11.10.3 要 Host 持久化的那个"在 Add 还是
+ *     Remove"）。它是投影那一条的补强而不是替代：投影是重建出来的、重启后自然还在，编排行
+ *     记的是**哪一次**更新、还差哪些 leaf，`add` / `remove` 的受理要用到它。一行陈旧到没有
+ *     剩余工作时不算数——那是打完收工的残留，或是崩溃留下的，投影才是权威。
  *
- * 不另建状态表：§11.10.3 L1374 的 `group_did_updates` 那一行（DID 更新编排的进度）也对，
- * 但**它今天没有写入者**——编排由 P4 的 `member-did-updated` 事件触发，而本服务的 P4
- * （C9）没有接受这种事件。表与访问器留着，等那条事件存在时再把编排接到 `send` 前面；
- * 今天用投影现算，判的是同一件事（[e2ee-group.md] §8）。
- */
+ * **单台设备被撤销不触发**：那台设备的 DID 仍然是 active 成员，所以投影这条判不出来，也
+ * 不该判——§10.4 L1074 逐字要求此时 Host **MUST NOT** 暂停其它合法发送。编排行那时也不存在
+ * （没有换 DID）。 */
 function paused(storage: Storage, groupDid: string): boolean {
   const active = new Set(activeMemberDids(storage, groupDid))
-  return storage.activeGroupLeaves(groupDid).some((leaf) => !active.has(leaf.memberDid))
+  if (storage.activeGroupLeaves(groupDid).some((leaf) => !active.has(leaf.memberDid))) return true
+  const pending = didUpdateOrchestration(storage, groupDid)
+  return pending !== undefined && pending.remaining.length > 0
+}
+
+/** 一次进行中的 §10.5 编排，解析成受理路径要用的形状。 */
+interface DidUpdateOrchestration {
+  /** 被换掉的那个 DID——它的 leaf 是这次编排要退役的东西。 */
+  previousDid: string
+  /** 换成的那个 DID——只有它的设备能被这次编排的 Add 加进来。 */
+  subjectDid: string
+  /** 还没退役的 `(did, device)`。 */
+  remaining: readonly (readonly [string, string])[]}
+
+/** 编排行里那两个字段存的是 `(did, device)` 对的数组。只收正好两个字符串的行：多一个少一个
+ *  的都不是一对，收进来只会让后面每一处都要再判一次。 */
+function pairs(json: string): [string, string][] {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(json)
+  } catch {
+    return []
+  }
+  if (!Array.isArray(parsed)) return []
+  return parsed.filter(
+    (pair): pair is [string, string] =>
+      Array.isArray(pair) && pair.length === 2 && typeof pair[0] === 'string' && typeof pair[1] === 'string',
+  )
+}
+
+/**
+ * 读一次编排行。**解析失败当成"没有"**：这一行是本服务自己写的进度记录，读不动说明它坏了，
+ * 而坏掉的进度记录不该把群锁在暂停态里——投影那条判据仍然在，该暂停的时候照样暂停。
+ */
+function didUpdateOrchestration(storage: Storage, groupDid: string): DidUpdateOrchestration | undefined {
+  const row = storage.groupDidUpdate(groupDid)
+  if (row === undefined) return undefined
+  let ref: Record<string, unknown>
+  try {
+    ref = JSON.parse(row.eventRefJson) as Record<string, unknown>
+  } catch {
+    return undefined
+  }
+  if (typeof ref.previous_subject_did !== 'string' || typeof ref.subject_did !== 'string') return undefined
+  const done = new Set(pairs(row.doneJson).map((pair) => pair.join('\u0000')))
+  return {
+    previousDid: ref.previous_subject_did,
+    subjectDid: ref.subject_did,
+    remaining: pairs(row.expectedJson).filter((pair) => !done.has(pair.join('\u0000'))),
+  }
+}
+
+/**
+ * §10.5："the Group Host **MUST** serialize P6 member-change control actions … the Group Host
+ * **MUST NOT** accept an unrelated `group.e2ee.add` or `group.e2ee.remove` until the DID update
+ * completes."
+ *
+ * 判据用编排行里那两个 DID：这次更新的 Add 只能加**新 DID** 的设备，Remove 只能退役**旧
+ * DID** 的 leaf。别的都算"无关"，回 5004——与暂停同一个码，因为对调用方而言这是同一件事：
+ * 群正忙于一次 DID 更新，先把这次更新走完。
+ *
+ * 有一条**判不了**、规范也没打算让 Host 判：§10.5 要"全部 Add 成功之后才有第一个 Remove"，
+ * 而 Host 数不出 owner 一共选了几台新设备（那是 owner 按 §11.12 第 2 步自己枚举的）。所以
+ * 第一次 Remove 被接受时，Host 记的是"Add 阶段结束了"，而不是"我核对过 Add 都成功了"。
+ */
+function checkDidUpdateMembershipChange(
+  storage: Storage,
+  groupDid: string,
+  method: string,
+  memberDid: string,
+  memberDeviceId: string,
+): void {
+  const pending = didUpdateOrchestration(storage, groupDid)
+  if (pending === undefined || pending.remaining.length === 0) return
+  const refused = (why: string): never => {
+    throw refusal(
+      groupE2eeError('stateNotReady', `${method} is not part of the pending DID update of ${groupDid}: ${why}`, {
+        group_did: groupDid,
+      }),
+    )
+  }
+  if (method === GROUP_E2EE_ADD) {
+    if (memberDid !== pending.subjectDid) {
+      refused(`${memberDid} is not the update's current subject ${pending.subjectDid}`)
+    }
+    return
+  }
+  const key = `${memberDid}\u0000${memberDeviceId}`
+  if (!pending.remaining.some((pair) => pair.join('\u0000') === key)) {
+    refused(`${memberDid}#${memberDeviceId} is not a leaf of the superseded ${pending.previousDid}`)
+  }
+}
+
+/**
+ * 一次匹配的 Remove 被接受之后推进编排行：记下这一对已退役；全部退役就清掉那一行（§10.5
+ * "Resume application messages only after the final Remove succeeds"——行没了、旧 leaf 也
+ * 都 `terminal` 了，投影与编排行同时解除暂停）。
+ */
+function advanceDidUpdateOrchestration(
+  storage: Storage,
+  groupDid: string,
+  memberDid: string,
+  memberDeviceId: string,
+): void {
+  const row = storage.groupDidUpdate(groupDid)
+  if (row === undefined) return
+  const pending = didUpdateOrchestration(storage, groupDid)
+  if (pending === undefined) return
+  const key = `${memberDid}\u0000${memberDeviceId}`
+  const done = pairs(row.doneJson)
+  if (!done.some((pair) => pair.join('\u0000') === key)) done.push([memberDid, memberDeviceId])
+  const remaining = pairs(row.expectedJson).filter((pair) => !done.some((d) => d.join('\u0000') === pair.join('\u0000')))
+  if (remaining.length === 0) {
+    storage.clearGroupDidUpdate(groupDid)
+    return
+  }
+  storage.upsertGroupDidUpdate({ ...row, progress: 'remove-pending', doneJson: JSON.stringify(done) })
 }
 
 /** §13.5 第 5 项 / §9.3.3 / §9.4.3 共同要的那件事：这次动作的 `crypto_group_id` 与 `epoch`
@@ -642,6 +759,9 @@ export function addE2eeMember(ctx: GroupControlContext): Record<string, unknown>
   if (member === undefined || member.membershipStatus !== 'active') {
     throw refusal(groupE2eeError('stateNotReady', `${memberDid} is not an active member of ${groupDid}`))
   }
+  // §10.5 的串行化。位置在"新 DID 是 active 成员吗"之后、坐标与 KeyPackage 之前：一条**属于
+  // 这次更新**的 Add（加的是新 DID 的设备）从这一关走过去，其余的在动任何状态之前就被挡下。
+  checkDidUpdateMembershipChange(ctx.storage, groupDid, GROUP_E2EE_ADD, memberDid, memberDeviceId)
   // §9.3.3："the exact `(member_did, member_device_id)` leaf MUST NOT already exist; another
   // leaf with the same DID is not a conflict"——所以比的是**精确二元组**，不是 DID。
   const existing = ctx.storage.groupLeaf(groupDid, memberDid, memberDeviceId)
@@ -753,6 +873,8 @@ export function removeE2eeMember(ctx: GroupControlContext): Record<string, unkno
       groupE2eeError('stateNotReady', `${memberDid}#${memberDeviceId} is not an active leaf of ${groupDid}`),
     )
   }
+  // §10.5 的串行化，与 `add` 那一条对称：这次更新的 Remove 只能退役**旧 DID** 的 leaf。
+  checkDidUpdateMembershipChange(ctx.storage, groupDid, GROUP_E2EE_REMOVE, memberDid, memberDeviceId)
 
   checkAgainstBinding(currentBinding(ctx.storage, groupDid), cryptoGroupId, epoch, GROUP_E2EE_REMOVE)
 
@@ -766,6 +888,9 @@ export function removeE2eeMember(ctx: GroupControlContext): Record<string, unkno
     state: 'terminal',
     updatedAt: ctx.acceptedAt,
   })
+  // 旧 DID 的 leaf 退役一格。放在写投影之后：若这是最后一次，编排行与那条 leaf 的 `terminal`
+  // 必须同生同灭，否则会出现"行清了、leaf 还是 active"或反过来的一瞬——两者都是暂停判据。
+  advanceDidUpdateOrchestration(ctx.storage, groupDid, memberDid, memberDeviceId)
 
   // §12.3 L1455：Commit 给每条**保留的** leaf，最终通知给被移除的那一条。取投影在 terminal
   // 写之后——被移除的那条已不在 `activeGroupLeaves` 里，所以它只会收到最终通知，不再收到任何

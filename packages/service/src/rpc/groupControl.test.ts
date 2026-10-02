@@ -49,7 +49,14 @@ import {
 } from './groupControl'
 import { GROUP_E2EE_PROFILE } from './groupE2ee'
 import { GROUP_E2EE_NOTICE } from './groupEnvelopes'
-import { GROUP_ADD, GROUP_CREATE, GROUP_HANDLERS, GROUP_PROFILE, GROUP_SECURITY_PROFILE } from './groups'
+import {
+  applyMemberDidUpdate,
+  GROUP_ADD,
+  GROUP_CREATE,
+  GROUP_HANDLERS,
+  GROUP_PROFILE,
+  GROUP_SECURITY_PROFILE,
+} from './groups'
 import { lookupMethod } from './methods'
 
 const config = loadConfig({})
@@ -1050,5 +1057,139 @@ describe('the Device Delivery Queue is written with the accepted call (§12)', (
     expect(resent.json?.error).toBeUndefined()
     const added = queued(h.storage).slice(before.length)
     expect(added.map((r) => `${r.recipientDeviceId}:${r.kind}`)).toEqual([`${OWNER_DEVICE}:incoming`])
+  })
+})
+
+// ---- §10.5：换 DID 之后的编排 --------------------------------------------------
+//
+// §8.12 的改名只动成员行，`group_leaves` 一行都不动（`groups.ts` 的 `applyMemberDidUpdate`
+// 上写了理由）。于是改名一落定，投影里就留着一条**旧 DID 名下**的 active leaf——那正是 §10.5
+// 那条暂停判据 "an active leaf whose DID is no longer an active member" 的可观测形态，群
+// **自动**进入暂停。这一节跑的就是"自动进入暂停之后，Host 一侧能观测到的那几件事"：
+// 编排行有没有开、无关的 add/remove 有没有被挡、匹配的 remove 有没有把这行清掉、send 有没有恢复。
+
+describe('orchestrating the MLS side of a DID change (§10.5)', () => {
+  /** 换掉 member 的 DID：直调那个原子的核心，不重跑 §8.12 的受理前验证（那是 `memberDidUpdate.ts`
+   *  的事，`dispatch.test.ts` 从请求那一路测过）。 */
+  const successor = createAnpIdentity('member-successor.example')
+
+  function renameMember(h: Harness, groupDid: string): boolean {
+    return applyMemberDidUpdate({
+      storage: h.storage,
+      hostServiceDid: SERVICE_DID,
+      groupDid,
+      previousDid: member.did,
+      subjectDid: successor.did,
+      acceptedAt: NOW.toISOString(),
+    })
+  }
+
+  it('opens the row and pauses the group as soon as the renamed DID still holds a leaf', async () => {
+    const { h, groupDid } = await groupWithMember()
+    const before = h.storage.groupMember(groupDid, member.did)
+    expect(renameMember(h, groupDid)).toBe(true)
+
+    // §11.10.3：Host SHOULD 持久化"这次更新在 Add 还是 Remove"。`expected` 就是要退役的那批
+    // 旧 DID leaf——它们正好是 §10.5 要逐个 Remove 掉的东西。开头是 `add-pending`。
+    const row = h.storage.groupDidUpdate(groupDid)
+    expect(row?.progress).toBe('add-pending')
+    expect(row?.expectedJson).toBe(JSON.stringify([[member.did, MEMBER_DEVICE]]))
+    expect(row?.doneJson).toBe('[]')
+    expect(JSON.parse(row?.eventRefJson ?? '{}')).toMatchObject({
+      group_did: groupDid,
+      previous_subject_did: member.did,
+      subject_did: successor.did,
+    })
+
+    // §8.12：成员行搬到新 DID，`role` / `joined_at` 这些一位不动。
+    expect(h.storage.groupMember(groupDid, member.did)).toBeUndefined()
+    const moved = h.storage.groupMember(groupDid, successor.did)
+    expect(moved?.membershipStatus).toBe('active')
+    expect(moved?.role).toBe(before?.role)
+    expect(moved?.joinedAt).toBe(before?.joinedAt)
+
+    // 投影不动：旧 DID 的 leaf 还在、还是 active。它留着，暂停才成立。
+    expect(h.storage.groupLeaf(groupDid, member.did, MEMBER_DEVICE)?.state).toBe('active')
+
+    // 群已暂停：另一名合法成员（owner）发不出应用消息。
+    const paused = await h.call(
+      await signed(GROUP_E2EE_SEND, sendMeta(groupDid, { operation_id: 'op-send-paused' }), sendBody(groupDid)),
+    )
+    expect(paused.json?.error?.code).toBe(5004)
+    expect(paused.json?.error?.data?.anp_code).toBe('anp.group.e2ee.state_not_ready')
+    expect(paused.json?.error?.message).toContain('is paused')
+
+    // §8.12："stop authorizing the old DID for new operations"。旧 DID 连"是成员"这一关都
+    // 过不去了——回的是 3000，而不是暂停那条群级的 5004。
+    const old = await h.call(
+      await signed(
+        GROUP_E2EE_SEND,
+        sendMeta(groupDid, { operation_id: 'op-send-old', sender_did: member.did, sender_device_id: MEMBER_DEVICE }),
+        sendBody(groupDid),
+      ),
+    )
+    expect(old.json?.error?.code).toBe(3000)
+    expect(old.json?.error?.data?.anp_code).toBe('group.not_member')
+  })
+
+  it('refuses an Add that is not for the update’s current subject', async () => {
+    // §10.5："MUST NOT accept an unrelated group.e2ee.add … until the DID update completes"。
+    // owner 是合法成员、设备也合格，但这次更新的 Add 只能加**新 DID** 的设备。
+    const { h, groupDid } = await groupWithMember()
+    expect(renameMember(h, groupDid)).toBe(true)
+
+    const outcome = await h.call(
+      await signed(
+        GROUP_E2EE_ADD,
+        groupMeta(groupDid, { operation_id: 'op-add-unrelated' }),
+        addBody(groupDid, {
+          member_did: owner.did,
+          member_device_id: OWNER_DEVICE,
+          group_key_package: keyPackageFor(owner, OWNER_DEVICE),
+        }),
+      ),
+    )
+    expect(outcome.json?.error?.code).toBe(5004)
+    expect(outcome.json?.error?.data?.anp_code).toBe('anp.group.e2ee.state_not_ready')
+    expect(outcome.json?.error?.message).toContain("is not the update's current subject")
+    expect(outcome.json?.error?.message).toContain(successor.did)
+  })
+
+  it('refuses a Remove aimed outside the superseded DID’s leaves', async () => {
+    // 同一句的另一半：这次的 Remove 只能退役**旧 DID** 的 leaf。owner 的 leaf 与这次更新无关。
+    const { h, groupDid } = await groupWithMember()
+    expect(renameMember(h, groupDid)).toBe(true)
+
+    const outcome = await h.call(
+      await signed(
+        GROUP_E2EE_REMOVE,
+        groupMeta(groupDid, { operation_id: 'op-remove-unrelated' }),
+        removeBody(groupDid, { member_did: owner.did, member_device_id: OWNER_DEVICE }),
+      ),
+    )
+    expect(outcome.json?.error?.code).toBe(5004)
+    expect(outcome.json?.error?.data?.anp_code).toBe('anp.group.e2ee.state_not_ready')
+    expect(outcome.json?.error?.message).toContain('is not a leaf of the superseded')
+    expect(outcome.json?.error?.message).toContain(member.did)
+  })
+
+  it('lets the matching Remove retire the old leaf, clear the row, and resume sends', async () => {
+    // §10.5 的收尾：最后一次 Remove 成功之后才有可能恢复应用消息。这一条同时钉住"两道暂停
+    // 判据一起解除"——投影里那条旧 leaf 变 `terminal`，编排行也清掉。
+    const { h, groupDid } = await groupWithMember()
+    expect(renameMember(h, groupDid)).toBe(true)
+
+    const outcome = await h.call(
+      await signed(GROUP_E2EE_REMOVE, groupMeta(groupDid, { operation_id: 'op-remove-1' }), removeBody(groupDid)),
+    )
+    expect(outcome.json?.error).toBeUndefined()
+    expect(h.storage.groupLeaf(groupDid, member.did, MEMBER_DEVICE)?.state).toBe('terminal')
+    expect(h.storage.groupDidUpdate(groupDid)).toBeUndefined()
+
+    const resumed = await h.call(
+      await signed(GROUP_E2EE_SEND, sendMeta(groupDid, { operation_id: 'op-send-resumed' }), sendBody(groupDid)),
+    )
+    expect(resumed.json?.error).toBeUndefined()
+    expect(resumed.json?.result?.accepted).toBe(true)
   })
 })

@@ -861,21 +861,19 @@ describe('the member DID rename (§8.12)', () => {
     expect(second.countActiveMembers(GROUP)).toBe(2)
   })
 
-  it('carries the leaf rows across, dropping the ones the new DID already has', () => {
-    // 叶子投影跟着名册走：`group_leaves.member_did` 正是投递队列寻址用的那一列，留在旧 DID 上
-    // 等于把 §8.12 要求关掉的地址留在了最要紧的地方。新 DID 已有行的设备不搬——两行会让
-    // "这台设备是不是 leaf" 有两个答案。
+  it('leaves the Leaf projection alone', () => {
+    // `group_leaves` 说的是"哪个 `(did, device)` 现在在 MLS 里"，而只有 `group.e2ee.add` /
+    // `remove` 能改这件事。改名顺手把 leaf 搬过去，就等于在 owner 还没 Add 之前替新 DID 断言
+    // 了一个 leaf：§10.5 的暂停会因此判不出来，下一条 `group.incoming` 也会发给一台手里没有
+    // 这个群 MLS 状态的设备。旧 DID 的 leaf 由 P6 的编排退役，不由这次改名。
     const store = open()
+    store.upsertGroupMember(member(OLD))
     store.upsertGroupLeaf(leafFor(OLD, 'dev-a'))
-    store.upsertGroupLeaf(leafFor(OLD, 'dev-b'))
-    store.upsertGroupLeaf(leafFor(NEW, 'dev-b'))
 
-    expect(store.renameGroupLeaves(GROUP, OLD, NEW)).toBe(2)
+    expect(store.renameGroupMember(GROUP, OLD, NEW, 9)).toBe(true)
 
-    expect(store.groupLeaf(GROUP, OLD, 'dev-a')).toBeUndefined()
-    expect(store.groupLeaf(GROUP, NEW, 'dev-a')?.state).toBe('active')
-    expect(store.groupLeaf(GROUP, NEW, 'dev-b')?.state).toBe('active')
-    expect(store.activeGroupLeaves(GROUP)).toHaveLength(2)
+    expect(store.groupLeaf(GROUP, OLD, 'dev-a')?.state).toBe('active')
+    expect(store.groupLeaf(GROUP, NEW, 'dev-a')).toBeUndefined()
   })
 })
 

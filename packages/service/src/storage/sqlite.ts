@@ -861,36 +861,6 @@ class SqliteStorage implements Storage {
     })
   }
 
-  /** Leaf 投影跟着改名走。主键里含 `member_did`，所以只能逐台设备搬；一个成员的设备数是个
-   *  位数，一次事务里跑完。 */
-  renameGroupLeaves(groupDid: string, fromDid: string, toDid: string): number {
-    return this.transaction(() => {
-      const rows = this.stmt(
-        'SELECT member_device_id FROM group_leaves WHERE group_did = ? AND member_did = ?',
-      ).all(groupDid, fromDid) as Row[]
-      for (const row of rows) {
-        const deviceId = text(row.member_device_id)
-        const clash = this.stmt(
-          `SELECT 1 AS present FROM group_leaves
-            WHERE group_did = ? AND member_did = ? AND member_device_id = ?`,
-        ).get(groupDid, toDid, deviceId) as Row | undefined
-        if (clash !== undefined) {
-          // 新 DID 名下已经有一行同一台设备：那一行才是当前的，旧行就地删掉。搬过去会撞主键，
-          // 留着会让"这台设备是不是当前 leaf"有两个答案。
-          this.stmt(
-            'DELETE FROM group_leaves WHERE group_did = ? AND member_did = ? AND member_device_id = ?',
-          ).run(groupDid, fromDid, deviceId)
-          continue
-        }
-        this.stmt(
-          `UPDATE group_leaves SET member_did = ?
-            WHERE group_did = ? AND member_did = ? AND member_device_id = ?`,
-        ).run(toDid, groupDid, fromDid, deviceId)
-      }
-      return rows.length
-    })
-  }
-
   appendGroupEvent(event: StoredGroupEvent): void {
     this.stmt(
       `INSERT INTO group_events (group_did, event_seq, event_type, payload_json, occurred_at)
