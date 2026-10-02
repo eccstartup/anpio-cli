@@ -410,7 +410,10 @@ export interface StoredDownloadTicket {
  */
 export interface StoredContact {
   ownerDid: string
-  /** core's `stableSubjectId(did)` — the protocol's "this is still the same party". */
+  /** core's `subjectOf(did)` — the protocol's "this is still the same party". Not
+   *  `stableSubjectId`, which throws on anything but `did:wba`: the RPC layer derives this
+   *  from a caller-supplied DID, and a total function is what keeps an odd DID from being a
+   *  500. */
   subject: string
   /** Where that subject currently lives. A column, never a key. */
   did: string
@@ -860,6 +863,17 @@ export interface Storage {
    *  is why the answer comes back rather than being assumed — the caller cannot know which
    *  of the two happened without asking. */
   upsertContact(contact: StoredContact): StoredContact
+  /** Learn a peer from traffic (TODO6 §3.3 write path ②): create the row if this owner has
+   *  never seen this subject, and otherwise move `did` to the one just seen — a key update
+   *  is thus picked up the next time the peer writes.
+   *
+   *  **`remark` is never touched, and that is the whole reason this is not `upsertContact`.**
+   *  `contacts.put`'s rule is "absent means clear"; a message arriving is not the user
+   *  saying anything about the name, so applying that rule here would erase a name the user
+   *  chose, the first time the named peer writes again. `createdAt` is likewise kept.
+   *
+   *  `at` stamps both columns on the insert; on the update only `updated_at` moves. */
+  rememberContact(contact: { ownerDid: string; subject: string; did: string; at: string }): void
   /** Drop one row. Returns whether one was there, so `contacts.remove` can answer honestly
    *  instead of reporting success for a no-op. */
   removeContact(ownerDid: string, subject: string): boolean

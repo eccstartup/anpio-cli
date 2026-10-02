@@ -1494,6 +1494,25 @@ class SqliteStorage implements Storage {
     return toContact(row)
   }
 
+  rememberContact(contact: {
+    ownerDid: string
+    subject: string
+    did: string
+    at: string
+  }): void {
+    // 与 `upsertContact` 只差一处，但那一处是全部：冲突那一支**不动 `remark`**。
+    // 这条路径是服务自己走的（收到一条消息，认识一下发件人），用户起的名字不归它管——
+    // 照搬 `contacts.put` 的"缺即清空"会在被备注的人下次来信时把名字抹掉。
+    // `created_at` 同理：只由 INSERT 写，冲突支不在 SET 里，于是它留的是第一次那个瞬间。
+    this.stmt(
+      `INSERT INTO contacts (owner_did, subject, did, remark, created_at, updated_at)
+       VALUES (?, ?, ?, NULL, ?, ?)
+       ON CONFLICT (owner_did, subject) DO UPDATE SET
+         did = excluded.did,
+         updated_at = excluded.updated_at`,
+    ).run(contact.ownerDid, contact.subject, contact.did, contact.at, contact.at)
+  }
+
   removeContact(ownerDid: string, subject: string): boolean {
     const result = this.stmt('DELETE FROM contacts WHERE owner_did = ? AND subject = ?').run(
       ownerDid,

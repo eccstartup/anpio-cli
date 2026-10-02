@@ -128,6 +128,9 @@ cargo run --manifest-path rust/Cargo.toml -- discover http://127.0.0.1:8787
   缺字段就是清空，而 `contacts add <did>` 本意常是"确认这个人已在册"。
   `add` 收非 DID 的输入会**在开身份之前**就拒掉：`subject_of` 是全函数，否则
   `contacts add Alice --remark Alice` 会落一行键是字面量 `Alice`、永远发不出去的记录。
+  **收到一条私聊也会让发件人落一行**（写入路径 ②），但没有备注、且**绝不碰已有的备注**
+  ——一封来信对名字没有说任何话。所以 `contacts list` 顺带就是"谁跟我说过话"，
+  而对端换钥后再写一封信，新 DID 就落回那一行的 `did` 列。
   没有 nickname / 头像字段：那是对方自己的说法、存在**对方**的主机上，存到这儿就是一份
   没有失效机制的缓存。判定逻辑是 `src/contacts.rs` 里对 book 的**纯函数**（11 个单测）。
 - **`msg listen`** —— 唯一那条常驻契约（[realtime.md](../docs/design/realtime.md)）。

@@ -11,7 +11,7 @@
 // 本服务上时，`relayed` 带着对端的答复进来，这里只记台账、不写投递。转发本身不属于这个
 // 文件——它连一个字节都不该知道。
 
-import { type AnpAuth, type AnpMeta, type AnpParams } from '@agentx/core'
+import { subjectOf, type AnpAuth, type AnpMeta, type AnpParams } from '@agentx/core'
 import type { DeliveryRecord, Storage } from '../storage/types'
 import { attachmentGrantsFor, insertAttachmentGrants } from './attachments'
 
@@ -214,6 +214,22 @@ export function storeDirectMessage(storage: Storage, input: StoreDirectInput): R
     ...(meta.recipient_device_id !== undefined ? { recipientDeviceId: meta.recipient_device_id } : {}),
   })
   input.onDelivery?.(delivered)
+
+  // TODO6 §3.3 的写入路径 ②：一条私聊到达，就把发件人记进**收件人**的通讯录。
+  //
+  // 这是"认识一下"，不是"起个名字"——所以走 `rememberContact` 而不是 `upsertContact`：
+  // 后者按 `contacts.put` 的规则（缺字段即清空）会把用户已经起好的备注抹掉，而这次来信
+  // 本身没有对名字说任何话。两条路径分开，是为了让"谁有权改名字"在代码里看得见。
+  //
+  // 位置在 `relayed` 早返回**之后**：收件人不在本服务上时这里整段不执行，因为那条消息
+  // 的投递行、以及随之而来的这行通讯录，都是**目标 ingress** 的事——它自己会记。
+  // 也因为在事务里：消息落库与"记住了这个人"同生共死，不会出现"消息在、人不在"。
+  storage.rememberContact({
+    ownerDid: targetDid,
+    subject: subjectOf(senderDid),
+    did: senderDid,
+    at: acceptedAt,
+  })
 
   return {
     accepted: true,

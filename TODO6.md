@@ -131,15 +131,15 @@ ANP 的定址单位是 **DID**，`msg send --to` 只吃 DID。
       非 JSON 输出会把 `named:` 一行打出来。
 - [x] ~~**重名要能拒**~~ —— 大小写不敏感地收集**全部**匹配再计数，≥2 就退出 1 并逐个列出候选的 DID 与备注；
       不是"精确拼写赢"。`lookup` 的 `Ambiguous` 分支就是这个。
-- [ ] **写入路径**：① 显式 `contacts add` **已落地**；② 收到消息时把 sender 的 subject / did 落一行
-      —— **还没做**，单独一小块；③ 不做（自动联网查 profile 会让"看看通讯录"突然打网络）。
-      —— **2026-10-02 裁定：② 做**（用户选"做"）。语义有一条要钉死：
-      **②绝不能碰 `remark`**。`contacts.put` 的线上规则是"缺字段即清空"，
-      而 ② 是系统自己走的路径，它若照搬那条，就会把用户已经起好的名字清掉——
-      这正是"发错人"的另一种形态。所以 ② 单独一条存储路径：
-      `INSERT … ON CONFLICT (owner_did, subject) DO UPDATE SET did, updated_at`，
-      **`remark` 与 `created_at` 都不动**。另外它顺带答了下面那条"换钥后刷新 did"的一半：
-      对端换钥后**只要再发一条消息**，新 DID 就随 `meta.sender_did` 落回来了。
+- [x] ~~**写入路径**~~ —— ① 显式 `contacts add` 与 ② 收到消息时落一行**都已落地**；
+      ③ 不做（自动联网查 profile 会让"看看通讯录"突然打网络）。
+      —— **2026-10-02 裁定：② 做**（用户选"做"）。语义钉死在代码里：**②绝不碰 `remark`**。
+      `contacts.put` 的线上规则是"缺字段即清空"，而 ② 是系统自己走的路径，照搬那条
+      就会把用户已经起好的名字清掉——"发错人"的另一种形态。所以存储层分成两条：
+      `upsertContact`（整行以这次为准）与 `rememberContact`（只挪 `did` / `updated_at`），
+      `direct.ts` 用的是后者。落点在受理的同一个事务里，且只在**本服务就是 ingress** 时
+      执行（`relayed` 早返回之后）。三条服务侧用例：来信落一行（无备注）／来信**不动**
+      已有的备注／同一个人第二封不新增行。
 - [x] ~~**拉 nickname 要跨域**~~ —— **裁定：不做**（同 ③）。nickname 是对方自己的说法、存在对方的主机上，
       存到我们这儿就是一份没有失效机制的缓存。`contacts` 只答"这个 DID 对我来说是谁"。
       所以 `Contact` 里没有 nickname 字段，服务端返回里也没有。
@@ -147,6 +147,11 @@ ANP 的定址单位是 **DID**，`msg send --to` 只吃 DID。
       所以备注不会丢（§3.3 第三条测试已覆盖）。**还缺的是 `did` 这一列的刷新**：
       对端换钥后，本地这行的 `did` 会旧到下次交互为止。谁触发？（`contacts refresh`？
       还是 `did resolve --chain` 成功后顺手？）——**这一条还悬着，要给答案。**
+      —— 2026-10-02：写入路径 ② 落地后**这条窄了一半**。对端只要再写一封信，
+      `meta.sender_did` 里的新 DID 就落回这一行的 `did` 列（`rememberContact` 只挪 `did`）。
+      剩下的只是"换了钥、且从此不再来信"那一档，而它在**按 DID 发信会失败、按名字仍解析到
+      旧 DID** 时才咬人。所以现在的形态是：不急着造 `contacts refresh`，
+      但真遇到时它得是一条命令，而不是让用户手动 `remove` 再加回来。
 - [x] ~~**测试**~~ —— ① 换钥后备注还在：`packages/service/src/rpc/dispatch.test.ts`
       的 "subject survives a key change"；② 重名被拒且列出候选：`contacts.rs`
       `two_contacts_with_the_same_name_are_ambiguous_and_both_are_listed` 与

@@ -1327,6 +1327,52 @@ describe('the address book extension surface (TODO6 §3)', () => {
     const empty = await selfCall(h, receiver, 'contacts.put', { did: '' }, { operation_id: 'op-empty' })
     expect(empty.json?.error?.data?.anp_code).toBe('anp.invalid_params_shape')
   })
+
+  // —— 写入路径 ②：收到消息时把发件人落一行（TODO6 §3.3） --------------------------
+
+  it('files the sender of an arriving message, with no remark', async () => {
+    const h = harness()
+    // 这封是 `sender` 发给 `receiver` 的（`signed()` 的默认形状）。
+    const delivered = await h.call(await signed())
+    expect(delivered.json?.result?.accepted).toBe(true)
+
+    // 收件人的通讯录里多了一个人，且**没有名字**——"认识一下"与"起个名字"是两件事。
+    const listed = await selfCall(h, receiver, 'contacts.list', {})
+    expect(listed.json?.result?.contacts).toEqual([
+      {
+        subject: subjectOf(sender.did),
+        did: sender.did,
+        remark: null,
+        created_at: NOW.toISOString(),
+        updated_at: NOW.toISOString(),
+      },
+    ])
+  })
+
+  it('does not let an arriving message touch the name I gave the sender', async () => {
+    // 这一条是 ② 的整个理由。`contacts.put` 的线上规则是"缺字段即清空"，而"收到一条消息"
+    // 对名字没有说任何话——照搬那条规则，就会在被我起过名的人下次来信时把名字抹掉，
+    // 而那正是"发错人"的另一种形态：名字没了之后，`msg send --to Alice` 就找不到人。
+    const h = harness()
+    await selfCall(h, receiver, 'contacts.put', { did: sender.did, remark: 'Alice' })
+
+    await h.call(await signed())
+
+    const listed = await selfCall(h, receiver, 'contacts.list', {})
+    const rows = listed.json?.result?.contacts as { did: string; remark: string }[]
+    expect(rows).toHaveLength(1)
+    expect(rows[0]?.remark).toBe('Alice')
+  })
+
+  it('keeps one row as the same peer writes again', async () => {
+    const h = harness()
+    await h.call(await signed({ meta: meta({ operation_id: 'op-a', message_id: 'msg-a' }) }))
+    await h.call(await signed({ meta: meta({ operation_id: 'op-b', message_id: 'msg-b' }) }))
+
+    // 键是 subject，所以第二封落回同一行，不是第二个 Alice。
+    const listed = await selfCall(h, receiver, 'contacts.list', {})
+    expect(listed.json?.result?.contacts).toHaveLength(1)
+  })
 })
 
 describe('capability discovery (P1 §8.2)', () => {
