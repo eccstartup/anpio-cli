@@ -21,6 +21,7 @@ import { loadHttpSigner } from './federation/signing'
 import { createServer } from './http/server'
 import { openObjectStore } from './objects'
 import { createMemberDidRefreshWorker } from './refresh/memberDidRefresh'
+import { groupDidDocument } from './rpc/groupDidDocument'
 import { createDispatch } from './rpc/dispatch'
 import { openStorage } from './storage/sqlite'
 import { createSubscriberRegistry } from './stream/registry'
@@ -71,8 +72,16 @@ async function main(): Promise<void> {
     handleObject: dataPlane.handleObject,
     // A pure function of the configuration and the method table, so it is built once. The
     // DID Service fetches this to embed as the agent's `ANPMessageService` entry
-    // (message-service.md §13) — this service never writes a DID document itself.
+    // (message-service.md §13) — this service does not publish its OWN DID document; its
+    // own {@link Config.serviceDid} document stays with the DID Service.
     wellKnown: JSON.stringify(buildServiceEntry(config), null, 2),
+    // Group documents are the other half (B1b-A2/A3): those DID lives in this service's own
+    // namespace (`serviceDid + ":g:" + <id>`, groups.md §2), so this service both builds and
+    // hosts it. Unknown ids and groups from before v11 answer 404 from the route.
+    handleGroupDid: (groupDid) => {
+      const document = groupDidDocument(storage, config, groupDid)
+      return document === undefined ? undefined : JSON.stringify(document, null, 2)
+    },
   })
   // Outbound `direct.incoming` pushes. Started only after the socket is up: a startup
   // that fails should exit without a background timer having already spent attempts.

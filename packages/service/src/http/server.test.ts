@@ -4,7 +4,15 @@ import { loadConfig } from '../config'
 import { Readable } from 'node:stream'
 import { OBJECTS_PATH, UPLOAD_PATH } from '../rpc/attachments'
 import type { DataPlaneHandler } from '../dataplane'
-import { createServer, RPC_PATH, STREAM_PATH, WELL_KNOWN_PATH, type RpcHandler, type RunningServer } from './server'
+import {
+  createServer,
+  groupDidRoutePrefix,
+  RPC_PATH,
+  STREAM_PATH,
+  WELL_KNOWN_PATH,
+  type RpcHandler,
+  type RunningServer,
+} from './server'
 
 /** A config bound to an OS-chosen port, so a test never collides with a real service. */
 function testConfig(overrides: Record<string, string> = {}) {
@@ -358,5 +366,101 @@ describe('the P7 data-plane routes', () => {
     const res = await fetch(`${base}${UPLOAD_PATH}/tok-1`, { method: 'PUT', body: 'a lot of bytes' })
     expect(res.status).toBe(413)
     expect(res.headers.get('connection')).toBe('close')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// B1b-A3 —— 群 DID 文档的托管路由。
+//
+// 这条路由的路径**不是**一个常量：`didToUrl` 把 `group_did`（= `serviceDid + ":g:" + <id>`）
+// 映成 `…/<serviceDid 自己的路径段>/g/<id>/did.json`，所以 `serviceDid` 带路径段时路由也
+// 跟着挪。下面第一条测试钉的就是这件事，其余钉状态码。
+describe('GET …/g/<id>/did.json (B1b-A3)', () => {
+  async function startGroups(
+    handleGroupDid?: (groupDid: string) => string | undefined,
+    overrides: Record<string, string> = {},
+  ): Promise<string> {
+    running = createServer({
+      config: testConfig(overrides),
+      handleRpc: echo,
+      ...(handleGroupDid !== undefined ? { handleGroupDid } : {}),
+    })
+    await running.listen()
+    return `http://127.0.0.1:${running.address.port}`
+  }
+
+  const SERVICE = 'did:web:groups.example'
+  const DOC = '{"id":"did:web:groups.example:g:AAAA"}'
+
+  it('derives its path from didToUrl, so a service DID with its own path segments moves it too', () => {
+    // 路由的前缀与"对端会去 GET 的那个 URL"必须是同一个推导，否则表现是"本地的群文档找
+    // 不到，而跨域解析总是 404"。
+    expect(groupDidRoutePrefix(testConfig({ AGENTX_PUBLIC_URL: 'https://groups.example' }))).toBe('')
+    expect(
+      groupDidRoutePrefix(
+        testConfig({ AGENTX_PUBLIC_URL: 'https://host.example', AGENTX_SERVICE_DID: 'did:web:host.example:svc' }),
+      ),
+    ).toBe('/svc')
+  })
+
+  it('serves the document as application/did+json and hands the handler the group DID', async () => {
+    const seen: string[] = []
+    const base = await startGroups(
+      (groupDid) => {
+        seen.push(groupDid)
+        return DOC
+      },
+      { AGENTX_PUBLIC_URL: 'https://groups.example' },
+    )
+
+    const res = await fetch(`${base}/g/AAAA/did.json`)
+
+    expect(res.status).toBe(200)
+    // 与 awiki 那条路一致，也是 packages/e2e 的玩具主机在用的。
+    expect(res.headers.get('content-type')).toBe('application/did+json')
+    expect(await res.text()).toBe(DOC)
+    // 路由交给处理器的是**群 DID**，不是路径里那段 id——拼回来的那一步在路由这一侧，因为
+    // 只有它知道 `serviceDid`（`group_did` 的形状是 groups.md §2）。
+    expect(seen).toEqual(['did:web:groups.example:g:AAAA'])
+  })
+
+  it('serves it under the service DID\'s own path prefix', async () => {
+    const base = await startGroups(
+      () => DOC,
+      { AGENTX_PUBLIC_URL: 'https://host.example', AGENTX_SERVICE_DID: 'did:web:host.example:svc' },
+    )
+
+    expect((await fetch(`${base}/svc/g/AAAA/did.json`)).status).toBe(200)
+    // 前缀之外的同名路径不是这条路由。
+    expect((await fetch(`${base}/g/AAAA/did.json`)).status).toBe(404)
+  })
+
+  it('answers 404 for a group this service did not mint — not 500', async () => {
+    // 陌生人猜了一个 id 打过来，是"这里没有你问的东西"。v11 之前建的、没有钥的群也是这条。
+    const base = await startGroups(() => undefined)
+    const res = await fetch(`${base}/g/not-ours/did.json`)
+    expect(res.status).toBe(404)
+  })
+
+  it('answers 405 naming GET, because the route takes exactly one method', async () => {
+    const base = await startGroups(() => DOC)
+    const res = await fetch(`${base}/g/AAAA/did.json`, { method: 'POST', body: '{}' })
+    expect(res.status).toBe(405)
+    expect(res.headers.get('allow')).toBe('GET')
+  })
+
+  it('answers 501 when the route is not wired, which is not the same as a missing group', async () => {
+    const base = await startGroups()
+    expect((await fetch(`${base}/g/AAAA/did.json`)).status).toBe(501)
+  })
+
+  it('answers 404 for a path that is not this route, and never 500', async () => {
+    const base = await startGroups(() => DOC)
+    // 空 id、多了一段、以及解不开的转义。数据面那条路由对畸形段答 400（那是客户端拿到手的
+    // 凭据，坏掉就是请求的错）；这里答 404，因为"DID 文档在这个 URL 上吗"的答案是"没有"，
+    // 而这正是 DID 解析器期待的答复。
+    for (const path of ['/g/did.json', '/g/a/b/did.json', '/g/%zz/did.json', '/g/AAAA/did.json/x']) {
+      expect((await fetch(`${base}${path}`)).status, path).toBe(404)
+    }
   })
 })

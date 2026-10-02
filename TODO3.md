@@ -121,6 +121,18 @@ private_key, created_at)`，`private_key` 是 hex 的 32 字节种子——与 `
 - `Content-Type` 用 `application/did+json`——与 awiki 那条路一致，也是 `packages/e2e`
   的玩具主机已经在用的。
 
+**落地（2026-10-02）。** 路由挂在 `http/server.ts`（路由表本来就在那里），处理器是 `main.ts`
+里的一句 `groupDidDocument(storage, config, groupDid)`。**前缀是推出来的，不是写死的**：
+`groupDidRoutePrefix(config)` 拿一个哨兵 id 去问 core 的 `didToUrl`，再把哨兵那段切掉——于是
+"对端会 GET 的路径"与"我们挂的路由"用的是同一个函数。`serviceDid` 自带路径段时（
+`did:web:host:svc`）前缀就是 `/svc`，测试里有一条专门钉它（写死 `/g/` 的实现会在这条上红）。
+段解码与数据面共用新抽出来的 `decodeSegment`（"一个段要么是可用的 id 要么不是"这个判断不该
+因为问的是哪条路由而不同）。状态码：未接线的处理器 → 501（与 well-known 同规矩），未知群 /
+v11 前无钥的群 / 空段 / 多一段 / 坏转义 → 404，非 GET → 405 + `Allow`。
+
+`main.ts` 那句"this service never writes a DID document itself"随之改掉——本轮之后它对**群**
+文档是假的；本服务**自己**的身份文档仍由 DID Service 托管，那句话保留的是这一半。
+
 ### A4 schema v11 + 把 `group.*` 接进 `RELAYED_METHODS`
 
 表只有一张（群钥）。接法与 B1a **一字不差**：`RELAYED_METHODS` 加上方法名，`relayFor`

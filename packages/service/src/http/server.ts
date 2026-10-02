@@ -10,7 +10,7 @@
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { Duplex } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
-import { ConnectxError } from '@agentx/core'
+import { ConnectxError, didToUrl } from '@agentx/core'
 import type { Config } from '../config'
 import type { DataPlaneHandler, DataPlaneResponse } from '../dataplane'
 // 这两条路由的路径由**铸 `upload_uri` / `object_uri` 的那个模块**定义：客户端的 URL 与
@@ -21,6 +21,10 @@ import { upgrade, type WebSocketConnection, type WebSocketHandlers } from '../st
 export const RPC_PATH = '/anp-im/rpc'
 export const STREAM_PATH = '/anp-im/stream'
 export const WELL_KNOWN_PATH = '/.well-known/anp-message-service.json'
+
+/** 群 DID 文档路径的尾段。头一段（`…/g/`）由 {@link groupDidRoutePrefix} 推出来，因为它
+ *  跟着 `serviceDid` 变；这一段是固定的。两段合起来正好是 `didToUrl` 对群 DID 的映射。 */
+const GROUP_DID_SUFFIX = '/did.json'
 
 /** 一个端点先当成 URL 解出来。解不出来就是一条不会自己好的失败——报清楚是哪一端的文档
  *  写坏了，而不是让 `new URL` 的 `Invalid URL` 混进重试日志。 */
@@ -56,6 +60,20 @@ export function isOurOwnIngress(config: Config, endpoint: string): boolean {
 
 function trimTrailingSlash(path: string): string {
   return path.replace(/\/+$/, '')
+}
+
+/** 群 DID 文档的路由前缀（B1b-A3）。
+ *
+ *  groups.md §2 的 `group_did = serviceDid + ":g:" + <id>` 决定了文档的 URL 就是
+ *  `didToUrl(serviceDid + ":g:" + <id>)`——`did:web:host:g:XXXX` →
+ *  `https://host/g/XXXX/did.json`。这里拿一个哨兵 id 去问**同一个** `didToUrl`，再把哨兵
+ *  那一段切掉，于是"对端会 GET 的路径"与"我们挂的路由"不可能变成两条各写一份的规则。
+ *
+ *  `serviceDid` 自带路径段时（`did:web:host:svc:g:XXXX`）前缀是 `/svc`——这正是不能把
+ *  `/g/` 当成绝对路径写死的原因。返回空串表示群文档就挂在根上。 */
+export function groupDidRoutePrefix(config: Config): string {
+  const probe = 'probe'
+  return new URL(didToUrl(`${config.serviceDid}:g:${probe}`)).pathname.slice(0, -`/g/${probe}/did.json`.length)
 }
 
 /** `POST /anp-im/rpc`, the control plane. `body` is the request text, undecoded: the
@@ -122,6 +140,15 @@ export interface ServerOptions {
   handleUpload?: DataPlaneHandler
   /** `GET {object_uri}` (P7 §11.2). */
   handleObject?: DataPlaneHandler
+  /**
+   * `GET …/g/<id>/did.json` (B1b-A3). Absent means 501, same rule as `wellKnown`.
+   *
+   * 传入的是**群 DID**（前缀由 {@link groupDidRoutePrefix} 从 `config.serviceDid` 推出来，
+   *  路由把它拼回去），返回文档的 JSON 文本。返回 `undefined` 表示"这里没有你问的那个群"
+   *  ——未知的 id 与 v11 之前建的、没有钥的群都走这条，路由答 404。**不是 500**：一个陌生人
+   *  猜了一个 id 打过来，是"没有这个东西"，不是"我们坏了"（TODO3 A3）。
+   */
+  handleGroupDid?: (groupDid: string) => string | undefined
 }
 
 export interface RunningServer {
@@ -193,7 +220,14 @@ async function sendDataPlane(res: ServerResponse, answer: DataPlaneResponse): Pr
  *  parser leaves percent-escapes in `pathname`, so the segment still has to be decoded —
  *  and a malformed escape is a bad request rather than a crash. */
 function resourceOf(pathname: string, prefix: string): string | undefined {
-  const raw = pathname.slice(prefix.length + 1)
+  return decodeSegment(pathname.slice(prefix.length + 1))
+}
+
+/** One path segment, decoded — or `undefined` when it is empty, contains a separator, or
+ *  carries a malformed escape. Both route families that name a resource share it: a
+ *  segment is either a usable id or it is not, and the answer must not depend on which
+ *  route asked. */
+function decodeSegment(raw: string): string | undefined {
   if (raw === '' || raw.includes('/')) return undefined
   try {
     return decodeURIComponent(raw)
@@ -234,6 +268,8 @@ function isJsonContentType(value: string | undefined): boolean {
 export function createServer(options: ServerOptions): RunningServer {
   const { config } = options
   const address = { ...config.listen }
+  /** `…/<serviceDid 自己的路径段>/g/`，群文档的 id 段紧跟在它后面（B1b-A3）。 */
+  const groupDidPath = `${groupDidRoutePrefix(config)}/g/`
 
   const server: Server = createHttpServer((req, res) => {
     void route(req, res).catch(() => {
@@ -295,6 +331,33 @@ export function createServer(options: ServerOptions): RunningServer {
       }
       send(res, 200, 'application/json', document)
       return
+    }
+
+    // ---- P4 group DID documents (B1b-A3) -------------------------------------
+    // 群 DID 住在本服务自己的命名空间里，所以它的文档也由本服务发布（groups.md §2/§2.2）。
+    // 前缀在 `createServer` 里从 `didToUrl` 推一次，之后按它认路径。
+    if (url.pathname.startsWith(groupDidPath) && url.pathname.endsWith(GROUP_DID_SUFFIX)) {
+      const groupId = decodeSegment(url.pathname.slice(groupDidPath.length, -GROUP_DID_SUFFIX.length))
+      if (groupId !== undefined) {
+        if (req.method !== 'GET') {
+          refuse(res, 405, 'method not allowed', { allow: 'GET' })
+          return
+        }
+        if (options.handleGroupDid === undefined) {
+          refuse(res, 501, `${groupDidPath}<id>/did.json is not implemented yet`)
+          return
+        }
+        // 未知的群 id（以及 v11 之前建的、没有钥的群）是 404：这里没有你问的东西，不是我们
+        // 坏了。一个陌生人猜了一个 id 打过来不该看到 500（TODO3 A3）。
+        const document = options.handleGroupDid(`${config.serviceDid}:g:${groupId}`)
+        if (document === undefined) {
+          refuse(res, 404, 'no such group')
+          return
+        }
+        // `application/did+json`：与 awiki 那条路一致，也是 packages/e2e 的玩具主机在用的。
+        send(res, 200, 'application/did+json', document)
+        return
+      }
     }
 
     // ---- P7 data plane (C10) -------------------------------------------------
