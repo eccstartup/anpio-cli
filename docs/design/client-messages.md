@@ -68,7 +68,7 @@ TODO5 定了方向（§0.1 第 2、3 条），具体形状留到动手时落，�
 
 ```
 1. crate 的 decrypt_received / process_notice         → 落在 mls/
-2. INSERT OR IGNORE 一行 messages（明文 + epoch）      → 落在 messages.db
+2. INSERT OR IGNORE 一行 messages（明文 + 群版本）      → 落在 messages.db
 3. UPDATE sync_state.applied_seq                      → 同一事务，最后一步
 ```
 
@@ -109,10 +109,10 @@ CREATE TABLE messages (
   text            TEXT,                      -- §7.4 的 exactly-one-of
   payload_json    TEXT,                      --   第二支；两列恰好一个非空
   service_seq     INTEGER,                   -- 服务端 deliveries.seq，发出的消息没有
-  endpoint        TEXT,                      -- 哪一个 inbox（见 §4.2）
+  endpoint        TEXT NOT NULL,             -- 哪一个 inbox（见 §4.2）；service_seq 的命名空间
   accepted_at     TEXT,                      -- 服务端给的时间
   group_event_seq INTEGER,                   -- 群才有：P6 的 group_event_seq
-  epoch           INTEGER,                   -- 群才有：解密时本地的 epoch
+  group_state_version INTEGER,               -- 群才有：密文加密时对面的 group_state_version
   received_at     TEXT NOT NULL,             -- 落到本库的时间（本地钟）
   read_at         TEXT,                      -- 本地已读
   UNIQUE (conversation_id, sender_did, message_id)
@@ -138,10 +138,17 @@ CREATE TABLE sync_state (
   唯一索引，也是全部幂等性所在。它必须带 `sender_did`：`message_id` 是**发送方作用域**的，
   两个发件人挑同一个串是完全合法的（服务端的幂等键 `(sender_did, target, method, operation_id)`
   也带发送方，同一条理由）。本地行号 `id` 只用来排序，不是身份。
-- **群消息多两列，理由不是"顺便记一下"。** `epoch` 是解密时的本地 epoch，`group_event_seq` 是
-  服务端给的群内序号。记 epoch 的价值在**对账**：`messages.db` 与 `mls/` 是两件资产，它们会
-  分别被恢复（§2），一旦 `mls/` 从更早的备份回来，`messages.db` 里那些 epoch 大于当前状态的行
-  就是"读得出来、但接着聊不下去"的证据。没有这一列，出问题时两个文件无法互相解释。
+- **群消息多两列，理由不是"顺便记一下"。** `group_event_seq` 是服务端给的群内序号，
+  `group_state_version` 是**密文自己指名**的那一版群状态（P6 §12.5 的
+  `group_state_ref.group_state_version`，`anp` 1.0.5 的 `V2GroupStateRef`）。记它而不是
+  记本地的 epoch：本地 epoch 是 crate 的状态，两个文件各有一份且会各自回滚，而对账要问的
+  恰恰是"这一行是**对面**在哪一版上加的密"。价值在**对账**：`messages.db` 与 `mls/` 会分别
+  被恢复（§2），一旦 `mls/` 从更早的备份回来，那些版本高于当前状态的行就是"读得出来、但接着
+  聊不下去"的证据。没有这一列，出问题时两个文件无法互相解释。
+  两列**在库里都是 INTEGER**，尽管线上是十进制字符串（§7.3）：服务端自己的
+  `messages.group_event_seq` / `group_state_version` 就是整数列，它还得**自增**前一个，
+  而且字符串排序不是排序。转换在写入时做，转不动就拒绝整行（宁可什么都不记，也不要记一个
+  悄悄截断的计数器）。
 - **`direction` 与"发出的消息"同表。** 聊天客户端两个方向都要显示，所以发出的消息也落一行，
   在 `msg send` / `group e2ee send` **成功之后**写。没有 `outbox`、没有重试队列：`operation_id`
   那套重试归调用方（[cli.md](cli.md) §3.3 说得明白，旗标存在的唯一理由就是重试），本地库
@@ -247,6 +254,13 @@ CREATE TABLE sync_state (
 | 加密这张库 | TODO5 §0.1 第 2 条已裁定**留明文**；静态加密是另一个决定，不为它顺手加一层 |
 
 ## 7. 动手前
+
+> **2026-10-02 状态。** 下面第 1、2 条已经落地：`crate::messages` 是库本身（`MessageStore`），
+> `RecordingView` 是第 2 条说的那个挂法（包在 `ListenView` 外面，`cmd_msg_listen` 里装配）。
+> 第 3 条（`msg inbox` 要不要本地优先）**仍然待裁定**，§8 是那三个选项。
+> 落地的过程中改掉了这份文档两处：`epoch` → `group_state_version`（P6 的每消息版本是密文自己
+> 指名的 `group_state_ref.group_state_version`，不是本地 epoch），以及补上 `messages.endpoint`
+> ——没有它 `service_seq` 是一串没有命名空间的数字。
 
 1. **依赖面是零成本。** `rusqlite 0.32.1`（bundled）已经在树里——`anp` 的 `mls` feature 用的就是
    它。所以写这张库不需要引入第二份 SQLite 的 C 源，只是把 `rusqlite.workspace = true` 提出来，

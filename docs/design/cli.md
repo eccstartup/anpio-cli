@@ -392,6 +392,7 @@ CLI 不替调用方决定。
     session.json        # 同上：明文 0600，host:port 为键
     successor.json      # did update 暂存的继任钥；只在投递结果不明时留下
     mls/                # group e2ee 的设备半边：local_state.sqlite（P6 §13）
+    messages.db         # 本地消息记录：明文 0600。**是内容，不是密钥**，但按 TODO4 §E 当密钥对待
   current-agent         # 同上，agent use 写的
 ```
 
@@ -403,8 +404,11 @@ CLI 不替调用方决定。
 2. **暂存的后继钥叫 `successor.json`**，语义一样（提交一次更新的中间态，是那把钥的唯一副本），
    名字不同。P6 的设备状态多出 `mls/` 一个目录，`connectx` 没有——它不做 P6。
 
-`msg` 族在这两套里都不新增存储；`messages.db`（TODO5 §4）尚未落地，落地时是 `mls/` 的兄弟目录
-——形状已定在 [client-messages.md](client-messages.md)，含"为什么是两个文件而不是一个 sqlite"。
+`msg` 族在这两套里都不新增存储；`agentx-cli` 的 `messages.db` **已经落地**（写入侧：
+`msg listen` 每消费一条就落一行；形状在 [client-messages.md](client-messages.md)，含"为什么是
+两个文件而不是一个 sqlite"）。它是 `mls/` 的**兄弟**而不是它的一部分：两者丢了的后果不同
+（`mls/` 丢了以后解不开，`messages.db` 丢了以后只是没历史），所以必须能分别备份。
+**读侧还没动**——`msg inbox` 仍然只问服务端（那份文档 §8 是这三个选项在等裁定）。
 
 ## 9. 与 core 的边界
 

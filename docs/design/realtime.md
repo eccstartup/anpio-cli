@@ -166,9 +166,11 @@ client                                server
 > 时差得最远）。唯一要守的是一条单向不变式：**没有落库的序号不许 ack**，于是本地那份永远是
 > 交付游标的下界。形状在 [client-messages.md](client-messages.md) §4。
 
-**消息库 `messages.db` 尚未落地**；落下之后，上面这些契约（`stream.ack` 是
-`delivery_cursor` 唯一写入者、实时帧不带 seq、`--ack` 的两个调用）一条都不变——
-它是这条路的**下游**，不是替换。
+**消息库 `messages.db` 已经落地**（[client-messages.md](client-messages.md)，`crate::messages`）；
+上面这些契约（`stream.ack` 是 `delivery_cursor` 唯一写入者、实时帧不带 seq、`--ack` 的两个
+调用）一条都不变——它是这条路的**下游**，不是替换。唯一的可见变化是 `msg listen` 现在会往
+本地写：事件到**消费侧**才落库（同一个 `ListenView` 上包一层），写失败只在 stderr 说一句、
+不退出，因为那一行的游标没有前进，下次重连服务端会重放。
 
 ### 5.5 实时帧上不带 `seq`
 
@@ -268,7 +270,10 @@ client                                server
 
 ### 7.3 不做的事
 
-- **不写本地游标**（§5.4）
+- **不写交付游标**（§5.4）：`delivery_cursor` 只在 `stream.ack` 之后动，而 ack 默认关。
+  它写的是本地那张 `sync_state.applied_seq`——另一件事，见 §5.4 的补充与
+  [client-messages.md](client-messages.md) §4。这一条从前写的是"不写本地游标"，在本地还
+  不落库时是对的。
 - **不自动 ack**（§6）
 - **不渲染卡片、不要按键确认**——流里的每一条都弹确认是不可用的
 

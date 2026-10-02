@@ -141,6 +141,12 @@ cargo run --manifest-path rust/Cargo.toml -- discover http://127.0.0.1:8787
   `message/stream.rs` 是传输（地址推导 + WebSocket 拆成读写两条任务），`message/listen.rs`
   是状态机。游标在服务端按 `(owner_did, device_id)` 存，`stream.ack` 是唯一写入者；
   Ctrl-C 退出 0，掉线按 2s→30s 退避重连；`--once` 只补拉。
+  **它同时是 `messages.db` 的写入侧**（[client-messages.md](../docs/design/client-messages.md)）：
+  每消费一条就往 `<agent>/<profile>/messages.db` 落一行，同时推进本地游标
+  `sync_state.applied_seq`。录制挂在 `ListenView` 上（`RecordingView`），所以**到消费侧才落库**，
+  终端看到的东西一个字不变；写失败只在 stderr 说一句、不退出——那一行的游标没有前进，
+  下次重连服务端会重放。P6 的 §12 帧走**设备队列**，没有交付号，所以它只落行、不动游标。
+  文件明文 0600，**按密钥对待**（TODO4 §E）：没有导出命令，备份它就是备份聊天记录。
 - **`group create | info | members | join | leave | send | update-profile | set-remark`** —— P4 `anp.group.base.v2`。
   `src/group.rs` 放策略逻辑（§7.1 的推荐策略、`--policy` 的浅合并、封闭集合校验）。
   `update-profile --name` 改的是**群自己的名字** `group_profile.display_name`（§7.4），
