@@ -111,36 +111,36 @@ ANP 的定址单位是 **DID**，`msg send --to` 只吃 DID。
 
 ### 3.3 要做的事
 
-- [ ] **定表**：`contacts(subject PRIMARY KEY, did, remark, nickname, avatar, updated_at)`。
-      落在 `<store root>/<agent>/<profile>/` 下，与 `identity.json` 同目录（明文 `0600`，同口径）。
-- [ ] **先裁定隔离粒度**：通讯录是**每个 (agent, profile) 一张**，还是**整机一张**？
-      两边的理由都成立——备注是"我"的记忆，而"我"可能是整机的，也可能是某个 agent 的。
-      这条不定，后面每次碰它都要重想一遍。**建议整机一张**（`<store root>/contacts.json`），
-      理由：同一个人不该在不同 agent 下有两套备注；而身份是 agent 级的，
-      通讯录是人的，两者粒度本来就不同。
-- [ ] **命令面 `contacts` 一族**：`list` / `add <did> [--remark <s>]` /
-      `set-remark <name> <s>` / `remove <name>` / `resolve <name>`。
-      `resolve` 是**给 Agent 用的那条**：名字进，DID 出，`--json` 给机读。
-- [ ] **`msg send --to` 接受名字**。要定的是形状：`--to Alice` 先查通讯录、
-      查不到再当 DID 解析，还是另开 `--to-name`？**写进 `cli.md` §3 的命令面**，
-      别只在代码里默默生效。
-- [ ] **重名要能拒**。两个 Alice 时 `resolve` 必须退出非零并列出候选，
-      **不许随便挑一个**——"发错人"是这一类工具最贵的错误。
-- [ ] **写入路径**：什么时候往表里落行？三选一（或组合），要写清：
-      ① 显式 `contacts add`；② 收到消息时把 sender 的 subject / did 落一行；
-      ③ 拉 profile 时更新 nickname。**建议 ①②，不做 ③**——自动联网查 profile 会让
-      一个"看看通讯录"的命令突然打网络。
-- [ ] **拉 nickname 要跨域**。对方的 profile 在他**自己**的主机上，
-      不是本机这台（`docs/design/groups.md` §8.2.3 允许跨域）。
-      `contacts` 要按 DID 文档找到对方的主机再去 `get_me`——
-      和 `msg send` 的发现流程共用一段代码，别写第二份。
-- [ ] **换钥后要认得出是同一人**：`did resolve --chain` 给出新 DID 时，
-      通讯录里按 `subject` 认出来的那行 `did` 要更新。谁触发？
-      （`contacts refresh`？还是 `did update` 成功后顺手？）要给一个答案。
-- [ ] **测试**（这一条同时是 §5 的活）：
-      ① 换钥后备注还在（按 subject 认，不是按 did）；
-      ② 重名被拒且列出候选；
-      ③ 名字查不到时报的是**可执行的错**（"先 `contacts add`"），不是一个空结果。
+- [x] ~~**定表**~~ —— **表的答案不是本地文件，是 service 的库**（用户裁定"我们 service 的库"）。
+      落在 `packages/service` 的 `contacts` 表，列为 `(owner_did, subject, did, remark, created_at,
+      updated_at)`，`SCHEMA_VERSION` 12。不在 `<store root>/` 下，所以没有 `0600` 那一条。
+- [x] ~~**先裁定隔离粒度**~~ —— **随"存在 service 的库"一并定了，且不是原来那两个选项**。
+      行按 `owner_did` 分——`owner_did` 是请求的**已验证签名者**（不是参数里写的名字），
+      所以一个身份的备注对另一个身份天然不可见，粒度落在**身份**上而不是整机。
+      这正是用户要的"别人是看不见的"，且不需要文件权限来保证。
+- [x] ~~**命令面 `contacts` 一族**~~ —— `list` / `add <did> [--remark <s>]` /
+      `set-remark <name> <s>` / `remove <name>` / `resolve <name>` 均已在 `agentx-cli` 落地
+      （`rust/crates/agentx-cli/src/main.rs` 的 `ContactsCommand`）。
+      `resolve` 名字进 DID 出、`--json` 给机读；`--own` 走本身份的库。
+- [x] ~~**`msg send --to` 接受名字**~~ —— **形状定为：DID 形状的参数直接进发现，其余当名字查通讯录**。
+      不另开 `--to-name`：`--to` 的取值本身就能分辨（`looks_like_a_did` 是语法测试，不是方法白名单）。
+      非 JSON 输出会把 `named:` 一行打出来。
+- [x] ~~**重名要能拒**~~ —— 大小写不敏感地收集**全部**匹配再计数，≥2 就退出 1 并逐个列出候选的 DID 与备注；
+      不是"精确拼写赢"。`lookup` 的 `Ambiguous` 分支就是这个。
+- [ ] **写入路径**：① 显式 `contacts add` **已落地**；② 收到消息时把 sender 的 subject / did 落一行
+      —— **还没做**，单独一小块；③ 不做（自动联网查 profile 会让"看看通讯录"突然打网络）。
+- [x] ~~**拉 nickname 要跨域**~~ —— **裁定：不做**（同 ③）。nickname 是对方自己的说法、存在对方的主机上，
+      存到我们这儿就是一份没有失效机制的缓存。`contacts` 只答"这个 DID 对我来说是谁"。
+      所以 `Contact` 里没有 nickname 字段，服务端返回里也没有。
+- [ ] **换钥后要认得出是同一人**：**认人已经成立**——行按 `subject` 存，换钥不动 `subject`，
+      所以备注不会丢（§3.3 第三条测试已覆盖）。**还缺的是 `did` 这一列的刷新**：
+      对端换钥后，本地这行的 `did` 会旧到下次交互为止。谁触发？（`contacts refresh`？
+      还是 `did resolve --chain` 成功后顺手？）——**这一条还悬着，要给答案。**
+- [x] ~~**测试**~~ —— ① 换钥后备注还在：`packages/service/src/rpc/dispatch.test.ts`
+      的 "subject survives a key change"；② 重名被拒且列出候选：`contacts.rs`
+      `two_contacts_with_the_same_name_are_ambiguous_and_both_are_listed` 与
+      `the_ambiguous_refusal_lists_every_candidate_with_its_did`；③ 可执行的错：
+      `the_unknown_name_refusal_names_the_command_that_fixes_it`。共 11 个新单测 + 8 个服务侧用例。
 
 ---
 
