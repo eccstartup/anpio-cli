@@ -5,8 +5,9 @@
 // MUST 回 `-32601`（§8.12 L934），所以**没有任何客户端能让它发生**——它只能由 Host 自己在一件
 // 别的事的路上顺手做完。规范点名了三条路（§8.12 L946 "MAY trigger …" 那一句）：一条新 DID
 // 发起的请求（{@link adoptMemberDidForRequest}）、往旧 DID 投递时发现了合规的后继
-// （{@link adoptMemberDidForDelivery}），以及定时刷新（A3c-4，尚未落地，见 TODO2.md）。前两条
-// 都收敛到 `groups.ts` 的 `applyMemberDidUpdate`，靠 §8.12 那个确定性操作标识幂等收敛。
+// （{@link adoptMemberDidForDelivery}），以及定时刷新（{@link refreshMemberDids}，由
+// `refresh/memberDidRefresh.ts` 按周期驱动）。三条都收敛到 `groups.ts` 的 `applyMemberDidUpdate`，
+// 靠 §8.12 那个确定性操作标识幂等收敛。
 //
 // 这个文件拥有三件事：
 //
@@ -227,7 +228,11 @@ function predecessorCandidates(storage: Storage, groupDid: string, actorDid: str
   return candidates
 }
 
-// ---- 投递触发 ----------------------------------------------------------------
+// ---- 从名册里那个 DID 出发的两条路（投递触发、定时刷新）-------------------------
+//
+// 这两条路的起点是同一个：**名册里当前存着的那个 DID**。请求触发的方向相反（来的是一个新
+// DID，要从名册往前找它的前身），所以它不走这里。起点相同意味着受理前的五条也相同，共用
+// {@link adoptSuccessorOfRosterDid}；两个调用方的区别只有日志里的来源标记。
 
 export interface MemberDidDeliveryTriggerInput {
   storage: Storage
@@ -239,6 +244,92 @@ export interface MemberDidDeliveryTriggerInput {
   /** 测试注入点，见 {@link DidChainResolver}。 */
   resolveChain?: DidChainResolver
   log?: (line: string) => void
+}
+
+interface RosterDidAdoptionInput {
+  storage: Storage
+  config: Config
+  groupDid: string
+  /** 名册里当前存着的那个 DID——§8.12 L940 要求"从记录里当前存着的那个 DID 出发"。 */
+  rosterDid: string
+  acceptedAt: string
+  resolveChain: DidChainResolver
+  log: (line: string) => void
+  /** 日志尾注，说出这次是**哪条触发路**发现的。 */
+  via: string
+}
+
+/**
+ * §8.12 L940–946 的五条，从一个**名册里的 DID**出发走一遍。
+ *
+ * 五条里第 1 条（"恰好一条当前 DID 是这个旧 DID 的 active 记录"）在这里就是两次读：这个群
+ * 还在不在、这一行还在不在且是 active。调用方大多已经知道答案（投递是一路查过来的，刷新是从
+ * `membership_status = 'active'` 的那批行里取的），但两次索引读很便宜，而让两条触发路共用
+ * 同一份判定比让它们各自记得判一条要紧得多——§8.12 的原子那一段要求改名针对一条 active 记录，
+ * 谁都可能在这中间被移除。
+ *
+ * 返回 `false` 一律表示"没有要补的名册事实"，不是错误。
+ */
+async function adoptSuccessorOfRosterDid(input: RosterDidAdoptionInput): Promise<boolean> {
+  const { storage, groupDid, rosterDid, log } = input
+
+  // 不托管这个群：没有名册可改。（两条路都只可能拿到我们托管的群，但读完再判比假设便宜。）
+  const group = storage.group(groupDid)
+  if (group === undefined) return false
+
+  // §8.12 第 1 条：恰好一条 `active` 且当前 DID 是这个旧 DID 的记录。不是 active（已移除 /
+  // 已离开）就没有要补的名册事实，§8.12 的原子那一段也明确要求改名针对一条 active 记录。
+  const member = storage.groupMember(groupDid, rosterDid)
+  if (member === undefined || member.membershipStatus !== 'active') return false
+
+  // §8.12 第 2 条：从**记录里当前存着的那个 DID**出发走完整的转移链。
+  let chain: DidChain
+  try {
+    chain = await input.resolveChain(rosterDid)
+  } catch (err) {
+    // 链断了、成环了、超长、或对端 DID 服务器不可达。前三种是 §8.12 第 4 条要拒的，最后一种
+    // 是"现在判不了"——三种都不采纳，调用方接下去照常走（投递由资格复核那一层收尾，刷新只看
+    // 下一行）。与请求触发同一处置。
+    log(
+      `anp: could not resolve the DID chain of ${rosterDid} for ${groupDid}: ${err instanceof Error ? err.message : String(err)}`,
+    )
+    return false
+  }
+  // 名册里那个 DID 就是当前的：没有要补的事。（这是绝大多数刷新走的那条路。）
+  if (!chain.superseded) return false
+  // §8.12 第 3 条：档位。用户裁定按甲——只收这两档，与请求触发同一口径。
+  if (!ACCEPTED_ASSURANCES.includes(chain.assurance)) {
+    log(
+      `anp: refusing the DID update of ${groupDid} member ${rosterDid} -> ${chain.currentDid}: assurance ${chain.assurance} is below policy`,
+    )
+    return false
+  }
+  // §8.12 第 4 条："confirm that the new DID does not belong to another active member"。请求触发
+  // 那一侧靠"候选唯一"兜住，这边没有候选可言（起点就是确定的一行），所以直接查新 DID。
+  const clash = storage.groupMember(groupDid, chain.currentDid)
+  if (clash !== undefined && clash.membershipStatus === 'active') {
+    log(
+      `anp: ${chain.currentDid} is already an active member of ${groupDid}; not adopting it as the successor of ${rosterDid}`,
+    )
+    return false
+  }
+
+  // §8.12 第 5 条的比较并交换，以及 "after acceptance" 那一整段。返回 `false` 表示另一条触发路
+  // （一次并发请求，或另一轮刷新）已经改完了——那是收敛，不是失败。
+  const applied = applyMemberDidUpdate({
+    storage,
+    hostServiceDid: input.config.serviceDid,
+    groupDid,
+    previousDid: rosterDid,
+    subjectDid: chain.currentDid,
+    acceptedAt: input.acceptedAt,
+  })
+  if (applied) {
+    log(
+      `anp: ${groupDid} member ${rosterDid} -> ${chain.currentDid} (assurance ${chain.assurance}, operation ${memberDidUpdateOperationId(groupDid, rosterDid, chain.currentDid)}, via ${input.via})`,
+    )
+  }
+  return applied
 }
 
 /**
@@ -255,65 +346,72 @@ export interface MemberDidDeliveryTriggerInput {
 export async function adoptMemberDidForDelivery(
   input: MemberDidDeliveryTriggerInput,
 ): Promise<boolean> {
-  const { storage, groupDid, recipientDid } = input
-  const log = input.log ?? ((line: string): void => void process.stderr.write(`${line}\n`))
-
-  const group = storage.group(groupDid)
-  // 不托管这个群：没有名册可改。（队列行理论上不会指到一个我们不托管的群，但读完再判比假设便宜。）
-  if (group === undefined) return false
-
-  // §8.12 第 1 条：恰好一条 `active` 且当前 DID 是这个旧 DID 的记录。不是 active（已移除 /
-  // 已离开）就没有要补的名册事实，§8.12 的原子那一段也明确要求改名针对一条 active 记录。
-  const member = storage.groupMember(groupDid, recipientDid)
-  if (member === undefined || member.membershipStatus !== 'active') return false
-
-  // §8.12 第 2 条：从**记录里当前存着的那个 DID**出发走完整的转移链。
-  const resolveChain = input.resolveChain ?? chainResolverFor(input.config)
-  let chain: DidChain
-  try {
-    chain = await resolveChain(recipientDid)
-  } catch (err) {
-    // 链断了、成环了、超长、或对端 DID 服务器不可达。前三种是 §8.12 第 4 条要拒的，最后一种
-    // 是"现在判不了"——三种都不采纳，投递本身接下去照常走（合格就投，不合格由资格复核那一层
-    // 丢弃）。与请求触发同一处置。
-    log(
-      `anp: could not resolve the DID chain of ${recipientDid} for ${groupDid}: ${err instanceof Error ? err.message : String(err)}`,
-    )
-    return false
-  }
-  // 名册里那个 DID 就是当前的：没有要补的事。（这是绝大多数投递走的那条路。）
-  if (!chain.superseded) return false
-  // §8.12 第 3 条：档位。用户裁定按甲——只收这两档，与请求触发同一口径。
-  if (!ACCEPTED_ASSURANCES.includes(chain.assurance)) {
-    log(
-      `anp: refusing the DID update of ${groupDid} member ${recipientDid} -> ${chain.currentDid}: assurance ${chain.assurance} is below policy`,
-    )
-    return false
-  }
-  // §8.12 第 4 条："confirm that the new DID does not belong to another active member"。请求触发
-  // 那一侧靠"候选唯一"兜住，这边没有候选可言（起点就是确定的一行），所以直接查新 DID。
-  const clash = storage.groupMember(groupDid, chain.currentDid)
-  if (clash !== undefined && clash.membershipStatus === 'active') {
-    log(
-      `anp: ${chain.currentDid} is already an active member of ${groupDid}; not adopting it as the successor of ${recipientDid}`,
-    )
-    return false
-  }
-
-  // §8.12 第 5 条的比较并交换，以及 "after acceptance" 那一整段。返回 `false` 表示另一条触发路
-  // （一次并发请求，或定时刷新）已经改完了——那是收敛，不是失败。
-  const applied = applyMemberDidUpdate({
-    storage,
-    hostServiceDid: input.config.serviceDid,
-    groupDid,
-    previousDid: recipientDid,
-    subjectDid: chain.currentDid,
+  return adoptSuccessorOfRosterDid({
+    storage: input.storage,
+    config: input.config,
+    groupDid: input.groupDid,
+    rosterDid: input.recipientDid,
     acceptedAt: input.acceptedAt,
+    resolveChain: input.resolveChain ?? chainResolverFor(input.config),
+    log: input.log ?? ((line: string): void => void process.stderr.write(`${line}\n`)),
+    via: 'delivery',
   })
-  if (applied) {
-    log(
-      `anp: ${groupDid} member ${recipientDid} -> ${chain.currentDid} (assurance ${chain.assurance}, operation ${memberDidUpdateOperationId(groupDid, recipientDid, chain.currentDid)}, via delivery)`,
-    )
+}
+
+// ---- 定时刷新（A3c-4）--------------------------------------------------------
+
+export interface MemberDidRefreshInput {
+  storage: Storage
+  config: Config
+  /** 这一批成员行的**查看时刻**——也是它们被盖上的戳。 */
+  at: string
+  batch: number
+  /** 一行只有距上次查看超过它才会再次入选。@see Config.memberDidRefresh */
+  staleAfterMs: number
+  resolveChain?: DidChainResolver
+  log?: (line: string) => void
+}
+
+/**
+ * §8.12 三条触发路里的最后一条：**定时刷新**。
+ *
+ * 前两条都要求"恰好在做别的事"——有人拿新 DID 来请求，或者正好有一封信封要投给旧 DID。群里
+ * 一个安静的成员可能两件事都不发生，而它的 DID 早就变了；那时名册会一直认着一个**已经不该被
+ * 授权**的旧 DID，正是 §8.12 L962 要挡的那件事。规范把这件事交给周期性刷新（P2 §5.5 规则 8
+ * 明说不提供 DID 文档变化的推送），本函数就是那个周期。
+ *
+ * ## 为什么"低负载"能成立
+ *
+ * 一轮只取 `batch` 行，且**优先取最久没看过的**（`groupMembersDueForDidCheck`）。于是每轮产生
+ * 的解析次数恒等于行数——一个上万成员的部署与一个三个成员的部署，每轮的开销一样——而所有成员
+ * 都会按同一个周期轮转，不会有人被饿着。再叠加一层 `staleAfterMs`：刚看过的行不会因为批次没
+ * 取满就被重复看一遍（解析本身有 A3a 的文档缓存兜底，但缓存过期之后每个成员每次复查就是一次
+ * 真实抓取，所以次数要由这里定，不能由缓存定）。
+ *
+ * 返回这一轮**试图看过**的行数（不是"改了几行"）——它是调用方判断"批次取满了没有"的唯一依据。
+ */
+export async function refreshMemberDids(input: MemberDidRefreshInput): Promise<number> {
+  const { storage } = input
+  const log = input.log ?? ((line: string): void => void process.stderr.write(`${line}\n`))
+  const resolveChain = input.resolveChain ?? chainResolverFor(input.config)
+  const staleBefore = new Date(Date.parse(input.at) - input.staleAfterMs).toISOString()
+
+  const due = storage.groupMembersDueForDidCheck(staleBefore, input.batch)
+  // 逐行串行：一轮的解析次数就是 batch，并发只会让同一个 DID 服务器同时收到一串请求。
+  for (const member of due) {
+    await adoptSuccessorOfRosterDid({
+      storage,
+      config: input.config,
+      groupDid: member.groupDid,
+      rosterDid: member.memberDid,
+      acceptedAt: input.at,
+      resolveChain,
+      log,
+      via: 'refresh',
+    })
+    // 盖戳在采纳**之后**，且无条件：这一步记的是"看过"。一次解析失败（对端不可达）如果也
+    // 不盖，那一行就会永远卡在队头，把后面所有成员挡住。
+    storage.markGroupMemberDidChecked(member.groupDid, member.memberDid, input.at)
   }
-  return applied
+  return due.length
 }

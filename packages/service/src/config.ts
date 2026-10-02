@@ -41,6 +41,14 @@ const DEFAULT_PREKEY_PER_MINUTE = 60
 const DEFAULT_DEVICE_QUEUE_MAX_ATTEMPTS = 8
 const DEFAULT_DEVICE_QUEUE_MAX_AGE_MS = 24 * 60 * 60_000
 
+/** §8.12 定时刷新的缺省（A3c-4）：**6 小时一轮、一轮最多看 20 行**。
+ *
+ *  用户 2026-10-02 定的口径是"定时更新、不要太多负载"，所以两个数都在"低负载"那一侧：每一轮的
+ *  解析次数是个常数，而一个 N 成员的部署 `ceil(N/20)` 轮轮一遍（1000 人约 12 天）。DID 变化很
+ *  多和很少这两种极端它都不吃亏——前者靠请求触发与投递触发先接住，这一层是兜底。 */
+const DEFAULT_DID_REFRESH_INTERVAL_MS = 6 * 60 * 60_000
+const DEFAULT_DID_REFRESH_BATCH = 20
+
 /** 一份 DID 文档最多被缓存多久。core 的 `DEFAULT_CACHE_TTL_MS` 就是这个值，这里显式写出来
  *  是因为它在本服务里不只是"省一次抓取"——它是**对端身份变化的发现时延上界**（见
  *  {@link DidResolution.documentStore}）。 */
@@ -106,6 +114,25 @@ export interface DeviceQueue {
   maxAgeMs: number
 }
 
+/**
+ * §8.12 三条触发路里最后一条——**定时刷新**（A3c-4）的两个档位。
+ *
+ * 规范把同步这件事交给"周期性刷新、低负载"（P2 §5.5 规则 8 明说不为 DID 文档变化提供推送），
+ * 但没给节奏；节奏是本实现的部署档位。
+ *
+ * 两个数一起决定两件事：一轮的开销**恒为** {@link batch} 次解析（与群有多大无关），而把一个
+ * 部署里的所有成员轮一遍要 `ceil(成员数 / batch)` 轮，也就是 `ceil(成员数 / batch) ×
+ * intervalMs`。{@link intervalMs} 本身是"同一个成员两次复查之间**至少**隔多久"——刚看过的行
+ * 不会因为批次没取满而被重复看一遍。所以一个 1000 成员的部署按缺省值约 12 天轮一遍，每轮仍是
+ * 20 次解析；要更快就调大 batch，要更省就调大间隔，两者是独立的旋钮。
+ */
+export interface MemberDidRefresh {
+  /** 两轮刷新之间的间隔（毫秒），也是同一个成员的最短复查周期。 */
+  intervalMs: number
+  /** 一轮最多看几行。全局上限，不分群——一轮的解析次数就是它。 */
+  batch: number
+}
+
 export interface Config {
   /** Where the HTTP server binds. */
   listen: ListenAddress
@@ -148,6 +175,8 @@ export interface Config {
   prekeyRate: { burst: number; perMinute: number }
   /** P6 §12.6 的两条有界保留闸门，做成部署档位。 */
   deviceQueue: DeviceQueue
+  /** P4 §8.12 定时刷新的节奏，做成部署档位（A3c-4）。 */
+  memberDidRefresh: MemberDidRefresh
 }
 
 /** `host:port`, with the host allowed to be an IPv6 literal in brackets. The port is
@@ -332,6 +361,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
         'AGENTX_DEVICE_QUEUE_MAX_AGE_MS',
         DEFAULT_DEVICE_QUEUE_MAX_AGE_MS,
       ),
+    },
+    memberDidRefresh: {
+      intervalMs: parsePositive(
+        env.AGENTX_DID_REFRESH_INTERVAL_MS,
+        'AGENTX_DID_REFRESH_INTERVAL_MS',
+        DEFAULT_DID_REFRESH_INTERVAL_MS,
+      ),
+      batch: parsePositive(env.AGENTX_DID_REFRESH_BATCH, 'AGENTX_DID_REFRESH_BATCH', DEFAULT_DID_REFRESH_BATCH),
     },
   }
   if (env.AGENTX_KEY_FILE !== undefined && env.AGENTX_KEY_FILE !== '') {

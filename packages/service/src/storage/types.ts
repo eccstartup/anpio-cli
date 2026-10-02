@@ -118,6 +118,11 @@ export interface StoredGroupMember {
   stateVersion: number
   joinedAt?: string
   addedBy?: string
+  /** When the periodic DID refresh (A3c-4) last **looked** at this row. Absent means never.
+   *
+   *  It is the sweep's cursor, not a fact about the membership — nothing else reads it, and a
+   *  change of DID does not clear it (the new DID simply gets looked at once more). */
+  lastDidCheckedAt?: string
 }
 
 /** One `group.state_changed` event, as it will be replayed (§7.10). */
@@ -530,6 +535,16 @@ export interface Storage {
   upsertGroupMember(member: StoredGroupMember): void
   /** How many DIDs are currently `active`. §7.1 L370 counts DIDs, not devices. */
   countActiveMembers(groupDid: string): number
+
+  /** The active members whose DID has not been checked since `before`, oldest first, never
+   *  checked at all ahead of those — the periodic DID refresh's batch (A3c-4).
+   *
+   *  Ordered by the stored stamp and then by `(group_did, member_did)`, so consecutive ticks
+   *  walk the whole roster without favouring anyone and without depending on scan order. */
+  groupMembersDueForDidCheck(before: string, limit: number): StoredGroupMember[]
+  /** Record that the refresh looked at this row. Written even when the check failed, or an
+   *  unreachable peer's DID would sit at the head of the queue forever. */
+  markGroupMemberDidChecked(groupDid: string, memberDid: string, at: string): void
 
   /** Rename an active member's DID in place — §8.12's "replace only the current `agent_did`".
    *

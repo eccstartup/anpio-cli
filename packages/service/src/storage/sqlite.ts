@@ -150,6 +150,11 @@ function applySchema(db: DatabaseSync): void {
     // returns, and neither was in the table before C9 needed to answer with it.
     addColumnIfMissing(db, 'group_members', 'joined_at', 'TEXT')
     addColumnIfMissing(db, 'group_members', 'added_by', 'TEXT')
+    // v10. The periodic DID refresh's cursor (A3c-4, `refresh/memberDidRefresh.ts`): when the
+    // sweep last looked at this row. Nullable and with no default on purpose — "never looked"
+    // is a state the sweep has to tell apart from "looked a long time ago", because the first
+    // batch after an upgrade is exactly the members that have never been checked.
+    addColumnIfMissing(db, 'group_members', 'last_did_checked_at', 'TEXT')
     // v4. P4 §8.9.4 L868–875 + §10.3 L1046–1052: a replayed `group.send` answers with the
     // position the message was accepted at, which only the row can still know.
     addColumnIfMissing(db, 'messages', 'group_event_seq', 'INTEGER')
@@ -235,6 +240,8 @@ function toGroupMember(row: Row): StoredGroupMember {
   if (joinedAt !== undefined) member.joinedAt = joinedAt
   const addedBy = maybeText(row.added_by)
   if (addedBy !== undefined) member.addedBy = addedBy
+  const lastDidCheckedAt = maybeText(row.last_did_checked_at)
+  if (lastDidCheckedAt !== undefined) member.lastDidCheckedAt = lastDidCheckedAt
   return member
 }
 
@@ -819,6 +826,32 @@ class SqliteStorage implements Storage {
       member.joinedAt ?? null,
       member.addedBy ?? null,
     )
+  }
+
+  /** §8.12 定时刷新（A3c-4）的取行：**该看的**那一小批 active 成员。 */
+  groupMembersDueForDidCheck(before: string, limit: number): StoredGroupMember[] {
+    // `last_did_checked_at IS NOT NULL` 排在前面的是 0（未看过），所以从未看过的行优先——升级
+    // 之后的第一批就该是它们。同档之内按戳记由旧到新，让"轮转"是真正的最久未看优先，而不是给
+    // 每个 tick 换一批新面孔。最后两个键只是让顺序**确定**：批与批之间不能出现一行反复被看到、
+    // 另一行永远排不上（没有确定顺序时 SQLite 的返回顺序不保证稳定）。
+    const rows = this.stmt(
+      `SELECT * FROM group_members
+        WHERE membership_status = 'active'
+          AND (last_did_checked_at IS NULL OR last_did_checked_at <= ?)
+        ORDER BY last_did_checked_at IS NOT NULL, last_did_checked_at, group_did, member_did
+        LIMIT ?`,
+    ).all(before, limit) as Row[]
+    return rows.map(toGroupMember)
+  }
+
+  /** 记下这次查看，无论结果如何。 */
+  markGroupMemberDidChecked(groupDid: string, memberDid: string, at: string): void {
+    // 无条件写：这里记的是"看过"，不是"没问题"。一次解析失败（对端 DID 服务器不可达）如果
+    // 不留戳，那一行就会永远卡在队头，把后面所有人挡住——一个暂时不可达的对端就成了整个刷新的
+    // 单点。
+    this.stmt(
+      'UPDATE group_members SET last_did_checked_at = ? WHERE group_did = ? AND member_did = ?',
+    ).run(at, groupDid, memberDid)
   }
 
   countActiveMembers(groupDid: string): number {

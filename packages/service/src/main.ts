@@ -20,6 +20,7 @@ import { createRelay } from './federation/forward'
 import { loadHttpSigner } from './federation/signing'
 import { createServer } from './http/server'
 import { openObjectStore } from './objects'
+import { createMemberDidRefreshWorker } from './refresh/memberDidRefresh'
 import { createDispatch } from './rpc/dispatch'
 import { openStorage } from './storage/sqlite'
 import { createSubscriberRegistry } from './stream/registry'
@@ -82,6 +83,11 @@ async function main(): Promise<void> {
   // registry, because a P6 envelope has no `deliveries` row to push off when the recipient
   // is one of this service's own devices.
   const deviceQueue = createDeviceQueueWorker({ config, storage, registry })
+  // §8.12's third trigger (§8.12 L946): the periodic sweep that notices a member's DID moved
+  // on even when that member is quiet — no request, no envelope to deliver. Slow by design
+  // (`Config.memberDidRefresh`), and separate from the two queues above because its period is
+  // four orders of magnitude longer.
+  const memberDidRefresh = createMemberDidRefreshWorker({ config, storage })
 
   try {
     await server.listen()
@@ -92,6 +98,7 @@ async function main(): Promise<void> {
   }
   delivery.start()
   deviceQueue.start()
+  memberDidRefresh.start()
 
   process.stdout.write(`AgentXAgent listening on http://${server.address.host}:${server.address.port}\n`)
   process.stdout.write(`  service did   ${config.serviceDid}\n`)
@@ -122,6 +129,7 @@ async function main(): Promise<void> {
     process.stdout.write(`\n${signal}: shutting down\n`)
     delivery.stop()
     deviceQueue.stop()
+    memberDidRefresh.stop()
     // Before `server.close()`: an upgraded socket is detached from the HTTP server, so its
     // `close()` waits for connections it cannot reach. Nowhere else can end these.
     session.closeAll('server shutting down')

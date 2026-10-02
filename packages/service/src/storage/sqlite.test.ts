@@ -559,6 +559,45 @@ describe('the v6 → v7 migration', () => {
   })
 })
 
+describe('the v9 → v10 migration', () => {
+  /** A file as v9 wrote it: `group_members` has no `last_did_checked_at`. */
+  function writeV9(path: string): void {
+    const db = new DatabaseSync(path)
+    db.exec(`CREATE TABLE group_members (
+       group_did          TEXT NOT NULL,
+       member_did         TEXT NOT NULL,
+       role               TEXT,
+       membership_status  TEXT NOT NULL,
+       state_version      INTEGER NOT NULL,
+       joined_at          TEXT,
+       added_by           TEXT,
+       PRIMARY KEY (group_did, member_did)
+     )`)
+    db.exec(`INSERT INTO group_members
+       (group_did, member_did, role, membership_status, state_version, joined_at, added_by)
+       VALUES ('did:web:host.example:group:g1', 'did:web:alice.example', 'member', 'active', 2,
+               '2026-09-01T00:00:00Z', 'did:web:owner.example')`)
+    db.exec('PRAGMA user_version = 9')
+    db.close()
+  }
+
+  it('adds the refresh cursor, and reads every pre-existing row as never checked', () => {
+    const path = join(dir, 'v9.db')
+    writeV9(path)
+
+    const store = open(path)
+    // 老行的一列是 NULL，也就是"从来没被刷新看过"。这正是定时刷新第一次跑时该有的行为：
+    // 升级之后的第一批就是这些行，而不是把它们当成"刚看过"跳过。
+    expect(store.groupMember('did:web:host.example:group:g1', 'did:web:alice.example')?.lastDidCheckedAt)
+      .toBeUndefined()
+    const due = store.groupMembersDueForDidCheck('2026-10-02T00:00:00Z', 10)
+    expect(due.map((row) => row.memberDid)).toEqual(['did:web:alice.example'])
+    // 而行的其余部分没被动过。
+    expect(due[0]?.joinedAt).toBe('2026-09-01T00:00:00Z')
+    expect(due[0]?.addedBy).toBe('did:web:owner.example')
+  })
+})
+
 /** P5 §7 的密钥材料（C12）。这一层要判的是**行语义**：一设备一行、按上传顺序发、领取是
  *  一次互斥的 UPDATE。上面那些"哪一步先判"是 `rpc/keys.test.ts` 的事。 */
 describe('prekey bundles and one-time prekeys (P5, C12)', () => {
@@ -874,6 +913,66 @@ describe('the member DID rename (§8.12)', () => {
 
     expect(store.groupLeaf(GROUP, OLD, 'dev-a')?.state).toBe('active')
     expect(store.groupLeaf(GROUP, NEW, 'dev-a')).toBeUndefined()
+  })
+})
+
+describe('the DID-refresh cursor (A3c-4)', () => {
+  const GROUP = 'did:web:host.example:group:g1'
+
+  function member(memberDid: string, overrides: Partial<StoredGroupMember> = {}): StoredGroupMember {
+    return {
+      groupDid: GROUP,
+      memberDid,
+      role: 'member',
+      membershipStatus: 'active',
+      stateVersion: 2,
+      joinedAt: '2026-09-01T00:00:00Z',
+      ...overrides,
+    }
+  }
+
+  it('reads back as absent until something stamps the row', () => {
+    const store = open()
+    store.upsertGroupMember(member('did:web:alice.example'))
+
+    // 缺省不是空串：`groupMembersDueForDidCheck` 要把"没看过"与"很久以前看过"分开。
+    expect(store.groupMember(GROUP, 'did:web:alice.example')?.lastDidCheckedAt).toBeUndefined()
+
+    store.markGroupMemberDidChecked(GROUP, 'did:web:alice.example', '2026-10-02T00:00:00Z')
+    expect(store.groupMember(GROUP, 'did:web:alice.example')?.lastDidCheckedAt).toBe(
+      '2026-10-02T00:00:00Z',
+    )
+  })
+
+  it('hands back the never-checked rows first, then the least recently checked', () => {
+    const store = open()
+    store.upsertGroupMember(member('did:web:alice.example'))
+    store.upsertGroupMember(member('did:web:bob.example'))
+    store.upsertGroupMember(member('did:web:carol.example'))
+    store.markGroupMemberDidChecked(GROUP, 'did:web:alice.example', '2026-10-01T12:00:00Z')
+    store.markGroupMemberDidChecked(GROUP, 'did:web:bob.example', '2026-10-01T18:00:00Z')
+
+    // 三行都没超过 `before`，所以三行都该出现；顺序才是这里要钉的东西：没看过的 carol 在最前，
+    // 然后是两个看过的人里更早的那个。
+    const due = store.groupMembersDueForDidCheck('2026-10-02T00:00:00Z', 10)
+    expect(due.map((row) => row.memberDid)).toEqual([
+      'did:web:carol.example',
+      'did:web:alice.example',
+      'did:web:bob.example',
+    ])
+  })
+
+  it('excludes rows checked recently, and never offers an inactive one', () => {
+    const store = open()
+    store.upsertGroupMember(member('did:web:alice.example'))
+    store.upsertGroupMember(member('did:web:bob.example', { membershipStatus: 'removed' }))
+    store.markGroupMemberDidChecked(GROUP, 'did:web:alice.example', '2026-10-01T23:00:00Z')
+
+    expect(store.groupMembersDueForDidCheck('2026-10-01T22:00:00Z', 10)).toEqual([])
+    // 门槛放回去，alice 出现——而 bob 是 `removed`，任何门槛下都不出现。
+    expect(
+      store.groupMembersDueForDidCheck('2026-10-02T00:00:00Z', 10).map((row) => row.memberDid),
+    ).toEqual(['did:web:alice.example'])
   })
 })
 

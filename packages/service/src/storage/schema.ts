@@ -53,8 +53,13 @@
  *  `group_did_updates` (§10.5's orchestration progress) and `device_envelopes` (§12.6's
  *  Device Delivery Queue) — plus two columns on `group_key_packages` recording which caller
  *  reserved a KeyPackage. Only the two columns are an in-place change; the three tables come
- *  from the `IF NOT EXISTS` pass, and the version moves for the usual reason. */
-export const SCHEMA_VERSION = 9
+ *  from the `IF NOT EXISTS` pass, and the version moves for the usual reason.
+ *
+ *  v10: `group_members` gains `last_did_checked_at` — when the periodic DID refresh last
+ *  looked at this row (A3c-4). It is the sweep's cursor, not a fact about the membership:
+ *  a NULL just means "never looked", which is where every existing row starts and which the
+ *  sweep reads as "look at me first". Nullable, so `ALTER TABLE ADD COLUMN` suffices. */
+export const SCHEMA_VERSION = 10
 
 export const SCHEMA: readonly string[] = [
   // ---- idempotency -----------------------------------------------------------
@@ -182,6 +187,7 @@ export const SCHEMA: readonly string[] = [
      state_version      INTEGER NOT NULL,
      joined_at          TEXT,
      added_by           TEXT,
+     last_did_checked_at TEXT,
      PRIMARY KEY (group_did, member_did)
    )`,
   // group.state_changed 的可重放来源。

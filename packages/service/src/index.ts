@@ -116,6 +116,9 @@ export type { ObjectStore, OpenObjectStoreOptions, StagedObject } from './object
 export { createDeliveryWorker } from './delivery/worker'
 export type { DeliveryOptions, DeliveryWorker } from './delivery/worker'
 
+export { createMemberDidRefreshWorker } from './refresh/memberDidRefresh'
+export type { MemberDidRefreshOptions, MemberDidRefreshWorker } from './refresh/memberDidRefresh'
+
 export { openStorage } from './storage/sqlite'
 export type { OpenStorageOptions } from './storage/sqlite'
 export { SCHEMA, SCHEMA_VERSION } from './storage/schema'

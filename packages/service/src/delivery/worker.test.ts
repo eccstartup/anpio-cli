@@ -392,6 +392,8 @@ describe('the schema the worker reads', () => {
     // v9 added P6's `group_leaves` / `group_did_updates` / `device_envelopes` and two
     // columns on `group_key_packages` — none of them read here. The P6 queue is a
     // SEPARATE worker's queue, so this one still has nothing to do with it.
-    expect(SCHEMA_VERSION).toBe(9)
+    // v10 added `group_members.last_did_checked_at`, the DID refresh's cursor — a column
+    // on a table this file does not read either (`group_members` is P4's, not the outbox's).
+    expect(SCHEMA_VERSION).toBe(10)
   })
 })
