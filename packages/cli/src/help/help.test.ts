@@ -1,6 +1,6 @@
 // Guards on the command surface and on the help rendered from it.
 //
-// Two things are being kept true, each of which was false at some point:
+// Three things are being kept true, each of which was false at some point:
 //
 //  1. A page shows every flag it accepts and accepts every flag it shows. That is
 //     what lets the docs gate treat a missing flag mention as a failure: the help is
@@ -9,6 +9,11 @@
 //     no emoji; no ALL-CAPS emphasis; no em dash spliced into prose. Checked on the
 //     authored strings, since the `—` in the heading is the renderer's own separator and
 //     not something anyone wrote.
+//  3. The skill (`skill/connectx/SKILL.md`) names only commands this build has. The
+//     skill deliberately does not restate the surface — it carries judgment and sends the
+//     reader to `--help` — so most of it is out of this gate's reach by design. What it
+//     does catch is the drift that matters: the few invocations a reader copies verbatim
+//     are the ones that must still resolve.
 
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
@@ -37,6 +42,7 @@ import {
 } from './render'
 
 const CLI_SRC = readFileSync(new URL('../cli.ts', import.meta.url), 'utf8')
+const SKILL = readFileSync(new URL('../../../../skill/connectx/SKILL.md', import.meta.url), 'utf8')
 
 const WIDTH = 80
 
@@ -294,5 +300,57 @@ describe('positional arguments', () => {
 
     // A page with no arguments says so, rather than printing an empty list.
     expect(renderExtraArgument('bob', none.path, none.page)).toContain('`agent show` takes no arguments')
+  })
+})
+
+/** `connectx …` invocations inside SKILL.md's fenced blocks, one entry per line
+ *  (a trailing `\` joins the next line first). */
+function skillInvocations(): Array<{ line: number; argv: string[] }> {
+  const out: Array<{ line: number; argv: string[] }> = []
+  const lines = SKILL.split('\n')
+  let inFence = false
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i].startsWith('```')) {
+      inFence = !inFence
+      continue
+    }
+    if (!inFence) continue
+    let text = lines[i]
+    if (text.trimStart().startsWith('#')) continue
+    while (text.trimEnd().endsWith('\\')) text = text.trimEnd().slice(0, -1) + lines[++i]
+    const at = text.indexOf('connectx ')
+    if (at === -1) continue
+    out.push({ line: i + 1, argv: text.slice(at + 'connectx '.length).trim().split(/\s+/) })
+  }
+  return out
+}
+
+describe('the skill tracks the command surface', () => {
+  const invocations = skillInvocations()
+
+  it('spells out at least the golden path', () => {
+    expect(invocations.length).toBeGreaterThanOrEqual(3)
+  })
+
+  it('only names commands, subcommands and flags this build has', () => {
+    for (const { line, argv } of invocations) {
+      const [name, second] = argv
+      if (name.startsWith('-')) continue // a bare `connectx --help`
+      const command = COMMANDS.find((c) => c.name === name)
+      expect(command, `SKILL.md:${line}: no command \`${name}\``).toBeDefined()
+      if (command === undefined) continue
+
+      const sub = second !== undefined && !second.startsWith('-') ? second : undefined
+      const page = sub === undefined ? command.pages.find((p) => p.sub === undefined) : findPage(command, sub)
+      expect(page, `SKILL.md:${line}: \`${name} ${sub ?? ''}\` has no such page`).toBeDefined()
+      if (page === undefined) continue
+
+      const accepted = new Set([...acceptedFlags(page)].map((f) => `--${f}`))
+      for (const token of argv) {
+        if (!token.startsWith('--')) continue
+        const flag = `--${flagNames(token)[0]}`
+        expect(accepted.has(flag), `SKILL.md:${line}: \`${name}\` does not accept ${flag}`).toBe(true)
+      }
+    }
   })
 })

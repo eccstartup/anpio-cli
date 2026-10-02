@@ -241,8 +241,15 @@ KeyPackage 的 `did_wba_binding` Object Proof 由设备自签，验证侧从**�
   （2026-10-02 核过：`packages/service/src` 里 `resolveDidDocument` / `resolveDidChain` **零处**，
   全部经 `ServiceLocator` / `KeyResolver` / `DeviceResolver`。这条是早期收敛留下的结论，今天
   不需要改动。）
-- **B4（= TODO1 E2 缺口）** `help.test.ts` 的第三条门禁读 `skill/connectx/SKILL.md`，而那份
-  skill 没搬过来，已随删除记录。要搬 skill 就把它一起恢复。
+- ~~**B4（= TODO1 E2 缺口）** `help.test.ts` 的第三条门禁读 `skill/connectx/SKILL.md`，而那份
+  skill 没搬过来，已随删除记录。要搬 skill 就把它一起恢复。~~
+  （2026-10-02 用户裁定**要**，已落地。但**是重写不是搬运**：旧仓库 `anp-sdk` 那份 289 行照着
+  **旧 CLI** 写——装的是 `@connectx-sdk/cli`、讲的是 `anp login/sign`、装法写全局安装，本仓库的
+  消息层（`msg` / `group`）一个字没有，而消息层才是这个仓库对外的主线；照搬门禁立刻红，且红得
+  没意义。新那份按今天的命令面重写，一个命令一条，判据仍是那句"skill 不重述命令面、只带判断"
+  （`--help` 才是权威）。门禁原样搬回 `help.test.ts`（`skillInvocations()` 逐字同旧），
+  两条路都验过会红：`msg teleport` → "has no such page"，`msg send --bulk` → "does not accept
+  --bulk"。CLI 测试 207 → 209。）
 - ~~**B5（= TODO1 E3）** 评审清单：CLI 与服务端里**不得出现 `isDid()` 之类的身份类型分支**
   （[vendored-core.md](docs/design/vendored-core.md) §6.3）。~~
   （2026-10-02 审过并修掉唯一一处：`packages/cli/src/commands/auth.ts` 的 `isDidIdentifier`
@@ -251,9 +258,16 @@ KeyPackage 的 `did_wba_binding` Object Proof 由设备自签，验证侧从**�
   已写明那份判定"只在这里使用"。改法是**不由 CLI 判**：`--wallet web3` 这条路径的契约本就要求
   `--address` / `--chain-id`（`buildConnector`），产出的必然是 CAIP-10 账户 id，所以 `document`
   由调用点按自己已知的事实传 `false`，并删掉那个助手。service 侧 `isDid` 零处。）
-- **B6（= TODO1 CI）** 仓库里没有 `.github/workflows`，`gh run list` 为空——门禁目前只能在本地
+- ~~**B6（= TODO1 CI）** 仓库里没有 `.github/workflows`，`gh run list` 为空——门禁目前只能在本地
   按 job 分组跑。要真正的 CI 得补 workflow（我可以写，但 `.github/` 那条路径和要不要跑在
-  GitHub 上得你定）。
+  GitHub 上得你定）。~~
+  （2026-10-02 用户裁定**要**，已落地 `.github/workflows/ci.yml`，跑在 GitHub 上（远端是
+  `eccstartup/AgentX`）。一个 job 四步：`npm ci` → `npm run build` → `typecheck` → `test`。
+  两点是刻意的：**`build` 不是形式**——每个包的测试按包名 import `@agentx/core`，而那个名字解析到
+  `packages/core/dist`，所以空检出跑 `npm test` 会红得像是测试坏了而不是缺构建；**Node 钉
+  `'24'`** 是钉 `engines` 声明的下限（>=24.16.0），声明了最小值却从没跑过它就只是个说法。
+  整套顺序在本地从 `rm -rf packages/*/dist` 起验过一遍。e2e 也在里面——它最慢，但它是唯一一个
+  能发现"两半各自都对、拼起来不对"的那组。）
 - **B7（= TODO1 E5 剩最后一步）** 文档站的 Vercel 连接要你的账号，我做不了。
 
 ---
@@ -287,3 +301,4 @@ KeyPackage 的 `did_wba_binding` Object Proof 由设备自签，验证侧从**�
   （2026-10-02 更正计数：服务端那组从 581 长到 620——A3c 的四段各自带了测试。）
   （2026-10-02 B2 之后：多一组，`npm test` = 207 + 693 + **3** + 620，第四组是 `packages/e2e`。
   它一个文件就 4.5 秒——每条用例都真起一个服务、真连一次 socket，所以它比别组长，但不是卡住。）
+  （2026-10-02 B4 之后：CLI 那组 207 → **209**，多的是 skill 门禁的两条。）
