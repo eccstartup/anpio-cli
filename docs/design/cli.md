@@ -1,6 +1,14 @@
-# connectx CLI 设计
+# CLI 设计
 
-`packages/cli` —— 本仓库的命令行客户端。二进制名 **`connectx`**（沿用旧仓库的名字）。
+> **本仓库的 CLI 是 `agentx-cli`。** 它是 Rust 客户端，源码在 `rust/crates/agentx-cli/`，
+> 命令面与现状见 [`rust/README.md`](../../rust/README.md)。`connectx`（`packages/cli`，
+> TypeScript）**已冻结**：不再加功能，也不再是文档入口。本文 §1 的判据、§7 的退出码契约对
+> 两者都成立；**§2 起描述的是冻结的 `connectx`**，保留作对照与来历——**在动的那一个是
+> `agentx-cli`**。这个裁定是 TODO6 §2.1 的甲案（用户 2026-10-02 定：TS 的 CLI 不动、不加
+> 功能，主攻 Rust CLI）。
+
+`packages/cli` 是本仓库的**旧**命令行客户端，二进制名 **`connectx`**（沿用旧仓库的名字）。
+以下各节是它冻结时的设计。
 
 ---
 
