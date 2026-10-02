@@ -90,6 +90,13 @@
       （`connectx`"不再是文档入口"）这些都该换，但那是一次跨十来页的正文改写，且 `quickstart`
       的安装那段要从 `npx` 改成"从源码 build"，**需要你点头再动**：甲=现在就整体换；
       乙=只在各页加一句"另有 `agentx-cli`，见参考页"，正文维持现状。
+      —— **2026-10-02 核过一件事，它决定甲案怎么落笔**：`agentx-cli` 这个名字**在 crates.io 上
+      已经是别人家的**（`https://crates.io/api/v1/crates/agentx-cli` → `github.com/open-agentx/agentx-cli`，
+      一句"a lifecycle CLI for AI coding agents"，2026-05-10 发的 0.1.0，唯一一版）。本仓库
+      `rust/Cargo.toml` 的 `version = "0.0.0"`、从没发过。所以第一，**不许写
+      `cargo install agentx-cli`**——那会装到别人家去；第二，甲案里 quickstart 的安装段只能
+      落成"从源码 build"（`git clone` + `cargo build --release -p agentx-cli`，二进制叫 `agentx`），
+      除非先决定改名或先决定发布。这两件都是独立决定，不在本条里顺带做。
 - [x] **`skill/connectx/SKILL.md`：按 2.1 改名/重写，并**把 `help.test.ts` 的门禁跟着改**
       （它拿 skill 里逐字给出的调用去和命令面对账，命令面变了它就该红）。
       —— 2026-10-02 完成（`6063fd0`）：`skill/connectx/SKILL.md` → **`skill/agentx-cli/SKILL.md`**，
