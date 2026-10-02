@@ -507,7 +507,7 @@ cargo run --manifest-path rust/Cargo.toml -- me set --agent e2ealice
       也正好解释了本地库的价值。
       **一行代码还没写**：§7 记了动手前三件事（`rusqlite 0.32.1` 已在树里、零构建成本；
       写入口挂在事件消费那一侧），§8 建议**先只写、不改读**——`msg inbox` 要不要变成本地优先
-      是一次要用户裁定的动作（见 §3.3 那条待裁定）。
+      是一次要用户裁定的动作（三种做法见那份文档 §8）。
 - [x] ~~**命令面定稿**：六族 24 条 + `did publish` / `me` + §3、§4 新增的，一起冻结形状。~~
       —— **2026-10-02 完成（`053c73e`）：定稿落成一份 50 个页面的清单**（九族 + 各子命令，
       `group e2ee` 六条在内），在 `rust/crates/agentx-cli/tests/cli_surface.rs` 的
