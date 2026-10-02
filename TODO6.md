@@ -85,7 +85,9 @@
       `docs/design/message-service.md` §9.4 的接口定义、§9.1 与 §13 的 Profile 清单）。
       **§4 的"群里成员的名字"也已落地**（`rust/crates/agentx-cli/src/contacts.rs` 的
       `RosterNames` + `main.rs` 的 `group members --names`），文档同批在 `rust/README.md`
-      的 `group` 条里。§4 剩下的群备注 / "我在群里的昵称"两条还没落地，落地时同样补文档。
+      的 `group` 条里。**§4 的"群的本地备注"也已落地**（service 侧 `cf4b7dd`… 之后的
+      `5f979c0`，CLI 侧 `c2059f6`），文档同批：`docs/design/message-service.md` §9.1/§9.5/§13
+      + `rust/README.md` 的 `group` 条。§4 只剩"我在群里的昵称"一条，已裁定**以后做**。
 - [ ] `TODO5.md` §6 里那些"端到端跑过"的记录**是历史，不是说明**。参考页要能独立站住，
       不能要求读者先去读一份 TODO。
 
@@ -167,7 +169,7 @@ ANP 的定址单位是 **DID**，`msg send --to` 只吃 DID。
 ### 4.1 协议给的和不给的
 
 - **群自己的名字**：`group_profile.display_name`，走 `group.update_profile`，
-  要 `permissions.update_profile` 权限。CLI **还没有这条命令**。
+  要 `permissions.update_profile` 权限。（CLI 早已有这条命令，见 §4.2 第一条。）
 - **群成员的显示名**：`member_list` 每一项只有 `{agent_did, role, status, joined_at}`——
   **没有名字字段**。要看名字，只能各自去主机取 profile（§3.2 那张表），或本地缓存。
 - **"我在这个群里的昵称"**：协议里**不存在 per-membership 昵称**。
@@ -207,10 +209,28 @@ ANP 的定址单位是 **DID**，`msg send --to` 只吃 DID。
       默认只出 DID；`--names` 把 awiki 那边的 `Names Alice` 取回来，而 toy host 那个成员
       如实落进 note；给 awiki 那位起了备注后，`--names` 也只出备注（对方改成
       `AWIKI-NAME-WINS` 也没顶掉它）。4 个新单测（`contacts::tests` 的 `RosterNames`）。
-- [ ] **群的本地备注**：和人的 remark 同口径，落在本地表
+- [x] **群的本地备注**：和人的 remark 同口径，落在本地表
       （`groups(group_did / subject, remark, ...)`）。我给群起的名字，协议里没有。
       —— 口径要跟 §3 对齐：人的备注落在 **service 的库**（`contacts` 表，`owner_did` 分行），
       所以群的备注也应落在同一处、同一分行方式，别一边在库里一边在文件里。
+      —— **2026-10-02 裁定：新表 + 新扩展面**（用户选的，不是"复用 `contacts`"、
+      也不是"只在 `group info` 里显示"）。落成 `group_remarks(owner_did, group_did, remark,
+      created_at, updated_at)` + Profile `x_agentx.group_remarks.v1`
+      （`list` / `put` / `remove` 三条，见 `docs/design/message-service.md` §9.5）。
+      **为什么不并进 `contacts`**：那张表是"`msg send --to` 能到谁"，键的另一头是一个
+      **agent**；并进去会让一个名字解析成群 DID，再让 `msg send --to <那个名字>` 把消息投进
+      一个群读不了的邮箱。**表的键是 `group_did` 本身、不是 `subject`**——群 DID 是本服务
+      命名空间里的 `did:web:…:g:<id>`，不含钥指纹也搬不动，`subject_of` 在它身上是恒等
+      函数，这是它与 `contacts` 唯一的结构分歧。`remark` 这一列是 `NOT NULL`（同样与
+      `contacts` 不同）：通讯录有"收信时顺带落一行"的写入路径会造出无名的行，这张表唯一
+      的写者就是起名这个动作，一行没有名字就是 bug 而不是一种状态。服务**不检查**群是否
+      托管在本机（和 `contacts.put` 不检查对端存在同一条道理）：名字是调用者的记忆，
+      联邦那头的群恰恰是本地这本册子该管的事。
+      CLI 落成 `group set-remark <group_did> <s>`（清空是 `--clear` 取反，不另开子命令），
+      `group info` 在 `name:` 下一行印 `remark:`（只走非 `--json` 那一档）。真链路跑过：
+      建群 → `info`（无此行）→ `set-remark` → `info`（`remark: Team`）→ 改名 → `--clear`
+      → `info`（行没了）；再让第二个身份给同一个群起名，第一个身份的名字**不受影响**
+      （两本册子、按 `owner_did` 分行）。服务侧 9 个 dispatch 测试 + Rust 侧 3 个单测。
 - [ ] **"我在群里的昵称"要一个裁定**：本地表存，还是提一个 Profile 扩展？
       今天协议没有这一层，所以这是一次**设计选择**，不是实现细节。**别悬着**——
       悬着的结果就是每个客户端各存各的、互不可见。
