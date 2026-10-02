@@ -71,10 +71,14 @@ KeyPackage 的 `did_wba_binding` Object Proof 由设备自签，验证侧从**�
     找入口与 `devices.ts` 读清单各调一次 `resolveDidDocument`。它同时就是"对端身份变化的发现
     时延上界"：ANP 不为文档变化提供推送（P2 §5.5 规则 8），窗口封不到零，只能封成一个部署
     能声明的数。缓存不放松判定——core 不写、也不读出 `deactivated` / 带 `successorDid` 的文档。）
-  - **A3b 投递前复核设备资格。** `delivery/deviceQueue.ts:132` 的 `deliverable()` 只读自己那
-    两张投影表（`group_leaves` / `group_members`），**从不回看对方的当前文档**，所以一台被主人
-    从清单里删掉的设备会**继续收到群密文**；而 P6 §10.4 L1074 逐字要求 Host "MUST stop
-    authenticating and **delivering new service data to the revoked device**"。
+  - ~~**A3b 投递前复核设备资格。**~~
+    （2026-10-02 落地，`8d7bc95`：`deliverable()` 拆成 `projected()`，投影只判第一层；
+    第二层按对方的**当前文档**判"这台设备还在不在主人的清单里"，只在第一层判成 active leaf +
+    active 成员时才付，且与"找入口"共用同一份解析结果（A3a 的缓存），所以仍是一次网络往返。
+    判定（文档取回来了、里面没有这台设备）→ 丢弃整条队列；解析失败 → 走既有失败路径退避重试，
+    一次网络抖动不该丢掉一整条队列。**残留边界**已记进 [e2ee-group.md](docs/design/e2ee-group.md)
+    §6.2：撤销与 `remove` 之间正好入队、又还没轮到的信封，会在 `remove` 把 leaf 转成 `terminal`
+    后落进"按序投完"的例外。收窄它要在 `remove` 的受理路径上也读一次文档。）
   - **A3c 换 DID。** 今天完全没有：`member_did` 在 `group_members` / `group_leaves` 的**主键**
     里，成员的 DID 改不了（只能删一行加一行）；P4 §8.12 的 `member-did-updated` 本服务的 P4
     （C9）没有接受，`group_did_updates` 因此没有写入者。换 DID 的验证侧 core 已经写好
