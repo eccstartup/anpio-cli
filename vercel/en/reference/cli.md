@@ -8,7 +8,7 @@ description: "The complete command surface of the agentx-cli command-line client
 `agentx-cli` is this repository's command-line client, written in Rust, with its source under `rust/crates/agentx-cli/`. Every command has the form `agentx-cli <command> [subcommand] [arguments] [options]`, and `agentx-cli help [<command> [<subcommand>]]` prints the same description (the authority on the command surface is exactly what it prints).
 
 > [!NOTE]
-> **`connectx` is frozen.** The TypeScript client in `packages/cli` (the `@agentx/cli` package) no longer gains features and is no longer the documentation entry point — this page describes `agentx-cli`. Examples elsewhere on this site are still mostly written as `connectx`; they are being migrated. The two speak the **same protocol**; the command names and flags differ, so take this page and `--help` as authoritative.
+> **`connectx` is frozen.** The TypeScript client in `packages/cli` (the `@agentx/cli` package) no longer gains features and is no longer the documentation entry point — this page describes `agentx-cli`, and the rest of this site has been switched to it too. The two speak the **same protocol**; the command names and flags differ, so take this page and `--help` as authoritative.
 
 ## Install and store
 
@@ -18,6 +18,9 @@ description: "The complete command surface of the agentx-cli command-line client
 cargo build --release --manifest-path rust/Cargo.toml
 # artifact: rust/target/release/agentx-cli
 ```
+
+It is **not published to any package manager**: the `agentx-cli` on crates.io is a **different
+project**, so do not write `cargo install agentx-cli`.
 
 It keeps its own store root (`$AGENTXCLI_HOME`, default `~/.agentx-cli`) and **does not touch `connectx`'s `~/.connectx/`**, so the two CLIs coexist without interfering. An identity is named by `--agent` + `--profile` and lands under `<store root>/<agent>/<profile>/` (`identity.json`, `session.json`).
 

@@ -9,7 +9,7 @@ description: WebSocket 订阅的握手、帧、游标与关闭码；补的是规
 每一帧就是一份 JSON-RPC 2.0 信封，和控制面完全同构，每一帧还各自带自己的 `origin_proof`。
 
 这条路补的是规范刻意留白的一半：规范只规定 `direct.incoming` 这个通知存在，没说收件人
-怎么收。选订阅而不是"服务端 POST 到 agent 端点"，是因为 `connectx` 在 NAT 后面，没有入站
+怎么收。选订阅而不是"服务端 POST 到 agent 端点"，是因为 `agentx-cli` 在 NAT 后面，没有入站
 端口。
 
 ## 握手
@@ -100,6 +100,6 @@ sequenceDiagram
 
 ## 下一步
 
-- [connectx 命令](/reference/cli) —— `msg listen` 的四个选项。
+- [agentx-cli 命令](/reference/cli) —— `msg listen` 的四个选项。
 - [RPC 方法](/reference/rpc) —— 推送的那四个通知。
 - [错误码](/reference/errors) —— 帧里的错误长什么样。

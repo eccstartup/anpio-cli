@@ -60,7 +60,7 @@ MLS 的 create / add / remove 全在 owner 客户端。成员变更时，**历�
 
 ## 一个直接后果
 
-**`inbox.get` 在 E2EE 会话里返回的是密文。** `connectx msg show` 在 E2EE 会话上只能打印
+**`inbox.get` 在 E2EE 会话里返回的是密文。** `agentx-cli msg show` 在 E2EE 会话上只能打印
 envelope，解密是客户端的事。设计上不要试图在服务端"顺手解一下"。
 
 > [!NOTE]

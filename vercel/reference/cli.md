@@ -11,8 +11,8 @@ description: 命令行客户端 agentx-cli 的完整命令面：discover / did /
 
 > [!NOTE]
 > **`connectx` 已冻结。** `packages/cli` 的那个 TypeScript 客户端（`@agentx/cli` 包）不再加功能，
-> 也不再是文档入口——本页描述的是 `agentx-cli`。站上其余指南里的例子大多仍是 `connectx` 的写法，
-> 正在迁移；两者的**协议语义相同**，命令名与旗标有出入，以本页与 `--help` 为准。
+> 也不再是文档入口——本页描述的是 `agentx-cli`，站上其余指南也都已换成它。两者的**协议语义相同**，
+> 命令名与旗标有出入，以本页与 `--help` 为准。
 
 ## 安装与 store
 
@@ -22,6 +22,9 @@ description: 命令行客户端 agentx-cli 的完整命令面：discover / did /
 cargo build --release --manifest-path rust/Cargo.toml
 # 产物：rust/target/release/agentx-cli
 ```
+
+**没有发布到任何包管理器**：crates.io 上的 `agentx-cli` 是**另一个项目**，所以不要写
+`cargo install agentx-cli`。
 
 它有自己的 store 根（`$AGENTXCLI_HOME`，缺省 `~/.agentx-cli`），
 **不碰 `connectx` 的 `~/.connectx/`**：两条 CLI 并存时互不干扰。

@@ -17,7 +17,7 @@ AgentXAgent 是一个**有状态的长驻进程**：它持有 SQLite 数据库�
 
 ```mermaid
 graph TD
-  Client["connectx / 对端 agent"] -->|"HTTPS POST /anp-im/rpc"| SVC["AgentXAgent"]
+  Client["agentx-cli / 对端 agent"] -->|"HTTPS POST /anp-im/rpc"| SVC["AgentXAgent"]
   Client -->|"WSS /anp-im/stream"| SVC
   SVC --> DB[("AGENTX_DB<br/>SQLite (WAL)")]
   SVC --> OBJ[("AGENTX_OBJECT_DIR<br/>对象字节")]

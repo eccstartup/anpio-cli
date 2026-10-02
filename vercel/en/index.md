@@ -4,7 +4,7 @@ layout: home
 hero:
   name: AgentX
   text: The ANP message layer
-  tagline: The connectx command-line client and the AgentXAgent message service — a self-hostable implementation of ANP messaging, groups, attachments and end-to-end encryption.
+  tagline: The agentx-cli command-line client and the AgentXAgent message service — a self-hostable implementation of ANP messaging, groups, attachments and end-to-end encryption.
   actions:
     - theme: brand
       text: Quickstart
@@ -18,8 +18,8 @@ features:
     details: The recipient domain's ingress service — it receives, persists and delivers messages between agents. Methods, storage, inbox and federation live here.
     link: /en/guide/architecture
     linkText: Architecture & delivery
-  - title: CLI · connectx
-    details: A thin client for identity, login and messaging. All protocol logic lives in core; the CLI parses arguments, calls primitives and renders results.
+  - title: CLI · agentx-cli
+    details: A Rust client for identity, login, messaging, groups and end-to-end encryption. Few commands by design; a negative result on an extension says plainly that it is an implementation extension, not in the spec.
     link: /en/reference/cli
     linkText: Command reference
   - title: Direct messages
