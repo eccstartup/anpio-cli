@@ -11,10 +11,14 @@ import {
   ed25519OriginProofSigner,
   idempotencyKey,
   JSON_RPC_ERROR,
+  stableSubjectId,
+  subjectOf,
   type AnpMeta,
   type AnpRequest,
   type AnpSigningIdentity,
   type DeviceResolver,
+  type DidChain,
+  type DidChainAssurance,
   type KeyResolver,
   type LocateOptions,
   type NonceStore,
@@ -39,9 +43,13 @@ import { createDispatch } from './dispatch'
 import { buildServiceEntry } from '../well-known'
 import type { RpcHandler, RpcRequest } from '../http/server'
 import type { Storage } from '../storage/types'
+import type { DidChainResolver } from './memberDidUpdate'
 
 const sender = createAnpIdentity('sender.example')
 const second = createAnpIdentity('second.example')
+/** 与 `second` **同域同路径、不同一把钥**——一次 DID 轮换之后的样子：主体没变，指纹变了。
+ *  §8.12 要的正是从名册里那个旧的 DID 走到这一个。 */
+const successor = createAnpIdentity('second.example')
 const receiver = createAnpIdentity('receiver.example')
 /** 发送方域里那个对外入口的服务身份。外层请求由它签，与业务发送者是两个人——
  *  §3.6 L90–98 说的两层身份，这里就是这个区别。 */
@@ -68,6 +76,7 @@ function inlineResolver(documents: Record<string, unknown>): KeyResolver {
 const DOCUMENTS: Record<string, unknown> = {
   [sender.did]: sender.didDocument,
   [second.did]: second.didDocument,
+  [successor.did]: successor.didDocument,
   [receiver.did]: receiver.didDocument,
   [service.did]: service.didDocument,
 }
@@ -308,6 +317,7 @@ function harness(
     nonceStore?: NonceStore
     relay?: Relay
     deviceResolver?: DeviceResolver
+    chainResolver?: DidChainResolver
   } = {},
 ): Harness {
   const storage = overrides.storage ?? openStorage({ path: ':memory:' })
@@ -324,6 +334,7 @@ function harness(
     deviceResolver: overrides.deviceResolver ?? inlineDeviceResolver(),
     nonceStore: overrides.nonceStore ?? createHttpNonceStore(storage),
     ...(overrides.relay !== undefined ? { relay: overrides.relay } : {}),
+    ...(overrides.chainResolver !== undefined ? { chainResolver: overrides.chainResolver } : {}),
     log: (line) => logs.push(line),
     now: () => NOW,
   })
@@ -1309,6 +1320,233 @@ describe('group.* over the wire (P4)', () => {
       group_state_version: '1',
       group_profile: { discoverability: 'public' },
     })
+  })
+})
+
+// A3c —— P4 §8.12 的两条触发路里**请求触发**的那一条。
+//
+// 这里测的是**接线**：一次来自"可能是某个成员后继"的调用，会不会在它自己被受理之前先把名册
+// 补上、把 `member-did-updated` 排出去，以及哪些情形**不**该补。转移链本身的判别在 core 的
+// 用例里，所以这里的解析器交出去的是一份已经判好的结果。
+describe('adopting a member DID change on the request path (§8.12)', () => {
+  /** 一份"已经判好的"链：`previousDid` 走到了 `currentDid`。 */
+  function chainTo(currentDid: string, assurance: DidChainAssurance = 'verified'): DidChainResolver {
+    return async (did: string): Promise<DidChain> => ({
+      did,
+      subject: subjectOf(currentDid),
+      stableSubjectId: stableSubjectId(currentDid),
+      currentDid,
+      superseded: currentDid !== did,
+      assurance,
+      document: {},
+      docUrl: `https://peer.example/${currentDid}`,
+      hops: [],
+    })
+  }
+
+  async function addMember(h: Harness, groupDid: string, memberDid: string, opId: string, role?: string): Promise<void> {
+    const outcome = await h.call(
+      await signed({
+        method: 'group.add',
+        meta: groupMeta({ target: { kind: 'group', did: groupDid }, operation_id: opId }),
+        body: { member_did: memberDid, ...(role !== undefined ? { role } : {}) },
+      }),
+    )
+    if (outcome.json?.error !== undefined) throw new Error(`group.add failed: ${JSON.stringify(outcome.json)}`)
+  }
+
+  /** 一个成员收到的 `member-did-updated` 事件正文（§8.11 的通知里那一份）。 */
+  function didUpdateEvents(h: Harness, recipient: string): Record<string, unknown>[] {
+    return h.storage
+      .deliveriesSince(recipient, '', 0, 100)
+      .filter((row) => row.method === 'group.state_changed')
+      .map((row) => (JSON.parse(row.paramsJson) as { body: Record<string, unknown> }).body)
+      .filter((body) => body.event_type === 'member-did-updated')
+  }
+
+  /** 从 `successor` 发一次群内调用。`method` 决定它走的是哪条触发条件。 */
+  async function callAsSuccessor(
+    h: Harness,
+    groupDid: string,
+    method: string,
+    body: Record<string, unknown>,
+    extra: Partial<AnpMeta> = {},
+  ): Promise<Outcome> {
+    return h.call(
+      await signed({
+        method,
+        meta: groupMeta({ target: { kind: 'group', did: groupDid }, sender_did: successor.did, ...extra }),
+        body,
+        signer: successor,
+      }),
+    )
+  }
+
+  it('completes the update before authorizing the request, and keeps the role', async () => {
+    // §8.12 L946：新 DID 发起一次调用时，Host **先**把这次更新做完、排好 `member-did-updated`，
+    // **然后**才按**保留下来的角色**受理。这里让被换掉的那个 DID 是 admin，再让后继做一件只有
+    // admin 才做得成的事——角色没保住的话，这次调用会撞上 3003。
+    const h = harness({ chainResolver: chainTo(successor.did) })
+    const groupDid = await mintGroup(h)
+    await addMember(h, groupDid, second.did, 'op-add-1', 'admin')
+    expect(h.storage.groupMember(groupDid, second.did)?.role).toBe('admin')
+    const before = h.storage.group(groupDid)?.groupStateVersion ?? 0
+
+    const outcome = await callAsSuccessor(
+      h,
+      groupDid,
+      'group.update_profile',
+      { group_profile_patch: { name: 'renamed' } },
+      { operation_id: 'op-profile-1' },
+    )
+
+    expect(outcome.json?.error).toBeUndefined()
+    // 名册上只有一条记录，而且挂在**新** DID 上，角色与加入时间原样（§8.12 L958–L961）。
+    expect(h.storage.groupMember(groupDid, second.did)).toBeUndefined()
+    const moved = h.storage.groupMember(groupDid, successor.did)
+    expect(moved?.membershipStatus).toBe('active')
+    expect(moved?.role).toBe('admin')
+    expect(h.storage.countActiveMembers(groupDid)).toBe(2)
+    // §7.10.2 L590：事件正文必须带 `previous_subject_did` 与 `subject_did`。
+    const events = didUpdateEvents(h, sender.did)
+    // 两次状态变更：先是 §8.12 的改名那一步，然后才是这次调用自己被受理。
+    // 事件里的 `group_state_version` 记的是**前**一步，也就是改名那一步。
+    expect(events[0]?.group_state_version).toBe(String(before + 1))
+    expect(h.storage.group(groupDid)?.groupStateVersion).toBe(before + 2)
+    // 这次调用真的**按保留的角色**受理了，而不只是名册改对了。
+    expect(JSON.parse(h.storage.group(groupDid)?.groupProfileJson ?? '{}').name).toBe('renamed')
+
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({
+      event_type: 'member-did-updated',
+      subject_method: 'group.member_did_update',
+      actor_did: SERVICE_DID,
+      previous_subject_did: second.did,
+      subject_did: successor.did,
+      membership_status: 'active',
+    })
+  })
+
+  it('converges: a second call from the same DID does not update anything again', async () => {
+    // §8.12 L964：操作标识是那三个值的确定性摘要，所以三条触发路**幂等收敛**。第二条来自同一
+    // 个 DID 的调用看到的名册已经是它自己了，不该再落一个事件、再推一次版本号。
+    const h = harness({ chainResolver: chainTo(successor.did) })
+    const groupDid = await mintGroup(h)
+    await addMember(h, groupDid, second.did, 'op-add-1')
+
+    await callAsSuccessor(h, groupDid, 'group.send', { text: 'first' }, {
+      operation_id: 'op-send-1',
+      message_id: 'm-1',
+      content_type: 'text/plain',
+    })
+    const after = h.storage.group(groupDid)?.groupStateVersion
+
+    const again = await callAsSuccessor(h, groupDid, 'group.send', { text: 'second' }, {
+      operation_id: 'op-send-2',
+      message_id: 'm-2',
+      content_type: 'text/plain',
+    })
+
+    expect(again.json?.error).toBeUndefined()
+    expect(h.storage.group(groupDid)?.groupStateVersion).toBe(after)
+    expect(didUpdateEvents(h, sender.did)).toHaveLength(1)
+  })
+
+  it('refuses a provider_asserted chain (the ruling is 甲)', async () => {
+    // 规范把这一档写成"由自己的业务策略决定"，本服务的选择是不收。它 MUST NOT 被悄悄接受：
+    // 那样一来换个 DID 就只需要一个上游供应商的一句话。
+    const h = harness({ chainResolver: chainTo(successor.did, 'provider_asserted') })
+    const groupDid = await mintGroup(h)
+    await addMember(h, groupDid, second.did, 'op-add-1')
+
+    const outcome = await callAsSuccessor(h, groupDid, 'group.send', { text: 'hi' }, {
+      operation_id: 'op-send-1',
+      message_id: 'm-1',
+      content_type: 'text/plain',
+    })
+
+    expect(outcome.json?.error?.code).toBe(3000)
+    expect(h.storage.groupMember(groupDid, second.did)?.membershipStatus).toBe('active')
+    expect(h.storage.groupMember(groupDid, successor.did)).toBeUndefined()
+    expect(didUpdateEvents(h, sender.did)).toHaveLength(0)
+    expect(h.logs.some((line) => line.includes('assurance provider_asserted'))).toBe(true)
+  })
+
+  it('does not adopt a chain that ends at somebody else', async () => {
+    // 前身确实换了 DID，但换成的是别人。这次调用不是那个后继，名册不动。
+    const h = harness({ chainResolver: chainTo(receiver.did) })
+    const groupDid = await mintGroup(h)
+    await addMember(h, groupDid, second.did, 'op-add-1')
+
+    const outcome = await callAsSuccessor(h, groupDid, 'group.send', { text: 'hi' }, {
+      operation_id: 'op-send-1',
+      message_id: 'm-1',
+      content_type: 'text/plain',
+    })
+
+    expect(outcome.json?.error?.code).toBe(3000)
+    expect(h.storage.groupMember(groupDid, second.did)?.membershipStatus).toBe('active')
+  })
+
+  it('refuses to guess when two active members share a stable subject path', async () => {
+    // §8.12 第 4 条的 "no candidate ambiguity"：两行 active 成员共享一个稳定主体路径时，本服务
+    // 无从判断来的是哪一行的后继。不猜——不采纳，这次调用落回它本来的拒绝。
+    const rival = createAnpIdentity('second.example')
+    const h = harness({ chainResolver: chainTo(successor.did) })
+    const groupDid = await mintGroup(h)
+    await addMember(h, groupDid, second.did, 'op-add-1')
+    await addMember(h, groupDid, rival.did, 'op-add-2')
+
+    const outcome = await callAsSuccessor(h, groupDid, 'group.send', { text: 'hi' }, {
+      operation_id: 'op-send-1',
+      message_id: 'm-1',
+      content_type: 'text/plain',
+    })
+
+    expect(outcome.json?.error?.code).toBe(3000)
+    expect(h.storage.groupMember(groupDid, second.did)?.membershipStatus).toBe('active')
+    expect(h.storage.groupMember(groupDid, rival.did)?.membershipStatus).toBe('active')
+    expect(h.logs.some((line) => line.includes('candidate predecessors'))).toBe(true)
+  })
+
+  it('adopts ahead of a private group.get_info but not ahead of a public one', async () => {
+    // §8.12 L946 把 `group.get_info` 单列，而它是**有条件的**：公开群的资料快照谁都能读，换没换
+    // DID 与这次读取无关；私有群才要求调用方是成员，于是新 DID 得先入册。
+    const privateGroup = await (async (): Promise<string> => {
+      const h = harness({ chainResolver: chainTo(successor.did) })
+      const groupDid = await mintGroup(h)
+      await addMember(h, groupDid, second.did, 'op-add-1')
+      const outcome = await callAsSuccessor(h, groupDid, 'group.get_info', {})
+      expect(outcome.json?.error).toBeUndefined()
+      expect(h.storage.groupMember(groupDid, successor.did)?.membershipStatus).toBe('active')
+      return groupDid
+    })()
+    expect(typeof privateGroup).toBe('string')
+
+    const h = harness({ chainResolver: chainTo(successor.did) })
+    const publicDid = await mintGroup(h, { discoverability: 'public' })
+    await addMember(h, publicDid, second.did, 'op-add-1')
+    const outcome = await callAsSuccessor(h, publicDid, 'group.get_info', {})
+
+    expect(outcome.json?.error).toBeUndefined()
+    // 读到了资料快照，但名册一行没动——公开群这条路不该顺手改成员状态。
+    expect(h.storage.groupMember(publicDid, second.did)?.membershipStatus).toBe('active')
+    expect(h.storage.groupMember(publicDid, successor.did)).toBeUndefined()
+  })
+
+  it('leaves group.join and group.remove out of the trigger surface', async () => {
+    // 规范点名的只有五个方法。`group.remove` 要的是调用方**已有**的权限，`group.join` 的目标
+    // 是调用方自己还不在名册里的情形——两者都不该让这个 DID 顺路被认成别人的后继。
+    const h = harness({ chainResolver: chainTo(successor.did) })
+    const groupDid = await mintGroup(h)
+    await addMember(h, groupDid, second.did, 'op-add-1')
+
+    const outcome = await callAsSuccessor(h, groupDid, 'group.remove', { member_did: second.did }, {
+      operation_id: 'op-remove-1',
+    })
+
+    expect(outcome.json?.error?.code).toBe(3000)
+    expect(h.storage.groupMember(groupDid, successor.did)).toBeUndefined()
   })
 })
 

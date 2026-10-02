@@ -27,7 +27,7 @@ import {
   type AnpRejection,
 } from '@agentx/core'
 import type { DeliveryRecord, Storage } from '../storage/types'
-import { attachmentGrantsFor, insertAttachmentGrants } from './attachments'
+import { attachmentGrantsFor, insertAttachmentGrants, sha256b64u } from './attachments'
 import { isNonEmptyString, unknownField } from './body'
 import { validatePayloadBody } from './payload'
 import { AnpRefusal, refusal } from './refusal'
@@ -55,6 +55,9 @@ const EVENT_MEMBER_REMOVED = 'member-removed'
 const EVENT_MEMBER_LEFT = 'member-left'
 const EVENT_PROFILE_UPDATED = 'group-profile-updated'
 const EVENT_POLICY_UPDATED = 'group-policy-updated'
+/** §8.12 的宿主动作。它不是方法、不是由谁请求的，所以没有任何 handler 会产生它——由
+ *  `memberDidUpdate.ts` 的三个触发点调用 {@link applyMemberDidUpdate} 时落这一种。 */
+export const EVENT_MEMBER_DID_UPDATED = 'member-did-updated'
 
 /** §7.9 L497–498 的两种回执。 */
 const RECEIPT_OPERATION = 'group-operation-accepted'
@@ -377,6 +380,8 @@ interface StateChange {
   stateVersion: number
   eventSeq: number
   subjectDid?: string
+  /** §7.10.2 L590：只有 `member-did-updated` 有这个字段，且**必须**有。 */
+  previousSubjectDid?: string
   membershipStatus?: string
 }
 
@@ -403,6 +408,7 @@ function announce(ctx: GroupContext, change: StateChange): void {
     changed_at: ctx.acceptedAt,
     actor_did: change.actorDid,
     ...(change.subjectDid !== undefined ? { subject_did: change.subjectDid } : {}),
+    ...(change.previousSubjectDid !== undefined ? { previous_subject_did: change.previousSubjectDid } : {}),
     ...(change.membershipStatus !== undefined ? { membership_status: change.membershipStatus } : {}),
     group_receipt: groupReceipt({
       receiptType: RECEIPT_OPERATION,
@@ -444,6 +450,108 @@ function announce(ctx: GroupContext, change: StateChange): void {
     }
     deliver(ctx, recipient, event.event_id as string, GROUP_STATE_CHANGED, { meta, body: event })
   }
+}
+
+// ---- §8.12 换 DID ------------------------------------------------------------
+
+/**
+ * §8.12 L946：这个操作的 `operation_id` **应当**是 `group_did` + `previous_subject_did` +
+ * `subject_did` 的确定性摘要，好让定时刷新、请求触发、投递触发这三条路**幂等收敛**。
+ *
+ * 它不是"随便一个稳定的串"：定时那一轮和一次请求可能同时看见同一个后继，两条路并不共享
+ * 内存里的状态，唯一的共同点就是这三个值。算成摘要而不是拼串，是为了让回执里这个字段的
+ * 形状与一次正常操作的 `operation_id` 一致。
+ */
+export function memberDidUpdateOperationId(groupDid: string, previousDid: string, subjectDid: string): string {
+  return sha256b64u(JSON.stringify({ group_did: groupDid, previous_subject_did: previousDid, subject_did: subjectDid }))
+}
+
+export interface MemberDidUpdateInput {
+  storage: Storage
+  /** 本服务的 `serviceDid`：§7.10.2 L593 要求这个事件的 `actor_did` 就是它。 */
+  hostServiceDid: string
+  groupDid: string
+  /** 记录里**当前**存着的那个 DID——§8.12 要求从这里出发验证转移。 */
+  previousDid: string
+  /** 验证通过的当前 DID。 */
+  subjectDid: string
+  acceptedAt: string
+  onDelivery?: (record: DeliveryRecord) => void
+}
+
+/**
+ * §8.12 "after acceptance, the Host MUST atomically" 那一段的全部内容：改成员行、搬 Leaf
+ * 投影、推进两个计数器、停用旧 DID、落一个 `member-did-updated` 事件、按 §8.11 通知出去。
+ *
+ * **验证不在这里**。规范把"要不要接受"写成受理前的五条（§8.12 L940–946），那五条里有网络
+ * 往返，所以它们在事务外由调用方完成（`memberDidUpdate.ts`）；这个函数拿到的是已经判定过
+ * 的一对 DID，只负责把它**原子地**落下去。
+ *
+ * 返回值是"这一对 DID 是不是**我**改的"：`false` 表示成员行已经不是 `previousDid` 了。那
+ * 不是错误，正是 §8.12 第 5 条那条 compare-and-swap 要区分的东西——定时刷新与一次请求同时
+ * 看见同一个后继时，后到的那个看到的是一行**已经改好**的记录，什么也不该再做（做第二遍会
+ * 让同一个变更落两个事件、推两次版本号）。整个读-判-写在一个事务里，中间没有窗口。
+ */
+export function applyMemberDidUpdate(input: MemberDidUpdateInput): boolean {
+  const { storage, groupDid, previousDid, subjectDid } = input
+  return storage.transaction(() => {
+    const member = storage.groupMember(groupDid, previousDid)
+    // §8.12 第 1 条：恰好一条 `active` 且当前 DID 是旧 DID 的记录。查不到（不是成员、已经
+    // 是别的状态、或别人先改完了）就什么都不做。
+    if (member === undefined || member.membershipStatus !== 'active') return false
+
+    const { groupStateVersion, groupEventSeq } = storage.advanceGroupCounters(groupDid, true)
+    // §8.12：只换 `agent_did`，`role` / `status` / `joined_at` / `added_by` / active 计数
+    // 全部保留——由访问器只写那两列来保证，不靠这里逐个抄过去。
+    storage.renameGroupMember(groupDid, previousDid, subjectDid, groupStateVersion)
+    storage.renameGroupLeaves(groupDid, previousDid, subjectDid)
+
+    const operationId = memberDidUpdateOperationId(groupDid, previousDid, subjectDid)
+    // §7.10.2 L595：`payload_digest` 要覆盖**被受理的这次旧→新状态变更**。这里没有一份签名的
+    // 请求对象可摘要（宿主动作不是谁发的请求），所以摘要的对象就是这次变更本身——三个 DID 加上
+    // 它落定时的两个序号，与事件正文里的那几个字段是同几个值。
+    const payloadDigest = sha256b64u(
+      JSON.stringify({
+        group_did: groupDid,
+        previous_subject_did: previousDid,
+        subject_did: subjectDid,
+        group_state_version: String(groupStateVersion),
+        group_event_seq: String(groupEventSeq),
+        membership_status: 'active',
+      }),
+    )
+
+    // `announce` 要一个 `GroupContext`，而它从这个上下文里只读四样：群（`meta.target.did`）、
+    // `operation_id`（`meta.operation_id`）、`payload_digest`（`requestDigest`）、以及投递回调。
+    // 于是这里造的就是**这四样**——它不是一个收到过请求的上下文，是宿主动作的上下文：`meta`
+    // 在这里只是那两个值的载体，`sender_did` 写宿主自己（§7.10.2 L593 要的 actor 正是它）。
+    const ctx: GroupContext = {
+      storage,
+      serviceDid: input.hostServiceDid,
+      meta: {
+        profile: GROUP_PROFILE,
+        security_profile: GROUP_SECURITY_PROFILE,
+        sender_did: input.hostServiceDid,
+        target: { kind: 'agent', did: groupDid },
+        operation_id: operationId,
+      },
+      body: {},
+      acceptedAt: input.acceptedAt,
+      requestDigest: payloadDigest,
+      ...(input.onDelivery !== undefined ? { onDelivery: input.onDelivery } : {}),
+    }
+    announce(ctx, {
+      eventType: EVENT_MEMBER_DID_UPDATED,
+      subjectMethod: 'group.member_did_update',
+      actorDid: input.hostServiceDid,
+      stateVersion: groupStateVersion,
+      eventSeq: groupEventSeq,
+      subjectDid,
+      previousSubjectDid: previousDid,
+      membershipStatus: 'active',
+    })
+    return true
+  })
 }
 
 // ---- body 校验 ---------------------------------------------------------------

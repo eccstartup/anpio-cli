@@ -13,7 +13,13 @@
 // unbounded; the allowlist is exact at every setting.
 
 import { dirname, join } from 'node:path'
-import { ConnectxError, createDidDocumentStore, type DidDocumentStore } from '@agentx/core'
+import {
+  ConnectxError,
+  createDidChainEdgeStore,
+  createDidDocumentStore,
+  type DidChainEdgeStore,
+  type DidDocumentStore,
+} from '@agentx/core'
 
 /** 1 MiB, §14. Attachments travel on the data plane and never through this limit. */
 const DEFAULT_MAX_BODY = 1024 * 1024
@@ -75,6 +81,15 @@ export interface DidResolution {
   documentStore: DidDocumentStore
   /** 一份缓存的文档最多被沿用多久，毫秒。见 {@link documentStore}。 */
   cacheTtlMs: number
+  /**
+   * 已经见证过的 DID 转移边（core `did/chain.ts` 的 `DidChainEdgeStore`），进程内共享一份。
+   *
+   * 它**不省任何工作**——core 的读法写得很死，缓存里的边不会被拿来代替重新验证——它只做
+   * 一件事：让"同一个旧 DID 先后指向两个不同的后继"这条冲突**跨解析**可见。P4 §8.12 接受
+   * 一次换 DID 之前要求"no candidate ambiguity, fork, cycle, or trusted-cache conflict
+   * exists"，而只看单次行走的话，两条各自成立、合起来是分叉的转移谁都发现不了。
+   */
+  edgeStore: DidChainEdgeStore
 }
 
 /**
@@ -188,6 +203,9 @@ function parseDidResolution(env: NodeJS.ProcessEnv): DidResolution {
     // 事也没法再配成一个数。
     documentStore: createDidDocumentStore(),
     cacheTtlMs: parsePositive(env.AGENTX_DID_CACHE_TTL_MS, 'AGENTX_DID_CACHE_TTL_MS', DEFAULT_DID_CACHE_TTL_MS),
+    // 与 `documentStore` 同一个理由放在这里：每个调用点各持一份，就等于两份互不知情的见证
+    // 台账，而"同一个旧 DID 指向两个后继"恰恰只有把两次解析放在一起看才成立。
+    edgeStore: createDidChainEdgeStore(),
   }
   if (devHosts.length > 0) {
     resolution.allowPrivateHosts = devHosts

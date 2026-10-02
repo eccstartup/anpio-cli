@@ -5,7 +5,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { SCHEMA_VERSION } from './schema'
 import { openStorage } from './sqlite'
-import type { Storage } from './types'
+import type { Storage, StoredGroupMember } from './types'
 
 let dir: string
 let storage: Storage | undefined
@@ -775,6 +775,107 @@ describe('the leaf projection (P6, C13)', () => {
     ])
     // `terminal` 那台不投，但它的行还在（上面那条要区分第一次进群与重新加入）。
     expect(store.groupLeaf(GROUP, 'did:web:carol.example', 'dev-c')?.state).toBe('terminal')
+  })
+})
+
+describe('the member DID rename (§8.12)', () => {
+  const GROUP = 'did:web:host.example:group:g1'
+  const OLD = 'did:web:alice.example'
+  const NEW = 'did:web:alice.example:abc123'
+
+  function member(memberDid: string, overrides: Partial<StoredGroupMember> = {}): StoredGroupMember {
+    return {
+      groupDid: GROUP,
+      memberDid,
+      role: 'admin',
+      membershipStatus: 'active',
+      stateVersion: 2,
+      joinedAt: '2026-09-01T00:00:00Z',
+      addedBy: 'did:web:owner.example',
+      ...overrides,
+    }
+  }
+
+  function leafFor(memberDid: string, memberDeviceId: string, state = 'active') {
+    return {
+      groupDid: GROUP,
+      memberDid,
+      memberDeviceId,
+      cryptoGroupId: 'crypto-1',
+      epoch: '7',
+      state,
+      addedByRefJson: JSON.stringify({ event_seq: '3' }),
+      updatedAt: '2026-10-01T00:00:00Z',
+    }
+  }
+
+  it('moves the row and keeps every field §8.12 says to preserve', () => {
+    // §8.12 L958–L961：只换 `agent_did`，`role` / `status` / `joined_at` / `added_by` 与
+    // active 计数原样。改一行而不是"删一行加一行"就是为了让这些字段**没机会**被丢掉。
+    const store = open()
+    store.upsertGroupMember(member(OLD))
+
+    expect(store.renameGroupMember(GROUP, OLD, NEW, 9)).toBe(true)
+
+    expect(store.groupMember(GROUP, OLD)).toBeUndefined()
+    const moved = store.groupMember(GROUP, NEW)
+    expect(moved?.role).toBe('admin')
+    expect(moved?.membershipStatus).toBe('active')
+    expect(moved?.joinedAt).toBe('2026-09-01T00:00:00Z')
+    expect(moved?.addedBy).toBe('did:web:owner.example')
+    expect(moved?.stateVersion).toBe(9)
+    expect(store.countActiveMembers(GROUP)).toBe(1)
+  })
+
+  it('returns false and writes nothing when the old DID is not there', () => {
+    // 这就是 §8.12 第 5 条的比较并交换：另一条触发路（定时扫描，或一次并发请求）已经改完了。
+    // 调用方把它读成"已经做过了"，所以它必须**什么都不改**——包括不去动新 DID 名下的行。
+    const store = open()
+    store.upsertGroupMember(member(OLD))
+    store.upsertGroupMember(member(NEW, { membershipStatus: 'removed', role: 'member' }))
+
+    expect(store.renameGroupMember(GROUP, 'did:web:nobody.example', NEW, 9)).toBe(false)
+    expect(store.groupMember(GROUP, NEW)?.membershipStatus).toBe('removed')
+    expect(store.groupMember(GROUP, OLD)?.membershipStatus).toBe('active')
+  })
+
+  it('makes room for the new DID by dropping a stale removed row, but never a live one', () => {
+    // §8.12 第 4 条只禁止新 DID 属于**另一个 active 成员**，所以一条陈旧的 `removed` 行是合法
+    // 输入：不先让路，改名会撞主键而不是收敛。反过来说，一条 active 行是调用方的编码错误——
+    // 宁可抛，也不能删掉一个活的成员来腾位置。
+    const store = open()
+    store.upsertGroupMember(member(OLD))
+    store.upsertGroupMember(member(NEW, { membershipStatus: 'removed', role: 'member' }))
+
+    expect(store.renameGroupMember(GROUP, OLD, NEW, 9)).toBe(true)
+    expect(store.groupMembers(GROUP)).toHaveLength(1)
+    expect(store.groupMember(GROUP, NEW)?.role).toBe('admin')
+
+    const second = open()
+    second.upsertGroupMember(member(OLD))
+    second.upsertGroupMember(member(NEW, { role: 'owner' }))
+
+    expect(() => second.renameGroupMember(GROUP, OLD, NEW, 9)).toThrow(/already an active member/)
+    // 抛出去的时候那个活的成员还在。
+    expect(second.groupMember(GROUP, NEW)?.role).toBe('owner')
+    expect(second.countActiveMembers(GROUP)).toBe(2)
+  })
+
+  it('carries the leaf rows across, dropping the ones the new DID already has', () => {
+    // 叶子投影跟着名册走：`group_leaves.member_did` 正是投递队列寻址用的那一列，留在旧 DID 上
+    // 等于把 §8.12 要求关掉的地址留在了最要紧的地方。新 DID 已有行的设备不搬——两行会让
+    // "这台设备是不是 leaf" 有两个答案。
+    const store = open()
+    store.upsertGroupLeaf(leafFor(OLD, 'dev-a'))
+    store.upsertGroupLeaf(leafFor(OLD, 'dev-b'))
+    store.upsertGroupLeaf(leafFor(NEW, 'dev-b'))
+
+    expect(store.renameGroupLeaves(GROUP, OLD, NEW)).toBe(2)
+
+    expect(store.groupLeaf(GROUP, OLD, 'dev-a')).toBeUndefined()
+    expect(store.groupLeaf(GROUP, NEW, 'dev-a')?.state).toBe('active')
+    expect(store.groupLeaf(GROUP, NEW, 'dev-b')?.state).toBe('active')
+    expect(store.activeGroupLeaves(GROUP)).toHaveLength(2)
   })
 })
 

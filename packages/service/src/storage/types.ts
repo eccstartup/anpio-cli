@@ -524,6 +524,35 @@ export interface Storage {
   /** How many DIDs are currently `active`. §7.1 L370 counts DIDs, not devices. */
   countActiveMembers(groupDid: string): number
 
+  /** Rename an active member's DID in place — §8.12's "replace only the current `agent_did`".
+   *
+   *  Returns `false` when no row matched `(groupDid, fromDid)`: that is the compare-and-swap
+   *  §8.12 item 5 requires. A second trigger — the periodic sweep racing a request — finds
+   *  nothing left to rename, and the caller reads that as "already done" rather than as an
+   *  error, which is what makes the deterministic operation id converge.
+   *
+   *  Only `member_did` and `state_version` are written. `role`, `membership_status`,
+   *  `joined_at` and `added_by` therefore survive **by construction** rather than by being
+   *  copied across, and a copy is a place the next edit can silently drop one of them.
+   *
+   *  A non-active row already sitting on the new DID is removed first: §8.12 item 4 only
+   *  forbids the new DID belonging to another *active* member, so a stale `removed` row is
+   *  legal input, and without this the rename would collide on the primary key instead of
+   *  converging. An **active** row on the new DID is a code error — the caller checked for it
+   *  — and throws rather than deleting a live membership to make room for this one. */
+  renameGroupMember(groupDid: string, fromDid: string, toDid: string, stateVersion: number): boolean
+  /** Move a member's rows of the Leaf projection onto the new DID, in the same transaction.
+   *  Returns how many rows moved.
+   *
+   *  The projection has to follow the roster: `group_leaves.member_did` is what the delivery
+   *  queue addresses a member's devices by (§12.6 item 3), so rows left on the old DID would
+   *  keep a superseded address alive in exactly the place §8.12 requires to be switched off.
+   *
+   *  Devices the NEW DID already has a row for are dropped rather than moved — the row
+   *  already there is the current one, and both for one `(did, device)` would make "is this
+   *  device a leaf" a question with two answers. */
+  renameGroupLeaves(groupDid: string, fromDid: string, toDid: string): number
+
   /** Append one `group.state_changed` event. `eventSeq` is the value
    *  {@link Storage.advanceGroupCounters} just returned, which is what makes the events
    *  table an ordered replay source even though its sequence numbers are not contiguous

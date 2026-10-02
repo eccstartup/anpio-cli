@@ -65,6 +65,7 @@ import {
 } from './groupControl'
 import { callerKeyOf, createRateLimiter } from './rateLimit'
 import { GROUP_HANDLERS } from './groups'
+import { adoptMemberDidForRequest, requestTriggersDidUpdate, type DidChainResolver } from './memberDidUpdate'
 import { ATTACHMENT_HANDLERS } from './attachments'
 import type { ObjectStore } from '../objects'
 import { AnpRefusal, refusal } from './refusal'
@@ -102,6 +103,10 @@ export interface DispatchDeps {
    *  (P5 §4.1.1). Defaults to core's `DidDeviceResolver`; a test substitutes one that
    *  answers from an inline document, same reason as `resolver` and `locator`. */
   deviceResolver?: DeviceResolver
+  /** 走一次 DID 转移链（P4 §8.12 的请求触发）。默认为 core 的 `resolveDidChain`，选项就是
+   *  `config.didResolution`；与 `resolver` / `locator` / `deviceResolver` 同一个理由可换：
+   *  换 DID 这条路要读对端的文档，测试不该为此上网。 */
+  chainResolver?: DidChainResolver
   /** 跨域外层签名的重放缓存（P8 §6.2.2 第 8 步、federation.md §2.2）。默认为本服务自己
    *  `Storage` 上的 `http_nonces` 表。 */
   nonceStore?: NonceStore
@@ -497,21 +502,33 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
       // that did not create one (a replay, and every method but `direct.send`).
       const pending: DeliveryRecord[] = []
 
+      // P4 §8.12 的**请求触发**：来的是一个可能是某个成员后继的 DID，而名册里还写着旧的那个。
+      //
+      // 位置在两条受理路**分岔之前**，因为触发面里有 `group.get_info`，而它是无状态方法、
+      // 走的是下面那个提前返回的分支。也因为它必须在这次调用被授权**之前**走完——规范要求
+      // "先补完名册、排好 member-did-updated，再按保留下来的角色受理这次操作"。
+      //
+      // 与 `relayFor` / `eligibilityFor` 同一条理由它是异步的：要走一次转移链（网络往返），
+      // 而它落下的那次改名自己也占一个事务，两件事都进不去 `acceptOperation` 的事务。
+      // 绝大多数调用在这里一次查表就过去了（方法名不在触发面上）。
+      await adoptDidSuccessor(spec, meta, acceptedAt, pending)
+
       // 这个方法不改状态：没有幂等作用域，也就没有要记的操作，直接跑（P1 §9.1 L628 的
       // 四段键里 operation_id 的语义是"重试同一次操作"，无状态调用没有这个东西）。
       if (spec.targetScope === undefined) {
-        return successResponse(
-          envelope.id,
-          perform(spec, {
-            params: envelope.params,
-            acceptedAt,
-            pending,
-            requestDigest,
-            devices,
-            ...(proofKeyId !== undefined ? { proofKeyId } : {}),
-            ...(proofNonce !== undefined ? { proofNonce } : {}),
-          }),
-        )
+        const result = perform(spec, {
+          params: envelope.params,
+          acceptedAt,
+          pending,
+          requestDigest,
+          devices,
+          ...(proofKeyId !== undefined ? { proofKeyId } : {}),
+          ...(proofNonce !== undefined ? { proofNonce } : {}),
+        })
+        // 无状态方法自己不产生投递，所以这段在 §8.12 之前是空转的；而 `group.get_info` 一旦
+        // 顺路补了名册，那次补就产生了通知。它与有状态那条路上的 `publish` 是同一句话。
+        publish(pending)
+        return successResponse(envelope.id, result)
       }
 
       // 四段键按**请求里写的** `sender_did` 算（§9.1 L641 的另一半：DID 被替代时，重试要用
@@ -619,6 +636,44 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
     const targetDid = envelope.params.meta.target?.did
     if (targetDid === undefined || targetDid === '') return LOCAL
     return relay.forward(envelope, targetDid)
+  }
+
+  /**
+   * P4 §8.12 的请求触发：这次调用是不是该**先补完名册**再受理。
+   *
+   * 三件事在这一层决定，其余交给 `memberDidUpdate.ts`：
+   *
+   *   - **定址**。这个动作只对"目标是本服务托管的某个群"成立——`meta.target.did` 就是
+   *     `group_did`。群不在本服务上时下面第一次查表就返回了。
+   *   - **触发面**（§8.12 L946 那五个方法）。`requestTriggersDidUpdate` 里是那张表；它在
+   *     这里而不是在 `handle` 里逐方法写，是因为"哪几个方法会触发"与"触发之后做什么"是同
+   *     一件事的两半，分开写就会各自漂。
+   *   - **失败的处置**。整块**不吞异常**：这里判不了（对端 DID 服务器不可达、链断了、档位
+   *     不够）都已经在 `adoptMemberDidForRequest` 里变成了"不采纳"，走不到这里；能抛到这里的
+   *     只剩数据库错这类真问题，它们该由下面那个 catch 变成 -32603 并进日志，而不是被静默
+   *     咽掉之后让这次调用拿着一个**没补上的名册**继续跑。
+   */
+  async function adoptDidSuccessor(
+    spec: MethodSpec,
+    meta: AnpMeta,
+    acceptedAt: string,
+    pending: DeliveryRecord[],
+  ): Promise<void> {
+    const targetDid = meta.target?.did
+    const actorDid = meta.sender_did
+    // 匿名调用没有发起者可言，也就没有"这是谁的后继"这个问题。
+    if (targetDid === undefined || targetDid === '' || actorDid === undefined || actorDid === '') return
+    if (!requestTriggersDidUpdate(deps.storage, spec.name, targetDid)) return
+    await adoptMemberDidForRequest({
+      storage: deps.storage,
+      config: deps.config,
+      groupDid: targetDid,
+      actorDid,
+      acceptedAt,
+      ...(deps.chainResolver !== undefined ? { resolveChain: deps.chainResolver } : {}),
+      ...(log !== undefined ? { log } : {}),
+      onDelivery: (record) => pending.push(record),
+    })
   }
 
   /**

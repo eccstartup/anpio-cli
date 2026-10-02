@@ -828,6 +828,69 @@ class SqliteStorage implements Storage {
     return int(row.total)
   }
 
+  /** §8.12 的改名。返回值是**比较并交换**的成败，不是"写了几行"——调用方靠它区分"我做
+   *  成了"与"别人已经做过了"。整个动作一个事务，中途没有"删了旧的还没写新的"的窗口。 */
+  renameGroupMember(groupDid: string, fromDid: string, toDid: string, stateVersion: number): boolean {
+    return this.transaction(() => {
+      // 先确认要改的那一行在。**顺序要紧**：下面会为让路删掉新 DID 名下的陈旧行，而"没得
+      // 可改"时那一删不该发生——那会让一次落空的比较并交换顺手改掉别的状态。
+      const source = this.stmt(
+        'SELECT 1 AS present FROM group_members WHERE group_did = ? AND member_did = ?',
+      ).get(groupDid, fromDid) as Row | undefined
+      if (source === undefined) return false
+      const clash = this.stmt(
+        'SELECT membership_status FROM group_members WHERE group_did = ? AND member_did = ?',
+      ).get(groupDid, toDid) as Row | undefined
+      if (clash !== undefined) {
+        if (text(clash.membership_status) === 'active') {
+          // §8.12 第 4 条要求调用方先确认"新 DID 不是另一个 active 成员"。走到这里说明那条
+          // 判断漏了，而**另一种**处置——删掉那条活着的成员行——是拿调错代码去毁掉另一个成员。
+          throw new Error(`${toDid} is already an active member of ${groupDid}`)
+        }
+        // 陈旧的非 active 行（这个 DID 以前在群里后来走了）：§8.12 要保留的是**旧行**身上那份
+        // 会员史，所以让路的是它。`upsertGroupMember` 重新激活时也是覆盖这一行，同一件事。
+        this.stmt('DELETE FROM group_members WHERE group_did = ? AND member_did = ?').run(groupDid, toDid)
+      }
+      const result = this.stmt(
+        `UPDATE group_members
+            SET member_did = ?, state_version = ?
+          WHERE group_did = ? AND member_did = ?`,
+      ).run(toDid, stateVersion, groupDid, fromDid)
+      // 只写这两列：`role` / `membership_status` / `joined_at` / `added_by` 原样留在行上。
+      return result.changes > 0
+    })
+  }
+
+  /** Leaf 投影跟着改名走。主键里含 `member_did`，所以只能逐台设备搬；一个成员的设备数是个
+   *  位数，一次事务里跑完。 */
+  renameGroupLeaves(groupDid: string, fromDid: string, toDid: string): number {
+    return this.transaction(() => {
+      const rows = this.stmt(
+        'SELECT member_device_id FROM group_leaves WHERE group_did = ? AND member_did = ?',
+      ).all(groupDid, fromDid) as Row[]
+      for (const row of rows) {
+        const deviceId = text(row.member_device_id)
+        const clash = this.stmt(
+          `SELECT 1 AS present FROM group_leaves
+            WHERE group_did = ? AND member_did = ? AND member_device_id = ?`,
+        ).get(groupDid, toDid, deviceId) as Row | undefined
+        if (clash !== undefined) {
+          // 新 DID 名下已经有一行同一台设备：那一行才是当前的，旧行就地删掉。搬过去会撞主键，
+          // 留着会让"这台设备是不是当前 leaf"有两个答案。
+          this.stmt(
+            'DELETE FROM group_leaves WHERE group_did = ? AND member_did = ? AND member_device_id = ?',
+          ).run(groupDid, fromDid, deviceId)
+          continue
+        }
+        this.stmt(
+          `UPDATE group_leaves SET member_did = ?
+            WHERE group_did = ? AND member_did = ? AND member_device_id = ?`,
+        ).run(toDid, groupDid, fromDid, deviceId)
+      }
+      return rows.length
+    })
+  }
+
   appendGroupEvent(event: StoredGroupEvent): void {
     this.stmt(
       `INSERT INTO group_events (group_did, event_seq, event_type, payload_json, occurred_at)
