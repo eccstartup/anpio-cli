@@ -58,6 +58,26 @@
 文档门禁、测试全部读它。这是旧仓库验证过的机制：命令的形状**只写一遍**，
 help 里写了的旗标就是解析器接受的旗标，反之亦然，两者不可能漂移。**照搬这个文件的结构。**
 
+### 那份 "文档门禁" 实际管到哪（2026-10-02）
+
+上面那句里的"文档门禁"是照搬过来的措辞，旧仓库那份做的是"拿 `githubpages/cli/api/*.md`
+和命令面对账"。本仓库**没有**这个东西：文档站的 CLI 参考页
+（`vercel/reference/cli.md` 与 `vercel/en/reference/cli.md`）是**手写的**，没有任何脚本从
+`commands.ts` 生成它，也没有测试拿它和命令面对账。所以今天的门禁只做一件事：**每个页面的
+`See:` 行指向的文档页确实存在**——`see` 是站内相对路径，门禁把它拼成 `vercel/<see>.md`
+在磁盘上找一遍（`help.test.ts` 的第四条），顺带钉住 `DOCS_BASE` 是一个裸 origin、`see` 不带
+前导斜杠、且都落在 `/en/` 下（这份 help 是英文的，站是双语的）。
+
+这条之所以值得从"没有"变成"有"，是因为它刚抓到过一整批死链：`DOCS_BASE` 原本指着
+`github.com/eccstartup/connectx/blob/master/githubpages`——**旧仓库的旧路径**，于是 26 个页面
+的 `See:` 行条条 404；而旧的 `see` 值写的是 `cli/api/{did,anp,msg,group,agent,version}.md`，
+在这个站上根本不存在（本站只有 `reference/cli` 一个 CLI 参考页）。站点已部署在
+**https://agentx-docs.vercel.app**（中文在 `/`，英文在 `/en/`），`see` 一律指
+`en/reference/cli`。
+
+门禁的射程就到"链接还活着"为止，**不**包括"文档页和命令面一致"——那是人手的事。想让后者也
+成门禁，得先让文档页由 `commands.ts` 生成，那是另一个决定。
+
 ### 3.1 `did` —— DID server 的对端（不变）
 
 ```

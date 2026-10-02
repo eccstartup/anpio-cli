@@ -282,17 +282,18 @@ KeyPackage 的 `did_wba_binding` Object Proof 由设备自签，验证侧从**�
   `'24'`** 是钉 `engines` 声明的下限（>=24.16.0），声明了最小值却从没跑过它就只是个说法。
   整套顺序在本地从 `rm -rf packages/*/dist` 起验过一遍。e2e 也在里面——它最慢，但它是唯一一个
   能发现"两半各自都对、拼起来不对"的那组。）
-- **B7（= TODO1 E5 剩最后一步）** 文档站的 Vercel 连接要你的账号，我做不了。
-  （2026-10-02 用户说"需要我做什么直接提就好了"，已把要做的三步交出去。仓库这一侧是齐的，
-  不用改：`vercel/` 是自包含的 VitePress 站点，自带 `vercel.json`（`buildCommand: npm run docs:build`、
-  `outputDirectory: .vitepress/dist`、`cleanUrls: true`），`npm run docs:build` 在本地刚跑过，
-  9.2s 出 6.3M。**只差账号侧三步**：① GitHub 上授权 Vercel 访问 `eccstartup/AgentX`；
-  ② 新建 Project 时把 **Root Directory 设成 `vercel/`**（不是仓库根——根是 npm workspaces，
-  Vercel 按根装会去装四个包的依赖，白装）；③ 部署完把拿到的域名给我。
-  拿到域名后还有两处要跟着改，都是今天就知道的坏链：`packages/cli/src/help/commands.ts:1072`
-  的 `DOCS_BASE` 现在指着 `github.com/eccstartup/connectx/blob/master/githubpages`——那是**旧仓库
-  旧路径**，本仓库的 `See:` 行因此条条是死链；以及 `docs/design/cli.md` §3 提到的"文档门禁"
-  在本仓库并不存在。等域名定下来一并处理，避免先写一个又要改的地址。）
+- ~~**B7（= TODO1 E5 剩最后一步）** 文档站的 Vercel 连接要你的账号，我做不了。~~
+  （2026-10-02 完成。用户接了 Vercel，站上线在 **https://agentx-docs.vercel.app**（中文 `/`、
+  英文 `/en/`，两页都验过 200）。仓库侧随之改了三处：`packages/cli/src/help/commands.ts` 的
+  `DOCS_BASE` 从 `github.com/eccstartup/connectx/blob/master/githubpages`（**旧仓库旧路径**，
+  26 条 `See:` 因此条条 404）改成站点 origin，26 处 `see` 从站上并不存在的
+  `cli/api/*.md` 改成 `en/reference/cli`（本站只有这一个 CLI 参考页）；`docs/design/cli.md`
+  §3 新增小节说清"文档门禁"在这个仓库的实际射程；
+  `README.md` 的文档一节换上线上地址。
+  另外把那条门禁**真的做出来**了（`help.test.ts` 第四条）：把每个 `see` 拼成 `vercel/<see>.md`
+  在磁盘上找一遍，并钉住 `DOCS_BASE` 是裸 origin、`see` 不带前导斜杠且都在 `/en/` 下。
+  三种坏法都验过会红：页名不存在、`DOCS_BASE` 换回旧仓库、`see` 加前导斜杠。射程仍有限——
+  它只保证链接活着，不保证文档页和命令面一致，后者要先让文档页由 `commands.ts` 生成。）
 
 ---
 

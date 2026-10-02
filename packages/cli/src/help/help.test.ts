@@ -1,6 +1,6 @@
 // Guards on the command surface and on the help rendered from it.
 //
-// Three things are being kept true, each of which was false at some point:
+// Four things are being kept true, each of which was false at some point:
 //
 //  1. A page shows every flag it accepts and accepts every flag it shows. That is
 //     what lets the docs gate treat a missing flag mention as a failure: the help is
@@ -14,11 +14,14 @@
 //     reader to `--help` — so most of it is out of this gate's reach by design. What it
 //     does catch is the drift that matters: the few invocations a reader copies verbatim
 //     are the ones that must still resolve.
+//  4. Every `See:` line reaches a page the docs site has. It is the only outgoing link
+//     in help, so a rename under `vercel/` would otherwise 404 every page silently.
 
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import {
   COMMANDS,
+  DOCS_BASE,
   GLOBAL_FLAGS,
   acceptedArgs,
   acceptedFlags,
@@ -351,6 +354,41 @@ describe('the skill tracks the command surface', () => {
         const flag = `--${flagNames(token)[0]}`
         expect(accepted.has(flag), `SKILL.md:${line}: \`${name}\` does not accept ${flag}`).toBe(true)
       }
+    }
+  })
+})
+
+// The `See:` line is the one place help leaves this repo, so it is the one place a
+// rename over in `vercel/` can turn every page into a 404 without any test noticing.
+// The base is checked too: it spent a while pointing at a different repo's site, which
+// no path check on this side could have caught.
+describe('the docs a page points at exist', () => {
+  const DOCS_ROOT = new URL('../../../../vercel/', import.meta.url)
+
+  const cited = COMMANDS.flatMap((command) =>
+    pagesOf(command)
+      .filter(({ page }) => page.see !== undefined)
+      .map(({ path, page }) => ({ path, see: page.see as string })),
+  )
+
+  it('is an origin, so `see` is the only variable part', () => {
+    expect(DOCS_BASE).toMatch(/^https:\/\/[^/]+$/)
+  })
+
+  it('has pages that carry one', () => {
+    expect(cited.length).toBeGreaterThan(0)
+  })
+
+  it('names a page the docs site actually has', () => {
+    for (const { path, see } of cited) {
+      expect(see, `\`${path}\`: \`see\` must be relative to ${DOCS_BASE}`).not.toMatch(/^\/|:\/\//)
+      expect(existsSync(new URL(`${see}.md`, DOCS_ROOT)), `\`${path}\`: no docs page \`vercel/${see}.md\``).toBe(true)
+    }
+  })
+
+  it('sends English help to the English half of the site', () => {
+    for (const { path, see } of cited) {
+      expect(see.startsWith('en/'), `\`${path}\`: this help is English`).toBe(true)
     }
   })
 })

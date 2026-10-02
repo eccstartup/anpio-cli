@@ -47,15 +47,17 @@ npx connectx msg inbox
 
 ## 文档
 
-面向使用者的技术文档（中文在 `/`，英文在 `/en/`）在 [`vercel/`](vercel/)：
+面向使用者的技术文档（中文在 `/`，英文在 `/en/`）在
+**https://agentx-docs.vercel.app**，源文件在 [`vercel/`](vercel/)：
 
 ```bash
 npm run docs:dev      # 本地预览
 npm run docs:build    # 构建静态站点
 ```
 
-这个目录是一个自包含的 VitePress 站点，在 Vercel 上把项目 Root Directory 指向 `vercel/`
-即可部署。
+这个目录是一个自包含的 VitePress 站点，部署在 Vercel 上，项目的 Root Directory 指向
+`vercel/`。`connectx --help` 每条 `See:` 行指的就是这个站——那条链接由 `help.test.ts`
+的第四条门禁守着，改文档页名会让它红。
 
 ## 开发设计文档
 

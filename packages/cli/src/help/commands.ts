@@ -4,7 +4,7 @@
 //   - `render.ts`      renders the L0 index and the L1/L2 pages
 //   - `cli.ts`         rejects a flag a command does not accept
 //   - help tests       assert every documented flag is accepted and vice versa
-//   - the docs gate    reconciles githubpages/cli/api/*.md against it
+//   - the docs gate    asserts each page's `see` resolves to a real docs page
 //   - the skill gate   checks SKILL.md's command and flag mentions
 //
 // That is the point of the file: a command's shape is stated ONCE, so help, the
@@ -244,7 +244,7 @@ export const COMMANDS: CommandSpec[] = [
           { code: '1', meaning: 'failed' },
         ],
         examples: ['did create', 'did create --curve secp256k1 --agent claude-code'],
-        see: 'cli/api/did.md',
+        see: 'en/reference/cli',
       },
       {
         sub: 'show',
@@ -261,7 +261,7 @@ export const COMMANDS: CommandSpec[] = [
           { code: '1', meaning: 'no identity stored, or the key could not be read' },
         ],
         examples: ['did show', 'did show --agent claude-code --json'],
-        see: 'cli/api/did.md',
+        see: 'en/reference/cli',
       },
       {
         sub: 'list',
@@ -276,7 +276,7 @@ export const COMMANDS: CommandSpec[] = [
           { code: '1', meaning: 'failed' },
         ],
         examples: ['did list', 'did list --json'],
-        see: 'cli/api/did.md',
+        see: 'en/reference/cli',
       },
       {
         sub: 'register',
@@ -324,7 +324,7 @@ export const COMMANDS: CommandSpec[] = [
           'did register --target https://did.example.com/register --handle alice --json',
           'did register --target http://127.0.0.1:8765/user-service/v1/did-auth/rpc --handle alice --rpc',
         ],
-        see: 'cli/api/did.md',
+        see: 'en/reference/cli',
       },
       {
         sub: 'resolve',
@@ -375,7 +375,7 @@ export const COMMANDS: CommandSpec[] = [
           'did resolve did:wba:example.com:user:alice:e1_abc --allow-host example.com',
           'did resolve did:wba:example.com:user:alice:e1_abc --chain --allow-host example.com --json',
         ],
-        see: 'cli/api/did.md',
+        see: 'en/reference/cli',
       },
       {
         sub: 'update',
@@ -422,7 +422,7 @@ export const COMMANDS: CommandSpec[] = [
           { code: '1', meaning: 'failed, refused, or nothing to resume' },
         ],
         examples: ['did update --target https://did.example.com/update', 'did update --resume'],
-        see: 'cli/api/did.md',
+        see: 'en/reference/cli',
       },
       {
         sub: 'restore',
@@ -435,7 +435,7 @@ export const COMMANDS: CommandSpec[] = [
         ],
         exits: [{ code: '1', meaning: 'in development: nothing was restored' }],
         examples: ['did restore', 'did restore --agent claude-code'],
-        see: 'cli/api/did.md',
+        see: 'en/reference/cli',
       },
     ],
   },
@@ -464,7 +464,7 @@ export const COMMANDS: CommandSpec[] = [
           { code: '1', meaning: 'no identity stored, or the wallet could not be reached' },
         ],
         examples: ['anp show', 'anp show --wallet web3 --provider ./wallet.mjs --address 0xabc --json'],
-        see: 'cli/api/anp.md',
+        see: 'en/reference/cli',
       },
       {
         sub: 'login',
@@ -515,7 +515,7 @@ export const COMMANDS: CommandSpec[] = [
           'anp login --target http://localhost:3000/api/login/anp/verify',
           'anp login --target https://site/api/login/anp/verify --json',
         ],
-        see: 'cli/api/anp.md',
+        see: 'en/reference/cli',
       },
       {
         sub: 'sign',
@@ -546,7 +546,7 @@ export const COMMANDS: CommandSpec[] = [
           'anp sign --target http://localhost:3000/api/resource',
           'anp sign --target https://site/api/resource --method GET',
         ],
-        see: 'cli/api/anp.md',
+        see: 'en/reference/cli',
       },
     ],
   },
@@ -634,7 +634,7 @@ export const COMMANDS: CommandSpec[] = [
           'msg send --to did:wba:example.com:user:bob:e1_xyz --text hello',
           "msg send --to did:wba:example.com:user:bob:e1_xyz --body '{\"kind\":\"ping\"}'",
         ],
-        see: 'cli/api/msg.md',
+        see: 'en/reference/cli',
       },
       {
         sub: 'caps',
@@ -651,7 +651,7 @@ export const COMMANDS: CommandSpec[] = [
           { code: '1', meaning: 'failed: no message service found, refused, or a malformed answer' },
         ],
         examples: ['msg caps did:wba:example.com:user:bob:e1_xyz'],
-        see: 'cli/api/msg.md',
+        see: 'en/reference/cli',
       },
       {
         sub: 'inbox',
@@ -684,7 +684,7 @@ export const COMMANDS: CommandSpec[] = [
           { code: '1', meaning: 'failed: no message service found, refused, or unsupported_extension' },
         ],
         examples: ['msg inbox', 'msg inbox --limit 50 --include-read'],
-        see: 'cli/api/msg.md',
+        see: 'en/reference/cli',
       },
       {
         sub: 'show',
@@ -701,7 +701,7 @@ export const COMMANDS: CommandSpec[] = [
           { code: '1', meaning: 'failed: no such message, refused, or unsupported_extension' },
         ],
         examples: ['msg show 3f2a1c9e-6b2e-4f0a-9c31-8e2b7d4a5c60'],
-        see: 'cli/api/msg.md',
+        see: 'en/reference/cli',
       },
       {
         sub: 'read',
@@ -736,7 +736,7 @@ export const COMMANDS: CommandSpec[] = [
           { code: '1', meaning: 'failed: refused, or unsupported_extension' },
         ],
         examples: ['msg read 3f2a1c9e-6b2e-4f0a-9c31-8e2b7d4a5c60', 'msg read --all'],
-        see: 'cli/api/msg.md',
+        see: 'en/reference/cli',
       },
       {
         sub: 'listen',
@@ -793,7 +793,7 @@ export const COMMANDS: CommandSpec[] = [
           'msg listen --once',
           'msg listen --device laptop --json > messages.ndjson',
         ],
-        see: 'cli/api/msg.md',
+        see: 'en/reference/cli',
       },
     ],
   },
@@ -856,7 +856,7 @@ export const COMMANDS: CommandSpec[] = [
           'group create --name "contract team"',
           `group create --policy '{"admission_mode":"admin-add"}'`,
         ],
-        see: 'cli/api/group.md',
+        see: 'en/reference/cli',
       },
       {
         sub: 'info',
@@ -874,7 +874,7 @@ export const COMMANDS: CommandSpec[] = [
           { code: '1', meaning: 'failed: no message service found, refused, or a malformed answer' },
         ],
         examples: ['group info did:wba:example.com:group:contract-team'],
-        see: 'cli/api/group.md',
+        see: 'en/reference/cli',
       },
       {
         sub: 'members',
@@ -891,7 +891,7 @@ export const COMMANDS: CommandSpec[] = [
           { code: '1', meaning: 'failed: no message service found, refused, or a malformed answer' },
         ],
         examples: ['group members did:wba:example.com:group:contract-team'],
-        see: 'cli/api/group.md',
+        see: 'en/reference/cli',
       },
       {
         sub: 'join',
@@ -908,7 +908,7 @@ export const COMMANDS: CommandSpec[] = [
           { code: '1', meaning: 'failed: refused, no message service found, or rejected input' },
         ],
         examples: ['group join did:wba:example.com:group:contract-team'],
-        see: 'cli/api/group.md',
+        see: 'en/reference/cli',
       },
       {
         sub: 'leave',
@@ -925,7 +925,7 @@ export const COMMANDS: CommandSpec[] = [
           { code: '1', meaning: 'failed: refused, not a member, or no message service found' },
         ],
         examples: ['group leave did:wba:example.com:group:contract-team'],
-        see: 'cli/api/group.md',
+        see: 'en/reference/cli',
       },
       {
         sub: 'send',
@@ -977,7 +977,7 @@ export const COMMANDS: CommandSpec[] = [
           'group send did:wba:example.com:group:contract-team --text "ship it"',
           `group send did:wba:example.com:group:contract-team --body '{"kind":"vote"}'`,
         ],
-        see: 'cli/api/group.md',
+        see: 'en/reference/cli',
       },
     ],
   },
@@ -1008,7 +1008,7 @@ export const COMMANDS: CommandSpec[] = [
           { code: '1', meaning: 'the environment matches more than one agent (agent_ambiguous)' },
         ],
         examples: ['agent show', 'agent show --json'],
-        see: 'cli/api/agent.md',
+        see: 'en/reference/cli',
       },
       {
         sub: 'use',
@@ -1026,7 +1026,7 @@ export const COMMANDS: CommandSpec[] = [
           { code: '1', meaning: 'failed (the id is not a usable agent id)' },
         ],
         examples: ['agent use claude-code', 'agent use work --json'],
-        see: 'cli/api/agent.md',
+        see: 'en/reference/cli',
       },
       {
         sub: 'list',
@@ -1042,7 +1042,7 @@ export const COMMANDS: CommandSpec[] = [
           { code: '1', meaning: 'failed (the current agent file holds no usable agent id)' },
         ],
         examples: ['agent list', 'agent list --json'],
-        see: 'cli/api/agent.md',
+        see: 'en/reference/cli',
       },
     ],
   },
@@ -1062,14 +1062,18 @@ export const COMMANDS: CommandSpec[] = [
         // the code does not keep.
         exits: [{ code: '0', meaning: 'printed' }],
         examples: ['version', 'version --json'],
-        see: 'cli/api/version.md',
+        see: 'en/reference/cli',
       },
     ],
   },
 ]
 
-/** The docs site, for the one `See:` line a page may carry. */
-export const DOCS_BASE = 'https://github.com/eccstartup/connectx/blob/master/githubpages'
+/**
+ * The docs site, for the one `See:` line a page may carry. The paths in `see` are
+ * relative to this origin: the site is bilingual, and this CLI prints English, so
+ * they point under `/en/`.
+ */
+export const DOCS_BASE = 'https://agentx-docs.vercel.app'
 
 export function findCommand(name: string): CommandSpec | undefined {
   return COMMANDS.find((c) => c.name === name)
