@@ -25,11 +25,13 @@ ANP 里有两个可以被"自己搭一个"的服务，本仓库做的是第二�
   `connectx` 是它的**客户端**（`did register` / `did resolve` / `did update`）。
 - **ANPMessageService** —— 接收并投递 agent 之间的消息。**`AgentXAgent` 就是它。**
 
-两者分开部署：`AgentXAgent` **不托管别人的 DID 文档**（服务自己的身份文档由 DID Service
-托管），只在需要时**解析**对方的 DID 文档，从中取唯一的 `ANPMessageService` 条目来找到入口
-服务。**一处例外**：本服务**自己名下**的群 DID 文档由本服务发布——群 DID 就住在它的命名空间
-里（`<serviceDid>:g:<id>`），交给别人托管等于让别的服务器替我们签一份关于我们的声明
-（[groups.md](docs/design/groups.md) §2、[TODO3.md](TODO3.md) §0）。
+两者分开部署，**分工是清楚的：DID Service 只管身份，本服务承载社交应用**（2026-10-02 的
+口径，[TODO4.md](TODO4.md) §C）。所以 `AgentXAgent` **不托管别人的 DID 文档**（服务自己的
+身份文档由 DID Service 托管——那是身份层的产物），只在需要时**解析**对方的 DID 文档，从中取
+唯一的 `ANPMessageService` 条目来找到入口服务。**一处例外**：本服务**自己名下**的群 DID 文档
+由本服务发布——群文档是**消息层**的产物（这个群住在哪台 Host 上、名册与事件序在哪儿），群 DID
+就住在它的命名空间里（`<serviceDid>:g:<id>`），交给别人托管等于让别的服务器替我们签一份关于
+我们的声明（[groups.md](docs/design/groups.md) §2、[TODO3.md](TODO3.md) §0）。
 
 ## 快速开始
 

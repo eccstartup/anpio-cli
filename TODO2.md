@@ -225,6 +225,12 @@ KeyPackage 的 `did_wba_binding` Object Proof 由设备自签，验证侧从**�
   "对端声明的 `did:wba:awiki.info` / `https://awiki.info/anp-im/rpc` 原样保留并发布"，
   一条把 `serviceDid: "agentx.example"`、`serviceEndpoint` 为 `""` / `"not-a-url"` / `"https://"`
   逐个打回。按用户口径这条路是"独立出来"，后续 fork 与上游分叉是预期内的，不是要回收的债。）
+  （2026-10-02 第三段：**这条按职责切开后就不是问题了。** 用户口径是 DID server 与 ANP
+  message service 职责不同——**前者只管身份，后者承载社交应用**。于是"身份文档里那条
+  `ANPMessageService` 指向谁"是**身份所有者**的声明，DID server 只负责把它签进去；上面那
+  两条硬相等检查正是把两层焊在了一起。所以开关的方向是对的，剩下的是**那台服务器的部署
+  选择**（设 `AWIKI_ALLOW_PEER_DECLARED_MESSAGE_SERVICE=1`），不是本仓库缺什么。定案与
+  理由见 [TODO4.md](TODO4.md) §C。）
 
 **A1 与 A2 是前置**：这两个不定，P6 在真实 DID 网里跑不起来，其余几条都只是能力边界。
 （2026-10-02：**两条都清了**——A1 按 (i) 落地（`7028711`），A2 结在上游 1.0.x，我方不改代码。

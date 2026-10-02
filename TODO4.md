@@ -91,17 +91,39 @@ B 域命名空间里的群发 `group.send` 全链路跑通，`harness.ts` 的文
 
 ---
 
-## C. 只剩部署动作的（TODO2 A7 的尾巴）
+## ~~C. 只剩部署动作的（TODO2 A7 的尾巴）~~ 按职责切开后不是问题
 
-- **C1 让 fork 真的接受"端点指向别处"的文档。** 代码已经就位——fork 的 `adc796c` 新增开关
-  `AWIKI_ALLOW_PEER_DECLARED_MESSAGE_SERVICE`（默认 `False`，只查形状、不要求等于服务器
-  自己）。缺的是运维侧一步：**在需要接受对端声明端点的那台服务器上设
-  `AWIKI_ALLOW_PEER_DECLARED_MESSAGE_SERVICE=1`。** 不设它，一份指向本服务的带 P6 能力文档
-  在那台服务器上仍然发布不出来（`signed_did_document_service_endpoint_mismatch`）。
-- **C2 `serviceDid` 自己那份文档仍由 awiki 托管。** 与 C1 同源——外层 `keyid` 的 fragment
-  必须与发布方写进去的一致（federation.md §4 第 2 点）。本轮发布的是**群**文档，服务自己的
-  身份文档不在内（[TODO3.md](TODO3.md) §C3）。要不要把它也收回来自己发，等群这一轮在真
-  环境里验过再定。
+**2026-10-02 用户裁定，本节一次收口。** 口径是：**DID server 与 ANP message service 是两个
+职责不同的服务**——前者**只管身份**（它唯一的产物就是身份文档），后者**承载社交应用**（今天
+是聊天，将来可以是别的）。C1 / C2 原先读起来像"两面都不太对"的接缝，其实是**两层的输出**
+被放在一起看了。切开之后两条都划掉。
+
+- ~~**C1 让 fork 真的接受"端点指向别处"的文档。**~~ **归 DID server 自己的策略，而且那条
+  策略本就混了两层。** 一份身份文档里的 `ANPMessageService` 条目指向哪个消息服务，是**身份
+  所有者**的声明（"我的消息走这一家"），DID server 的职责只是把这条声明签进身份文档——
+  awiki 原先那两条"必须等于服务器自己"的相等检查，恰恰是替身份所有者做了这个决定、把身份层
+  与消息层焊在了一起。fork 的 `adc796c` 新增开关
+  `AWIKI_ALLOW_PEER_DECLARED_MESSAGE_SERVICE`（默认 `False`）把两层拆开，方向是对的。
+
+  **本仓库这一侧不需要任何改动。** 本服务与 DID server 的接口只有一个：
+  `GET /.well-known/anp-message-service.json` 交出的那段 JSON
+  （[message-service.md](docs/design/message-service.md) §13），DID server 拿它去嵌自己的
+  文档。这条接口在 C11 就已经是现在这个形状，与本次裁定一致。**剩下的是部署侧一行配置**：
+  在一台要发布"消息端点指向别处"的文档的 DID server 上设
+  `AWIKI_ALLOW_PEER_DECLARED_MESSAGE_SERVICE=1`。不设它，那台服务器仍然只发布端点指向它
+  自己的文档（`signed_did_document_service_endpoint_mismatch`）——这是**那台服务器的部署
+  选择**，不是本服务缺什么；挑 DID server 本来就要挑一家肯照着你的声明签的。
+- ~~**C2 `serviceDid` 自己那份文档仍由 awiki 托管。**~~ **裁定：就这样，是分层不是缺口。**
+  身份文档是 DID server 的输出，本服务不发布它；本服务发布的是**消息层**的文档（群文档，
+  [groups.md](docs/design/groups.md) §2）。所以外层 `keyid` 的 fragment 由发布方决定、本服务
+  用 `AGENTX_KEY_ID` 配成一致——**这不是一处待补的耦合，就是"身份归身份层"这件事本身**
+  （[federation.md](docs/design/federation.md) §4 第 2 点）。[TODO3.md](TODO3.md) §C3 里那句
+  "要不要把后者也收回来自己发"到此有了答案：**不收。**
+
+  **唯一因此存在的技术后果**已经记在 §A3 的"故意没走"第二条里：`packages/e2e` 走不到外层
+  签名那半——`egress` 的 `keyid` 得指着本服务自己的身份文档，而那份文档不在本服务手里。这
+  本来就是 P8 §2.3 允许的一档（不带外层身份 → 按本地调用处理，业务层 `origin_proof` 照旧
+  唯一授权），不是留了个洞。
 
 ---
 
