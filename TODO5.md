@@ -95,9 +95,9 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 **每条带一个状态签**（2026-10-02）：`[已落]` / `[部分]` / `[未动]`。
 
 1. **[部分]** **CLI 参数 / 帮助 / 渲染**（~1600 行）：1193 行的命令表 + 渲染层。机械，但量在那儿。
-   已落骨架与 `did`（7 条：`create` / `show` / `register` / `resolve` / `update` / `restore`，`list`
-   未动）/ `msg`（6 条）/`group`（6 条 + `e2ee` 3 条）/`agent`（3 条）/`discover` 的面；
-   `anp`（3 条）与 `version` 也落了。剩下的只是 `did list` 与 `group` 的那几条。
+   已落骨架与 `did`（全部 7 条：`create` / `show` / `list` / `register` / `resolve` / `update` /
+   `restore`）/ `msg`（6 条）/`group`（6 条 + `e2ee` 3 条）/`agent`（3 条）/`discover` 的面；
+   `anp`（3 条）与 `version` 也落了。**六族 24 条至此全部有实现**。
 2. **[部分]** **身份存储**（~1200 行）：含 **Ethereum keystore V3**（scrypt + aes-128-ctr + keccak256）与
    **EIP-1193 web3 钱包路径**——`--wallet web3` 是 CLI 的一等路径。
    已落的是**自定格式**那一半（§0.1 第 1 条把两个客户端分开了），keystore V3 / web3 未动。
@@ -210,6 +210,7 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 | `did` | `create` / `show` / `register` | ~~做完~~（对 awiki host 真跑通） |
 | `did` | `resolve` / `restore` | ~~做完~~（`resolve` 带 `--chain`；`restore` 是**明说的拒绝**，见 §6） |
 | `did` | `update` | ~~做完~~（写的那半：`--target` / `--resume`；对真 rig 跑通，见 §6） |
+| `did` | `list` | ~~做完~~（第三列是"这个 store 有没有 DID"，未注册的行不藏——见 §6） |
 | — | `discover` | ~~做完~~ |
 | `msg` | `send` / `caps` / `inbox` / `show` / `read` | ~~做完~~（`send` 真阳性；`inbox` 一族对 awiki 为负是**正确**结果） |
 | `msg` | `listen` | ~~做完~~（realtime.md 那条常驻契约） |
@@ -611,6 +612,15 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
   缓存按 host 读-改-写（跨进程文件锁，TS ADR-0001 §2.5 的同一套理由），明文 0600：这个客户端
   没有 keystore，它的身份库本来就已经是明文 0600（§8-E）；而且**缓存写失败永远不是登录失败**，
   token 已经在手里了，为了修一个文件去重跑登录是更坏的结果。
+- **`did list` 已落（2026-10-02）**，`did` 一族至此与 `cli.md` §3.1 的七条对齐。两点：
+  （a）**它和 `agent list` 不是一回事，虽然读的是同一批目录。** `agent list` 答的是**选择**问题
+  ——现在是谁、那个判断是哪一步说的；`did list` 答的是**身份**问题——这里有哪些 DID。所以第三列
+  是 `did`，不是 `handle`，也不带 `current` 标记：`cli.md` §3.1 两条都留着，区别就在那一列。
+  （b）**"没有 DID"的那一行是它存在的理由。** `did create` 先写钥再注册，注册失败就留下一个
+  有目录、没 DID 的身份；把它打成空列或干脆不显示，恰好藏掉了调用者来这里要找的东西。所以那列
+  写 `not registered`，路径跟在旁边，是"没注册"还是"文件读不出来"由它俩一起说。**没有 `curve`
+  列**（TS 有）：那边 `--curve` 是个选择，这边绑定钥永远是 `e1_` 的 Ed25519——每行都一样的列
+  是噪音不是信息。
 - **与 TS `connectx` 并存**，`CONNECTX_HOME` 的处理见 §8-F。
 
 **Phase 2 —— 消息库**（还没动）
@@ -627,7 +637,9 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 - [x] ~~`group e2ee remove`~~（2026-10-02）
 - [x] ~~`group e2ee send`~~（2026-10-02）
 - [x] ~~`group e2ee` 收包路径：`process_notice_v2` / `decrypt_received_v2`~~（2026-10-02；靠 `msg listen` 投递驱动）
-- [ ] 身份：换钥 / 换设备 / `update_document`
+- [x] ~~`did list`~~（2026-10-02；`did` 一族与 `cli.md` §3.1 的七条对齐，见 §6）
+- [ ] 身份：换钥 / 换设备 / `update_document`（`did update` 只是其中的"换钥"那一半；还剩
+  文档已存在时的替换（`update_document`，`register` 的对端）与换设备）
 - [x] ~~`did resolve` / `did restore`~~（2026-10-02；`resolve` 的文档面 + `--chain` 走完更新链，
   `restore` 是明说的拒绝。见 §6）
 - [x] ~~`did update`（写的那半：`--target` / `--resume`，与本机钥的生命周期一起）~~（2026-10-02；
@@ -663,8 +675,8 @@ Phase 1 到此收口：`msg listen` 与 `group` 一族都已落地（见 §6）�
 （见 §6），收包路径（`process_notice_v2` / `decrypt_received_v2`，由 `msg listen` 投递驱动）
 也已落并对真服务跑通，然后是剩下的身份工作（换钥 / 换设备 / `update_document`）与
 `did` / `anp` 三族。`agent` 一族、`did resolve` / `did restore`、写的那半 `did update`、
-`anp` 的离线一半（`show` / `sign`）与 `version` 都已落（2026-10-02，见 §6）；
-剩下 `anp login`（要网络的那一半）与身份工作（换钥 / 换设备 / `update_document`）。
+`did list`、`anp` 一族（离线一半 `show` / `sign` 与在线的 `login`）与 `version` 都已落
+（2026-10-02，见 §6）——**六族 24 条至此全部有实现**，Phase 3 只剩身份工作那一项。
 
 ---
 

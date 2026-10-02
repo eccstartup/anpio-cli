@@ -230,6 +230,16 @@ enum DidCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Every identity this machine holds, and what each one is bound to.
+    ///
+    /// Not `agent list`, although both read the same directories. `agent list` answers the
+    /// *selection* question — which agent is in force, and how that was decided — while this
+    /// answers the *identity* question: which DIDs exist here, and which of them never got
+    /// one. `cli.md` §3.1 keeps both, and the difference is the third column below.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
     /// Publish (or re-publish) an identity's DID document to its host.
     Register {
         #[arg(long)]
@@ -752,6 +762,7 @@ async fn main() -> anyhow::Result<()> {
                 profile,
                 json,
             } => cmd_did_show(agent.as_deref(), profile.as_deref(), json),
+            DidCommand::List { json } => cmd_did_list(json),
             DidCommand::Register { agent, profile } => cmd_did_register(agent.as_deref(), profile.as_deref()).await,
             DidCommand::Resolve { did, chain, json } => cmd_did_resolve(&did, chain, json, &allow_private).await,
             DidCommand::Update {
@@ -1445,6 +1456,37 @@ fn cmd_did_show(agent: Option<&str>, profile: Option<&str>, json: bool) -> anyho
                 location.identity_path().display()
             );
         }
+    }
+    Ok(())
+}
+
+/// `agentx-cli did list` — every identity this machine holds, and what it is bound to.
+///
+/// The third column is the whole reason this is not `agent list`: an identity whose `did
+/// create` wrote keys and whose registration then failed has a directory and no DID, and
+/// that row is precisely the one worth seeing. Printing it as an empty column, or skipping
+/// it, would hide the thing the caller came here to find.
+///
+/// No curve column, unlike the TS client's `did list`: `curve` is a choice there (`--curve
+/// ed25519|secp256k1`) and a constant here — the Rust client's binding key is always the
+/// Ed25519 one a `did:wba` `e1_` fingerprint names. A column that is the same on every row
+/// is noise, not information.
+fn cmd_did_list(json: bool) -> anyhow::Result<()> {
+    let identities = list_identities()?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&identities)?);
+        return Ok(());
+    }
+    if identities.is_empty() {
+        println!("No identities are stored. Run: agentx-cli did create");
+        return Ok(());
+    }
+    for entry in &identities {
+        // `did` is absent both for the never-registered identity and for one whose file
+        // could not be read, and the two want different fixes — but neither is a DID, so
+        // the column says "not registered" and the path beside it is what disambiguates.
+        let named = entry.did.as_deref().unwrap_or("not registered");
+        println!("{}/{}  {}  {}", entry.agent, entry.profile, named, entry.dir.display());
     }
     Ok(())
 }

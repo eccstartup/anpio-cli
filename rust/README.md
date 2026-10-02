@@ -42,7 +42,11 @@ store 根是 `AGENTXCLI_HOME`（缺省 `~/.agentx-cli`），一条身份由 `--a
 命名——两个都可以不写：`--agent` > `$AGENTXCLI_AGENT` > 当前 agent（`agent use` 选的）>
 `default`，`--profile` > `$AGENTXCLI_PROFILE` > `default`。`cargo test` 全绿（128 个单测）。
 
-- **`did create | show | register`** —— 身份存储 + DID 文档。
+- **`did create | show | list | register`** —— 身份存储 + DID 文档。
+  `list` 与 `agent list` 不是一回事：后者答"现在是谁"（选择），前者答"这里有哪些 DID"（身份），
+  所以第三列是 DID 而**不是** handle，也不带 `current` 标记；`did create` 注册失败留下的那个
+  有目录、没 DID 的身份不会被藏起来，它写 `not registered`——那一行正是这个命令存在的理由。
+  没有 `curve` 列：这边绑定钥永远是 `e1_` 的 Ed25519，每行都一样的列是噪音。
 - **`did resolve | restore`** —— `resolve` 是解析面：不给 `--chain` 就取那一份文档
   （`document_is_superseded` 时退出 2，并提示 `--chain`），给 `--chain` 就按 crate 的
   `resolve_current_did` 走完更新链，把"当前的是哪个 DID、中间每一跳的 assurance"打出来
@@ -129,4 +133,5 @@ cargo run --manifest-path rust/Cargo.toml --example phase0_key_package -- /tmp/a
 
 ## 还没有
 
-`did list`；身份这块的换钥 / 换设备 / `update_document`。顺序见 TODO5 §6 的 Phase 3。
+身份这块的换钥 / 换设备 / `update_document`（`did update` 是其中的"换钥"那一半）。六族 24 条
+的命令面已经全部有实现。顺序见 TODO5 §6 的 Phase 3。
