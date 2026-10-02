@@ -965,8 +965,10 @@ describe('the Device Delivery Queue is written with the accepted call (§12)', (
       welcome_b64u: 'AAAA',
       ratchet_tree_b64u: 'AAAA',
     })
-    // Welcome 里没有 `subject_status`——那一位是 Commit 的（§7.6 L673）。
-    expect(parsed(rows[1]).params.body.subject_status).toBeUndefined()
+    // Welcome 与 commit 共用一条 body 形状，`subject_status` 一样要在场——规范线格式向量
+    // （`anp` 的 `p6_v2_wire_vectors.json`，`notice_notification` 正是一条 welcome-delivery）
+    // 里有这一位，crate 的 `V2E2eeNotice` 也把它当必填。
+    expect(parsed(rows[1]).params.body.subject_status).toBe('active')
   })
 
   it('queues one group.incoming per current leaf on send, preserving the accepted fields', async () => {

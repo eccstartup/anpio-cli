@@ -315,6 +315,12 @@ export function emitAddEnvelopes(
           epoch: input.epoch,
           subject_did: input.memberDid,
           subject_device_id: input.memberDeviceId,
+          // §7.6 L673：与 commit 那一份同一个 device，同一条 body 形状。**不能省**——
+          // `anp` 的规范线格式向量（`testdata/group_e2ee/p6_v2_wire_vectors.json` 的
+          // `notice_notification`，就是一条 welcome-delivery）里有这一位，且 crate 的
+          // `V2E2eeNotice` 把它当必填、`validate_notice_outer` 对 welcome 要求它等于
+          // `active`。少了它，按 crate 写的接收端连 body 都反序列化不出来。
+          subject_status: 'active',
           welcome_b64u: input.welcomeB64u,
           ratchet_tree_b64u: input.ratchetTreeB64u,
         },
