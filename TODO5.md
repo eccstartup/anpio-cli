@@ -125,12 +125,12 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
    所以只保留**字面 IP** 的判断（与 TS 在没有 `node:dns` 时的回退同形）。见
    [`assert_allowed_host`](rust/crates/agentx-cli/src/message/resolve.rs) 的函数注释。
 5. **[部分]** **命令逻辑**（~1500 行）：`group` / `msg` / `listen`（含 `msg listen` 这条唯一的常驻契约，
-   [realtime.md](docs/design/realtime.md)）。三族都已落；`group e2ee` 的 `add`/`remove`/`send` 与收包
+   [realtime.md](docs/design/realtime.md)）。三族都已落；`group e2ee` 的 `remove`/`send` 与收包
    路径未做。
 6. **[部分]** **[client-mls.md](docs/design/client-mls.md) 的 store 与编排**：落
    **`<新 store 根>/<agent>/<profile>/mls/`**（**不是** `CONNECTX_HOME`——§0.1 第 1 条把两个
    客户端的 store 根分开了）；owner 编排（§11.12）从 CLI 挪进 Rust 客户端。
-   store 已落且真的在跑（`publish` / `get-key-package` / `create`）；owner 编排的后半未动。
+   store 已落且真的在跑（`publish` / `get-key-package` / `create` / `add`）；owner 编排的后半未动。
 7. **[未动]** **客户端消息存储（新，§4）。**
 
 **被省掉的东西**：走这条路，B2 的 **napi 壳整条取消**——不是"要写两次"，是"换一种方式拿 MLS"。
@@ -214,7 +214,8 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 | `group`（P4） | `create` / `info` / `members` / `join` / `leave` / `send` | ~~做完~~（真阳性只对本仓 `packages/service`） |
 | `group e2ee` | `publish` / `get-key-package` | ~~做完~~（对真服务跑通） |
 | `group e2ee` | `create` | ~~做完~~（对真服务跑通） |
-| `group e2ee` | `add` / `remove` / `send` | 还没 |
+| `group e2ee` | `add` | ~~做完~~（对真服务跑通；群寻址，commit/welcome 进设备队列） |
+| `group e2ee` | `remove` / `send` | 还没 |
 | `group e2ee` | 收包路径（`process_welcome_v2` / `process_commit_v2`） | 还没（靠 `msg listen` 投递驱动） |
 | `anp` | `show` / `login` / `sign` | 还没 |
 | `agent` | `show` / `use` / `list` | 还没 |
@@ -391,6 +392,31 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
   **顺带核到一条规范没写死的语义**：同一个 `key_package_id` 再生成一次
   被本地 store 拒（`group.e2ee.key_package_consumed`），所以 `--key-package-id` 是**命名**，
   不是"重试取回原包"——publish 重试要么换 id、要么走 `get_key_package` 读回。
+- **`group e2ee add` 已落并对真服务跑通（2026-10-02）**，四条控制方法里的第二条（§9.3）。
+  它把 `create` 那条三阶段原样复用（准备 → 发送 → 服务拒绝就 abort、传输失败就留给
+  `reconcile_pending_v2`），新的只有"往哪儿发、拿谁的包"，三处值得记：
+  （a）**两条通道，各带各的策略**。成员那一对（`member_did` / `member_device_id`）不在命令行上
+  选，而是**取自 KeyPackage 自己的 owner**（§9.3.3 键在这个 owner 上，服务那边
+  `didBindingInvalid` 正是为"两处不一致"设的）——所以先去**成员自己的** service 取 KeyPackage：
+  成员的文档指名它的 Host，§8.2.3 允许跨域。`add` 本身则按 §4.4.2 **群寻址**
+  （`meta.target.did == group_did`，crate 的 `validate_control_meta` 自己会核）。
+  于是这条命令开两条 channel：取包那条打成员的域名、`add` 那条打群所在的 service，SSRF 逐跳
+  策略各按各的文档走。
+  （b）**`group_state_version` 还是只读不算**，同 `create`：先 P4 `group.get_info` 取当前值。
+  但这次多一条可验证的断言——§14.1 规定 `add` **也 MUST NOT** 推进它，所以成功的 `add`
+  跑完，P4 的 `group_state_version` 应当**纹丝不动**（见下）。
+  （c）**`add` 的 `epoch` 是"加完之后"的那个数**（§9.3.3），只有 crate 知道；命令面把 body
+  照 crate 的 `V2GroupAddBody` 九字段原样发，`group_e2ee.rs` 只加一个 `add_body`。
+  端到端（同一套脚手架，换了 `rusty` 作新成员）：回 `accepted: true`，服务 `group_leaves`
+  里源成员（carol）的 leaf 从 epoch 0 进到 1，新成员（rusty）的 leaf 落 `active`、epoch 1、
+  `added_by_ref_json` 记着 `group.e2ee.add`；rusty 那枚 KeyPackage 转 `consumed`；
+  **P4 的 `group_state_version` 停在 2 不动**——(b) 那条断言成立。
+- **收包的路已经铺好一半，但收包本身没做**。`add` 成功后服务不是往 `deliveries` 写，
+  而是往**设备队列**（`device_envelopes`）排：源成员拿到一条 `commit`，新成员拿到 `commit`
+  再一条 `welcome`（§12.5/§12.6）。已核对本仓服务确实这样排（`emitAddEnvelopes` →
+  `enqueueDeviceEnvelope`，两张表分开）——所以那两张 envelope 在 `deliveries` 里查不到
+  **是对的**，它们等的正是还没写的 `process_welcome_v2` / `process_commit_v2`（由 `msg listen`
+  投递驱动，见「未做」）。
 - **第四个坑：crate 内部验文档那条路没有 `document_is_bound` 的那层回退。** §6 上面记的
   `@context` 折入问题不只在**解析**侧：`generate_key_package_v2` 会拿调用方递进来的
   issuer 文档再跑一次 `validate_did_document_binding`（`rust/src/proof/object_proof.rs`），
@@ -401,7 +427,7 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
   `document_in_crate_form`（要的是"递给 crate 的那份"），`mls.rs` 用后者。**只换编码，
   不重写验签器**，与解析侧同一条底线。这也解释了为什么 §8-J 生成侧与解析侧会互为镜像：
   同一个 crate 的签与验在 base58 这条分支上就不自洽。
-- **未做**：`group e2ee` 剩下的三条群作用域方法（`add` / `remove` / `send`）与收包路径
+- **未做**：`group e2ee` 剩下的两条群作用域方法（`remove` / `send`）与收包路径
   （`process_welcome_v2` / `process_commit_v2`，靠 `msg listen` 投递驱动）；身份这块还剩
   "换钥/换设备/`update_document`"。
 - 先落 **`msg`** 一族（含 `msg listen` 常驻契约），因为它是 §4 消息库的入口。
@@ -418,7 +444,8 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 - [x] ~~P4 `group` 一族~~（2026-10-02）：`create | info | members | join | leave | send`
 - [x] ~~`group e2ee publish | get-key-package`~~（2026-10-02）
 - [x] ~~`group e2ee create`~~（2026-10-02）
-- [ ] `group e2ee add | remove | send`（§9.3/§9.4/§9.5）
+- [x] ~~`group e2ee add`~~（2026-10-02）
+- [ ] `group e2ee remove | send`（§9.4/§9.5）
 - [ ] `group e2ee` 收包路径：`process_welcome_v2` / `process_commit_v2`（靠 `msg listen` 投递驱动）
 - [ ] 身份：换钥 / 换设备 / `update_document`
 - [ ] `did` 剩下的三条：`resolve` / `update` / `restore`
@@ -445,8 +472,9 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 **本轮不再有挂起的裁定。** 身份存储 + DID 文档发布（含挂 awiki host）已跑通（§6 Phase 1）；
 `msg` 一族的五个命令也跑通了（`send` / `caps` / `inbox` / `show` / `read`，见 §6）。
 Phase 1 到此收口：`msg listen` 与 `group` 一族都已落地（见 §6）。Phase 3 已开工：
-`group e2ee` 的三条服务作用域方法（`publish` / `get-key-package` / `create`）已落并对真服务跑通
-（见 §6），接着是剩下的三条群作用域方法与收包路径，然后是剩下的身份工作
+`group e2ee` 的两条服务作用域方法（`publish` / `get-key-package`）与两条群作用域控制方法
+（`create` / `add`）已落并对真服务跑通
+（见 §6），接着是剩下的两条群作用域方法与收包路径，然后是剩下的身份工作
 （换钥 / 换设备 / `update_document`）与 `did` / `anp` / `agent` 三族。
 
 ---
@@ -565,5 +593,5 @@ Phase 1 到此收口：`msg listen` 与 `group` 一族都已落地（见 §6）�
 不提交密钥。**消息库一旦落明文，它就是密钥**（§8-B）——备份、调试、分享一律按 TODO4 §E 那条办。
 
 **当前基线**（TODO4 §E）：`npm run typecheck` 通过，`npm test` = 213 + 695 + 4 + 652 = **1564**
-全绿。本台账**已不是"纯方案"**：命令面落到哪儿见 §6 的「进度总表」；Rust 侧 `cargo test` = **69**
+全绿。本台账**已不是"纯方案"**：命令面落到哪儿见 §6 的「进度总表」；Rust 侧 `cargo test` = **70**
 全绿（`rust/`）。

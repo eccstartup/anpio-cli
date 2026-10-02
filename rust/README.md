@@ -39,7 +39,7 @@ pin 为准**，源码阅读用 `git show origin/release/0929:rust/...`。
 ## 现在有什么
 
 store 根是 `AGENTXCLI_HOME`（缺省 `~/.agentx-cli`），一条身份由 `--agent` / `--profile`
-命名。`cargo test` 全绿（69 个单测）。
+命名。`cargo test` 全绿（70 个单测）。
 
 - **`did create | show | register`** —— 身份存储 + DID 文档。
 - **`discover <endpoint>`** —— `anp.get_capabilities` 是唯一不需要 auth 的方法（P1 §8.2），
@@ -64,17 +64,22 @@ cargo run --manifest-path rust/Cargo.toml -- discover http://127.0.0.1:8787
   **端到端要打本仓的 `packages/service`**：本机 awiki host 对 `group create` 回 HTTP 401，
   是它自己不许 public RPC 建群的策略（`group.remote_create_not_allowed`），
   详见 [TODO5.md](../TODO5.md) §6 Phase 1。
-- **`group e2ee publish | get-key-package | create`** —— P6 `anp.group.e2ee.v2`。
+- **`group e2ee publish | get-key-package | create | add`** —— P6 `anp.group.e2ee.v2`。
   `src/mls.rs` 是设备半边（造 KeyPackage、跑 prepare/finalize/abort），`src/group_e2ee.rs`
   是线上半边（请求体的形状）。前两条是**服务作用域**的 KeyPackage 方法；
-  `create` 是四条控制方法里的第一条，也是唯一让 `create`/`add`/`remove` 共用的三阶段
-  （prepare → 发送 → finalize 或 abort，§13.6）露出来的地方：服务拒绝就 abort，
-  传输失败则留给 crate 的 `reconcile_pending_v2`，因为那时"服务到底收没收"是不知道的。
-  这三条正是这个客户端用 Rust 写的理由：`awiki` 托管的身份对 P6 回 `anp.not_supported`
-  （它没有 P6），所以它们**只对本仓的 `packages/service` 有意义**。已端到端跑通
-  （发布 → 取出 → 取空后回 `key_package_not_found`；`group create` 建群 → `e2ee create`
-  → 服务落 owner leaf、本地 pending 转 `finalized`），做法见 [TODO5.md](../TODO5.md) §6
-  Phase 3。
+  `create` 与 `add` 是四条控制方法里已落的两条，也是那条让
+  `create`/`add`/`remove` 共用的三阶段（prepare → 发送 → finalize 或 abort，§13.6）
+  露出来的地方：服务拒绝就 abort，传输失败则留给 crate 的 `reconcile_pending_v2`，
+  因为那时"服务到底收没收"是不知道的。`add` 按 §4.4.2 群寻址（`target.did == group_did`），
+  成员那一对取自 KeyPackage 的 owner 而不是命令行，KeyPackage 则去**成员自己的** service
+  取（成员的文档指名它的 Host，§8.2.3 允许跨域）——所以一次 `add` 开两条 channel，各带
+  各的 SSRF 策略，`add` 那条发给群所在的 service。这几条正是这个客户端用 Rust 写的理由：
+  `awiki` 托管的身份对 P6 回 `anp.not_supported`（它没有 P6），所以它们**只对本仓的
+  `packages/service` 有意义**。已端到端跑通（发布 → 取出 → 取空后回 `key_package_not_found`；
+  `group create` 建群 → `e2ee create` → 服务落 owner leaf、本地 pending 转 `finalized`；
+  `e2ee add` → 源成员 leaf 进到 epoch 1，新成员 leaf 落 `active`、包转 `consumed`，
+  P4 的 `group_state_version` **不动**，服务把 commit/welcome 排进设备队列），做法见
+  [TODO5.md](../TODO5.md) §6 Phase 3。
 - **`examples/phase0_key_package.rs`** —— Phase 0 的 spike，仍可复跑（它是怎么验证 crate
   能驱动 P6 设备半边的记录，结论在 TODO5 §6）：
 
@@ -84,6 +89,6 @@ cargo run --manifest-path rust/Cargo.toml --example phase0_key_package -- /tmp/a
 
 ## 还没有
 
-身份这块的换钥 / 换设备 / `update_document`；`group e2ee` 剩下的三条群作用域方法
-（`add` / `remove` / `send`）与收包路径（`process_welcome_v2` / `process_commit_v2`）。
-顺序见 TODO5 §6 的 Phase 3。
+身份这块的换钥 / 换设备 / `update_document`；`group e2ee` 剩下的两条群作用域方法
+（`remove` / `send`）与收包路径（`process_welcome_v2` / `process_commit_v2`，靠 `msg listen`
+投递驱动）。顺序见 TODO5 §6 的 Phase 3。

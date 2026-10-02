@@ -9,7 +9,7 @@
 //! Method names and Profiles are in [`crate::message`] with the rest of the wire vocabulary;
 //! what is here is the policy that goes in the bodies.
 
-use anp::group_e2ee::v2_models::{V2GroupCreateBody, V2GroupKeyPackage};
+use anp::group_e2ee::v2_models::{V2GroupAddBody, V2GroupCreateBody, V2GroupKeyPackage};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
@@ -42,6 +42,17 @@ pub fn publish_body(key_package: &V2GroupKeyPackage) -> Result<Map<String, Value
 /// moves in both, where a hand-written body would drift silently.
 pub fn create_body(body: &V2GroupCreateBody) -> Result<Map<String, Value>> {
     object_of(body, "a group.e2ee.create body")
+}
+
+/// The body of `group.e2ee.add` (P6 §9.3.3) — likewise the crate's own fields, unchanged.
+///
+/// Nine here rather than `create`'s six: §9.3.3 adds the member pair, the package being
+/// covered, and the three MLS objects a commit to an existing group needs (`commit_b64u`,
+/// `welcome_b64u`, `ratchet_tree_b64u`). Every one of them is the crate's, including
+/// `crypto_group_id_b64u` and `epoch` — the latter is the epoch *after* this add, which only
+/// the crate can know.
+pub fn add_body(body: &V2GroupAddBody) -> Result<Map<String, Value>> {
+    object_of(body, "a group.e2ee.add body")
 }
 
 /// A crate model as a request body: the object form, or an error naming what could not be
@@ -203,6 +214,62 @@ mod tests {
             body["epoch"],
             Value::String("0".to_string()),
             "§9.2.3's SHOULD for the initial epoch is the crate's value, not this client's"
+        );
+    }
+
+    /// §9.3.3's nine fields, again exactly as the crate built them.
+    ///
+    /// The three MLS objects and the two coordinate fields are all the crate's, and the member
+    /// pair is the *package's* owner rather than anything this client chose — so the assertion
+    /// that matters is the one tying `member_did` to `group_key_package.owner_did`: the service
+    /// refuses a body where those two disagree (its `didBindingInvalid`), and a client that
+    /// took the pair from anywhere but the package could produce that split.
+    #[test]
+    fn an_add_body_is_the_crates_nine_fields_unchanged() {
+        let package = package();
+        let body = add_body(&V2GroupAddBody {
+            member_did: package.owner_did.clone(),
+            member_device_id: package.owner_device_id.clone(),
+            group_state_ref: V2GroupStateRef {
+                group_did: "did:web:svc.example:g:team".to_string(),
+                group_state_version: "7".to_string(),
+                policy_hash: None,
+                roster_hash: None,
+            },
+            group_key_package: package.clone(),
+            crypto_group_id_b64u: "Z3JvdXA".to_string(),
+            epoch: "1".to_string(),
+            commit_b64u: "Y29tbWl0".to_string(),
+            welcome_b64u: "d2VsY29tZQ".to_string(),
+            ratchet_tree_b64u: "dHJlZQ".to_string(),
+        })
+        .unwrap();
+
+        let mut keys: Vec<&str> = body.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "commit_b64u",
+                "crypto_group_id_b64u",
+                "epoch",
+                "group_key_package",
+                "group_state_ref",
+                "member_device_id",
+                "member_did",
+                "ratchet_tree_b64u",
+                "welcome_b64u",
+            ]
+        );
+        assert_eq!(
+            body["member_did"],
+            body["group_key_package"]["owner_did"],
+            "§9.3.3 keys the add on the package's own owner (§9.3.3's didBindingInvalid otherwise)"
+        );
+        assert_eq!(
+            body["epoch"],
+            Value::String("1".to_string()),
+            "§9.3.3's `epoch` is the one *after* the add, so it is the crate's value"
         );
     }
 

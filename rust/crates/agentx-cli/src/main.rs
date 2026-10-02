@@ -11,26 +11,27 @@ use serde_json::{json, Map, Value};
 use std::sync::Arc;
 
 use agentx::group::{group_target, policy_of, service_target};
-use agentx::group_e2ee::{create_body, get_key_package_body, publish_body};
+use agentx::group_e2ee::{add_body, create_body, get_key_package_body, publish_body};
 use agentx::identity::{
     create_identity, fetch_host_service, register_identity, CreateIdentityInput, Identity,
     IdentityLocation,
 };
 use agentx::message::{
     build_message_request, call, call_device, call_extension, call_group, device_of, discover,
-    group_e2ee_security_profile, http_client, now_rfc3339, open_channel, open_channel_for,
-    parse_capabilities, payload_of, policy_for, post_message, rejection, run_listen, uuid_v4,
-    view_for, websocket_connect, AnpMeta, AnpResponse, AnpTarget, CallRequest, Channel, ConnectFn,
-    ListenArgs, ListenDeps, ResolvePolicy, Sender, TargetKind, CORE_BINDING, DIRECT_PROFILE,
-    DIRECT_SEND, DID_SUPERSEDED, GET_CAPABILITIES, GET_KEY_PACKAGE, GROUP_CREATE,
-    GROUP_E2EE_CREATE, GROUP_E2EE_PROFILE, GROUP_GET_INFO, GROUP_JOIN, GROUP_LEAVE, GROUP_PROFILE,
-    GROUP_SEND, INBOX_GET, INBOX_MARK_READ, MESSAGE_GET_BATCH, PUBLISH_KEY_PACKAGE,
-    TRANSPORT_PROTECTED,
+    document_in_crate_form, group_e2ee_security_profile, http_client, now_rfc3339, open_channel,
+    open_channel_for, parse_capabilities, payload_of, policy_for, post_message,
+    resolve_did_document, rejection, run_listen, uuid_v4, view_for, websocket_connect, AnpMeta,
+    AnpResponse, AnpTarget, CallRequest, Channel, ConnectFn, ListenArgs, ListenDeps, ResolvePolicy,
+    Sender, TargetKind, CORE_BINDING, DIRECT_PROFILE, DIRECT_SEND, DID_SUPERSEDED,
+    GET_CAPABILITIES, GET_KEY_PACKAGE, GROUP_CREATE, GROUP_E2EE_ADD, GROUP_E2EE_CREATE,
+    GROUP_E2EE_PROFILE, GROUP_GET_INFO, GROUP_JOIN, GROUP_LEAVE, GROUP_PROFILE, GROUP_SEND,
+    INBOX_GET, INBOX_MARK_READ, MESSAGE_GET_BATCH, PUBLISH_KEY_PACKAGE, TRANSPORT_PROTECTED,
 };
 use agentx::mls::{
-    abort_commit, finalize_commit, generate_key_package, new_key_package_id, prepare_create,
-    CreateInput, KEY_PACKAGE_VALID_DAYS,
+    abort_commit, finalize_commit, generate_key_package, new_key_package_id, prepare_add,
+    prepare_create, AddInput, CreateInput, KEY_PACKAGE_VALID_DAYS,
 };
+use anp::group_e2ee::v2_models::V2GroupKeyPackage;
 
 #[derive(Parser)]
 #[command(
@@ -427,6 +428,35 @@ enum GroupE2eeCommand {
         #[command(flatten)]
         own: OwnIdentity,
     },
+    /// Add one device of an existing member to the encrypted group (P6 `group.e2ee.add`).
+    ///
+    /// §9.3.3's two preconditions are P4's, not this client's: the member must already be
+    /// `active` in the group, and the device must be an eligible one — so a caller runs
+    /// `group join` (or `group add`) first, and the member runs `group e2ee publish`. A second
+    /// device of the same DID is another Add, not a second member (§9.3.1).
+    ///
+    /// Where the two things this needs come from is the part worth stating: the member's
+    /// KeyPackage comes from **the member's own service** (§8.2's cabinet, which §8.2.3 lets
+    /// be cross-domain), while the `add` itself is group-addressed like `remove`/`send`
+    /// (§4.4.2) and so goes to the group's service.
+    Add {
+        #[arg(value_name = "GROUP_DID")]
+        group_did: String,
+        /// The member's DID — half of the exact pair §9.3.3 keys the leaf on.
+        #[arg(long = "member-did", value_name = "DID")]
+        member_did: String,
+        /// That DID's device to add. §9.3.3 makes the pair exact, so a second device is a
+        /// separate Add rather than a wider one.
+        #[arg(long = "member-device", value_name = "ID")]
+        member_device: String,
+        /// Reuse an operation id, as on `create`.
+        #[arg(long = "operation-id", value_name = "UUID")]
+        operation_id: Option<String>,
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        own: OwnIdentity,
+    },
 }
 
 /// How many unread ids `msg read --all` asks for at a time.
@@ -614,6 +644,25 @@ async fn main() -> anyhow::Result<()> {
                         &own,
                         &group_did,
                         key_package_id,
+                        operation_id,
+                        json,
+                        &allow_private,
+                    )
+                    .await
+                }
+                GroupE2eeCommand::Add {
+                    group_did,
+                    member_did,
+                    member_device,
+                    operation_id,
+                    json,
+                    own,
+                } => {
+                    cmd_group_e2ee_add(
+                        &own,
+                        &group_did,
+                        &member_did,
+                        &member_device,
                         operation_id,
                         json,
                         &allow_private,
@@ -1636,6 +1685,178 @@ fn report_group_e2ee_created(result: &Value) -> anyhow::Result<()> {
     }
     field("group:", result.get("group_did"));
     field("crypto group:", result.get("crypto_group_id_b64u"));
+    field("epoch:", result.get("epoch"));
+    field("accepted at:", result.get("accepted_at"));
+    Ok(())
+}
+
+/// Add one device of an existing member to the group's MLS state (§9.3).
+///
+/// The same three phases as [`cmd_group_e2ee_create`], and the same rule for the third one: a
+/// service refusal aborts the local commit, a transport failure is left to
+/// `reconcile_pending_v2`. What differs is where the inputs come from. Two network reads
+/// happen first, and they are deliberately to *different* places:
+///
+///   - `group.get_info` goes to the **group**, because §9.3.3's `group_state_ref` carries the
+///     group's P4 version and only the group's own service can say what that is;
+///   - the member's KeyPackage is fetched from the **member's** service. §8.2's cabinet
+///     belongs to the servicing host — the one the member's own document names — and §8.2.3
+///     lets that be a different domain from the group's, so asking the group's service would
+///     work only where the two happen to coincide.
+///
+/// The `add` itself is group-addressed (§4.4.2), so it goes back to the group's service, with
+/// the member's document already resolved and re-checked against the package the crate will
+/// build the commit from.
+async fn cmd_group_e2ee_add(
+    own: &OwnIdentity,
+    group_did: &str,
+    member_did: &str,
+    member_device: &str,
+    operation_id: Option<String>,
+    json: bool,
+    allow_private: &[String],
+) -> anyhow::Result<()> {
+    let location = IdentityLocation::new(&own.agent, &own.profile);
+    let identity = Identity::load(&location)?;
+    let client = http_client()?;
+
+    // The group's document is what names the service holding this group (P2 §9.1) — the same
+    // resolution `create` needs, for the same reason.
+    let group_channel = open_channel_for(
+        &client,
+        Sender::from_identity(&identity)?,
+        group_did,
+        allow_private,
+    )
+    .await?;
+    let info = call_group(
+        &client,
+        &group_channel,
+        GROUP_GET_INFO,
+        group_target(group_did),
+        Map::new(),
+        group_did,
+    )
+    .await?;
+    let group_state_version = text_of(info.get("group_state_version")).ok_or_else(|| {
+        anyhow::anyhow!("group.get_info answered without a group_state_version (P4 §8.2.3)")
+    })?;
+
+    // The member's document, read for two reasons at once: its ANPMessageService entry is
+    // where the package was filed, and the document is what the crate re-validates that
+    // package's `did_wba_binding` against. Resolved through the policy the member's own
+    // channel produced, so the hop is checked the same way every other peer hop is.
+    let member_channel = open_channel_for(
+        &client,
+        Sender::from_identity(&identity)?,
+        member_did,
+        allow_private,
+    )
+    .await?;
+    let member_document =
+        resolve_did_document(&client, member_did, &member_channel.endpoint.policy).await?;
+
+    let fetched = call_device(
+        &client,
+        &member_channel,
+        GET_KEY_PACKAGE,
+        service_target(&member_channel.endpoint.target)?,
+        get_key_package_body(member_did, member_device, None, false)?,
+        member_did,
+    )
+    .await?;
+    let package = fetched.get("group_key_package").cloned().ok_or_else(|| {
+        anyhow::anyhow!(
+            "group.e2ee.get_key_package answered without a group_key_package (P6 §8.2.3)"
+        )
+    })?;
+    // The crate's own model, so a package this service hands out is parsed by the same types
+    // the commit will be built from. A service answering with a field the crate does not have
+    // is a shape problem here rather than a mystery at prepare time.
+    let group_key_package: V2GroupKeyPackage = serde_json::from_value(package).map_err(|err| {
+        anyhow::anyhow!("the service's group_key_package is not one this crate can read: {err}")
+    })?;
+    // As in `generate_key_package`: the crate re-checks the issuer's binding with no fallback
+    // of its own, so the document goes in already in the encoding that check accepts.
+    let member_did_document = document_in_crate_form(&member_document).ok_or_else(|| {
+        anyhow::anyhow!("{member_did}'s document does not bind in a form this crate accepts")
+    })?;
+
+    let operation_id = operation_id.unwrap_or_else(uuid_v4);
+    let prepared = prepare_add(
+        &location,
+        &identity,
+        AddInput {
+            group_did,
+            group_state_version,
+            group_key_package: &group_key_package,
+            member_did_document,
+            operation_id: &operation_id,
+        },
+    )?;
+
+    let response = call(
+        &client,
+        &group_channel.sender,
+        &group_channel.endpoint,
+        CallRequest {
+            method: GROUP_E2EE_ADD.to_string(),
+            profile: GROUP_E2EE_PROFILE.to_string(),
+            // §4.4.2: group-addressed, unlike `create`.
+            target: group_target(group_did),
+            body: add_body(&prepared.body)?,
+            sender_device_id: Some(group_channel.sender.device_id.clone()),
+            security_profile: Some(group_e2ee_security_profile(GROUP_E2EE_ADD).to_string()),
+            // §9.3.3 names neither: this call carries no application message.
+            message_id: None,
+            content_type: None,
+            operation_id: Some(operation_id),
+        },
+    )
+    .await?;
+
+    // Matched rather than run through `call_device`, for the reason spelled out in
+    // `cmd_group_e2ee_create`: only a *refusal* proves the service did not take the commit.
+    let result = match response {
+        AnpResponse::Success { result, .. } => {
+            finalize_commit(&location, &identity, &prepared.pending_commit_id)?;
+            result
+        }
+        AnpResponse::Error { error, .. } => {
+            if let Err(err) = abort_commit(&location, &identity, &prepared.pending_commit_id) {
+                eprintln!("warning: rolling back the local commit failed: {err}");
+            }
+            return Err(rejection(
+                GROUP_E2EE_ADD,
+                group_did,
+                error.code,
+                error.data.as_ref().and_then(|data| data.anp_code.as_deref()),
+                &error.message,
+            )
+            .into());
+        }
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+    report_group_e2ee_added(&result)
+}
+
+/// §9.3.4's success fields.
+///
+/// `accepted: true` is checked before anything is printed, as on the other two paths — and
+/// here it matters more, because the local pending commit was just finalized on the strength
+/// of this response. A service that answered without it did not report state this device can
+/// go on to send in.
+fn report_group_e2ee_added(result: &Value) -> anyhow::Result<()> {
+    if result.get("accepted").and_then(Value::as_bool) != Some(true) {
+        anyhow::bail!("group.e2ee.add did not report `accepted: true` (P6 §9.3.4)")
+    }
+    field("group:", result.get("group_did"));
+    field("member:", result.get("member_did"));
+    field("device:", result.get("member_device_id"));
     field("epoch:", result.get("epoch"));
     field("accepted at:", result.get("accepted_at"));
     Ok(())

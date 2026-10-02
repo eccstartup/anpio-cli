@@ -17,13 +17,14 @@
 use std::path::PathBuf;
 
 use anp::group_e2ee::operations::v2::{
-    abort_commit_v2, create_group_prepare_v2, finalize_commit_v2, generate_key_package_v2,
-    V2CreateGroupInput, V2FinalizeInput, V2GenerateKeyPackageInput, V2PreparedCreate,
+    abort_commit_v2, add_member_prepare_v2, create_group_prepare_v2, finalize_commit_v2,
+    generate_key_package_v2, V2AddMemberInput, V2CreateGroupInput, V2FinalizeInput,
+    V2GenerateKeyPackageInput, V2PreparedAdd, V2PreparedCreate,
 };
 use anp::group_e2ee::storage::ImCoreSqliteGroupMlsStore;
 use anp::group_e2ee::v2_models::{
-    V2GroupCreateBody, V2GroupKeyPackage, V2GroupStateRef, V2ServiceMetadata, V2Target,
-    GROUP_E2EE_PROFILE_V2, GROUP_E2EE_SECURITY_PROFILE_V2,
+    V2GroupAddBody, V2GroupControlMetadata, V2GroupCreateBody, V2GroupKeyPackage, V2GroupStateRef,
+    V2ServiceMetadata, V2Target, GROUP_E2EE_PROFILE_V2, GROUP_E2EE_SECURITY_PROFILE_V2,
 };
 use anp::PrivateKeyMaterial;
 use chrono::{Duration, Utc};
@@ -246,6 +247,86 @@ pub fn prepare_create(
     .map_err(|err| AgentxError::MessageInvalid(format!("preparing group.e2ee.create: {err}")))?;
 
     Ok(PreparedCreate {
+        pending_commit_id,
+        body: prepared.body,
+    })
+}
+
+/// What `add` needs from the caller (P6 §9.3).
+///
+/// The pair §9.3.3 keys on — `member_did` together with `member_device_id` — is **not** here:
+/// the crate takes it from the KeyPackage itself (`V2GroupAddBody.member_did` is
+/// `group_key_package.owner_did`), so passing it twice would be two answers to one question.
+/// The command face still names the device, because that is what it fetches the package with.
+pub struct AddInput<'a> {
+    pub group_did: &'a str,
+    /// The group's current P4 version, read the same way `create` reads it.
+    pub group_state_version: &'a str,
+    /// The member's **published** package, §8.2.3 — this is what the commit covers, so it is
+    /// the member's own device's package and not one of this client's.
+    pub group_key_package: &'a V2GroupKeyPackage,
+    /// The member's DID document. Evidence, not context: the crate re-runs the package's
+    /// `did_wba_binding` against it, with no fallback for the proof encoding its own `z…`
+    /// branch assumes ([`crate::message::document_in_crate_form`]).
+    pub member_did_document: Value,
+    pub operation_id: &'a str,
+}
+
+/// A prepared `group.e2ee.add`: the wire body, plus the local handle that finishes it.
+pub struct PreparedAdd {
+    pub pending_commit_id: String,
+    pub body: V2GroupAddBody,
+}
+
+/// Phase one of `add`, the same shape as [`prepare_create`] — and the same order.
+///
+/// The one thing that differs is the target: §4.4.2 makes `add`/`remove`/`send`
+/// **group-addressed**, so `meta.target.did` is the group's DID rather than a service DID.
+/// That is not a stylistic choice — the crate enforces it (`validate_control_meta` refuses a
+/// target that is not `group_state_ref.group_did`), and the service splits the two families
+/// on it too (`targetMode` in its method table).
+pub fn prepare_add(
+    location: &IdentityLocation,
+    identity: &Identity,
+    input: AddInput<'_>,
+) -> Result<PreparedAdd> {
+    let store = store_for(location, identity)?;
+    let pending_commit_id = new_pending_commit_id();
+    let now = Utc::now().to_rfc3339();
+
+    let prepared: V2PreparedAdd = add_member_prepare_v2(
+        &store,
+        V2AddMemberInput {
+            meta: V2GroupControlMetadata {
+                anp_version: None,
+                profile: GROUP_E2EE_PROFILE_V2.to_string(),
+                security_profile: GROUP_E2EE_SECURITY_PROFILE_V2.to_string(),
+                sender_did: identity.did.clone(),
+                sender_device_id: identity.device_id.clone(),
+                target: V2Target {
+                    kind: "group".to_string(),
+                    did: input.group_did.to_string(),
+                },
+                operation_id: input.operation_id.to_string(),
+                created_at: Some(now.clone()),
+            },
+            group_state_ref: V2GroupStateRef {
+                group_did: input.group_did.to_string(),
+                group_state_version: input.group_state_version.to_string(),
+                policy_hash: None,
+                roster_hash: None,
+            },
+            group_key_package: input.group_key_package.clone(),
+            member_did_document: input.member_did_document,
+            now,
+            draft_extension_negotiated: true,
+            pending_commit_id: pending_commit_id.clone(),
+            request_id: uuid_v4(),
+        },
+    )
+    .map_err(|err| AgentxError::MessageInvalid(format!("preparing group.e2ee.add: {err}")))?;
+
+    Ok(PreparedAdd {
         pending_commit_id,
         body: prepared.body,
     })
