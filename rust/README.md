@@ -259,6 +259,41 @@ cargo run --manifest-path rust/Cargo.toml --example phase0_key_package -- /tmp/a
 - **`did resolve <did>` 不带 `--chain`，而文档已被取代**：照常打印文档，然后**退出 2**，
   并提示 `--chain`。取代的文档是**证据**，不是错误。
 
+### `msg`
+
+| 命令 | 位置参数 | 旗标（默认值） |
+| --- | --- | --- |
+| `msg send` | — | `--to <DID\|NAME>`（必填）、`--text` 与 `--body` **二选一**、`--content-type`（`--text` 缺省 `text/plain`，`--body` 缺省 `application/json`）、`--operation-id`、`--json`、`--agent`、`--profile` |
+| `msg caps` | `<DID>` | `--json` |
+| `msg inbox` | — | `--limit <N>`（20）、`--include-read`、`--json`、`--agent`、`--profile` |
+| `msg show` | `<MESSAGE_ID>` | `--json`、`--agent`、`--profile` |
+| `msg read` | `[MESSAGE_ID]…` 或 `--all` | `--all`、`--json`、`--agent`、`--profile` |
+| `msg listen` | — | `--device <ID>`（缺省=本机 `agent/profile`）、`--since <SEQ>`、`--ack`、`--once`、`--json`、`--agent`、`--profile` |
+
+失败时说什么：
+
+- **正文的形状是三方约束，两处拒绝**：`--text` 与 `--body` 一起给是
+  `--text and --body are two spellings of the same thing; pass one`；都不给是
+  `missing required option --text or --body`。再加上 `--content-type` 的四种组合里只有两种
+  合法（`text/plain` 配 `--text`、`application/json` 配 `--body`），另外两种各有一句话
+  说清"该换哪个旗标"。同一个 `payload_of` 同时伺候 `msg send` 与 `group send`——
+  规范里两处的引文不同、约束相同，写两遍就是两次漂移的机会。
+- **`--to` 是名字而名字有歧义**：退出 1，**逐个列出**候选的 DID 与备注，不挑"拼写更准"的
+  那个。所以 `Alice` 与 `alice` 同时在册时，`msg send --to Alice` 不会猜。
+- **`msg inbox --limit 0`**（或任何不能解析成正整数的值）：`--limit must be a positive
+  integer (got "0")`。默认 20。
+- **`msg show <id>` 这个 id 不在收件箱里**：`no message <id> in this inbox`，退出 1。不渲染
+  成"空收件箱"——"这条消息不存在"与"我用错了 id"的观感在别处是一样的，所以要分开。
+- **`msg read` 的两种说错**：既没给 `<message_id>` 也没有 `--all` →
+  `missing required argument <message_id>, or --all`；两个都给 →
+  `--all and <message_id> are two spellings of the same thing; pass one`。
+  `--all` 点的是**列出来的那些** id（列表与写入之间新到的消息仍是未读，这是对的）。
+- **扩展面对只实现规范的对端**：`inbox` / `show` / `read` 报 `unsupported_extension`，退出 1，
+  并说清这是实现扩展、规范未定义。**这是正确答案**，不是缺陷（上文那条）。
+- **`msg listen`**：Ctrl-C 退出 **0**；掉线按 2s→30s 退避重连；`--once` 补拉完就退出 0；
+  `--json` 强制 NDJSON（不给时"管道也是机器"）。不支持 stream 的对端在握手上就终止，
+  报 `unsupported_extension` 而**不重连**——答案是同一个，重连只会看起来像在工作。
+
 ## 还没有
 
 Phase 2 的消息库（`messages.db`，TODO5 §4）；以及 Phase 4 的覆盖与收束——本仓的
