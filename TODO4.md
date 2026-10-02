@@ -88,7 +88,12 @@ B 域命名空间里的群发 `group.send` 全链路跑通，`harness.ts` 的文
   **上游公布后**：移除扣留、把 P6 放进 `anp.get_capabilities` 的稳定 Profile 列表，并复核
   [e2ee-group.md](docs/design/e2ee-group.md) §13 的门禁描述。
 - **B2 客户端侧群 MLS 的密码学库。** TODO1 D4 已定"内嵌进 `connectx`"（Rust crate → Node 的
-  napi 绑定，与官方 SDK 同向）。v1 不受影响，但要真跑群 E2EE 就得写。**需要你定什么时候开。**
+  napi 绑定，与官方 SDK 同向）。v1 不受影响，但要真跑群 E2EE 就得写。
+  **方案已落（2026-10-02）：[client-mls.md](docs/design/client-mls.md)。** 结论是官方的
+  `anp` crate 已经把 P6 要的每一步都写好了（`prepare → Host 受理 → finalize/abort` 的两段式
+  与我们给 Host 定的受理顺序天然对得上），所以这一块不用设计密码学，只要 napi 那层壳；建议
+  **现在就开第一阶段（写到"能跑 e2e"为止）**，把发版面留到 B1 的广告闸门打开之后。**这条现在
+  等你一句"开"或"先不开"。**
 
 ---
 
