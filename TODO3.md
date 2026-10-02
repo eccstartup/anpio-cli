@@ -32,9 +32,13 @@
 
 ---
 
-## A. B1b 的拆解（六段）
+## ~~A. B1b 的拆解（六段）~~
 
-### A1 群密钥：每个群一把 Ed25519，与群行同一个事务落库
+**六段（A1–A6）已全部落地**：A1 `c827f07`、A2 `614a92c`、A3 `f1f2cc9`、A4 `024e14d`、
+A5 `32b0120`、A6 `ddcc49e`（A5 与 A6 之间那条 `342a13d` 是 B1b 之外的一次测试竞态修复）。
+下面每段的小标题已划掉；正文保留的是**当时的拆解理由**，段末的"落地"是**实际怎么落的**。
+
+### ~~A1 群密钥：每个群一把 Ed25519，与群行同一个事务落库~~
 
 `group.create` 的时候铸一把 per-group 的 Ed25519 私钥。存哪——**数据库列**，不是
 `0600` 文件。理由：
@@ -68,7 +72,7 @@ private_key, created_at)`，`private_key` 是 hex 的 32 字节种子——与 `
 文档更正一处：groups.md 新增 §2.1（钥的三条取舍 + 数据库按密钥对待这条代价），§7 那段
 "要签它需要 `assertionMethod` 私钥"指了过去。
 
-### A2 群 DID 文档的形状与签名
+### ~~A2 群 DID 文档的形状与签名~~
 
 按 §2 的形状造一份 `did:web` 文档：
 
@@ -111,7 +115,7 @@ private_key, created_at)`，`private_key` 是 hex 的 32 字节种子——与 `
 文档：groups.md §2 那段"v1 不发布"改写成"由本服务自己发布"（并写清发布的是**群**文档、
 本服务自己的身份文档仍由 awiki 托管，§C3），新增 §2.2 记形状与三条"缺一不可"。
 
-### A3 托管路由：`GET /g/<id>/did.json`
+### ~~A3 托管路由：`GET /g/<id>/did.json`~~
 
 与 `didToUrl` 对这条 DID 的映射严丝合缝（[resolveDid.ts:520](packages/core/src/crypto/resolveDid.ts:520)
 把 `did:web:host:g:XXXX` 映成 `https://host/g/XXXX/did.json`）。两处要注意：
@@ -133,7 +137,7 @@ v11 前无钥的群 / 空段 / 多一段 / 坏转义 → 404，非 GET → 405 +
 `main.ts` 那句"this service never writes a DID document itself"随之改掉——本轮之后它对**群**
 文档是假的；本服务**自己**的身份文档仍由 DID Service 托管，那句话保留的是这一半。
 
-### A4 schema v11 + 把 `group.*` 接进 `RELAYED_METHODS`
+### ~~A4 schema v11 + 把 `group.*` 接进 `RELAYED_METHODS`~~
 
 表只有一张（群钥）。接法与 B1a **一字不差**：`RELAYED_METHODS` 加上方法名，`relayFor`
 的规则不动一行——解析 `meta.target.did` 公开的 `ANPMessageService`，是本服务就本地办完，
@@ -178,7 +182,7 @@ v11 前无钥的群 / 空段 / 多一段 / 坏转义 → 404，非 GET → 405 +
 文档：federation.md §3.2（"两族已接、`group.*` 仍落在本地"整段重写）、§3.3（三族的目标
 写法 + 两族各自的本地比较）、§5.1、§5.2、§8 第 1 条；e2ee-group.md §13 第 2 条。
 
-### A5 `group_receipt.proof` 开始签
+### ~~A5 `group_receipt.proof` 开始签~~
 
 groups.md §7 记的"v1 不签"是**有前提的欠账**，不是结论：
 
@@ -219,7 +223,7 @@ A1/A2 之后两件都有了，所以这一步不是新功能，是把已经写�
 文档：groups.md §7 整段重写（"v1 不签"是欠账，两件前提 A1/A2 都做出来了），
 e2ee-group.md §12 那条同源的"v1 不签"删掉——它列的是"不做的事"，而这件事做了。
 
-### A6 文档更正
+### ~~A6 文档更正~~
 
 随 A1–A4 变成事实错误的句子：README §"两处服务"、groups.md §2、message-service.md §13、
 federation.md §3/§8。**与 B1a 一样，更正不是附赠，是这一步的一半**——一份写着"本服务
