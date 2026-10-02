@@ -51,6 +51,7 @@ use agentx::mls::{
     new_key_package_id, prepare_add, prepare_create, prepare_remove, send_message, AddInput,
     CreateInput, KEY_PACKAGE_VALID_DAYS, RemoveInput, SendInput,
 };
+use agentx::messages::{MessageStore, RecordingView};
 use anp::group_e2ee::v2_models::V2GroupKeyPackage;
 use anp::group_e2ee::GROUP_CIPHER_CONTENT_TYPE;
 
@@ -3203,6 +3204,17 @@ async fn cmd_msg_listen(
     let channel = open_channel(&client, &identity, allow_private).await?;
     let device = device_of(&channel.sender, options.device.as_deref())?;
 
+    // The local record (client-messages.md). Opened before the stream starts rather than
+    // lazily: a store this build cannot open — a file from a newer one, a directory it cannot
+    // write — is then a startup failure like any other, instead of a listener that silently
+    // records nothing for as long as it runs.
+    let store = MessageStore::open(
+        &location,
+        &identity,
+        &channel.endpoint.target.endpoint,
+        &device,
+    )?;
+
     // A listener is exactly the place where §12's pushes arrive, so it is the place that
     // carries the P6 receive path. The same `client` is shared: a notice costs a roster read
     // and one DID document per member, and each of those should reuse the connection pool the
@@ -3216,7 +3228,9 @@ async fn cmd_msg_listen(
 
     let deps = ListenDeps {
         connect: websocket_connect_fn(),
-        view: view_for(options.json),
+        // Recording is a decorator, so the terminal still shows every event and the store is
+        // never on the path that decides what to print.
+        view: Arc::new(RecordingView::new(store, view_for(options.json))),
         abort: interrupt_signal(),
         // `rand::random::<f64>()` is `[0, 1)`, which is the range the jitter expects.
         random: Arc::new(rand::random::<f64>),

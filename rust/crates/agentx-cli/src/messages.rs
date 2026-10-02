@@ -23,12 +23,15 @@
 //! command, and the design's §5 #2 says backups of it are backups of the conversation.
 
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 
 use crate::error::{AgentxError, Result};
+use crate::group_receive::GroupEvent;
 use crate::identity::{Identity, IdentityLocation};
+use crate::message::listen::{ListenEvent, ListenView};
 
 /// The file's name, beside `mls/` under the identity's own directory.
 pub const MESSAGES_FILE: &str = "messages.db";
@@ -394,6 +397,110 @@ CREATE TABLE sync_state (
 );
 ";
 
+// ---- the write hook -----------------------------------------------------------
+
+/// The listener's view, with a `messages.db` write in front of it.
+///
+/// The write belongs **on the consuming side** of the listener, not inside the transport
+/// (design §7): an event is recorded when this client has acted on it, and a frame the
+/// transport merely received is not yet that. The inner view still gets every event, so a
+/// failed write changes what is on disk and never what the person sees.
+pub struct RecordingView {
+    store: Mutex<MessageStore>,
+    inner: Arc<dyn ListenView>,
+}
+
+impl RecordingView {
+    pub fn new(store: MessageStore, inner: Arc<dyn ListenView>) -> RecordingView {
+        RecordingView {
+            store: Mutex::new(store),
+            inner,
+        }
+    }
+}
+
+impl ListenView for RecordingView {
+    fn event(&self, event: &ListenEvent) {
+        if let Some(record) = records_from(event) {
+            let outcome = match self.store.lock() {
+                Ok(mut store) => store.record(&record).map(|_| ()).map_err(|err| err.to_string()),
+                // A panic in an earlier write. The store may hold a half-open transaction and
+                // the cursor is no longer trustworthy, so nothing is written.
+                Err(_) => Err("the message store was poisoned by an earlier panic".to_string()),
+            };
+            if let Err(err) = outcome {
+                // Not fatal, and deliberately not an exit: the row is missing **and the
+                // cursor did not move**, so the next connect replays the frame and this hook
+                // sees it again. Saying so to stderr is the whole of the recovery (§2.1).
+                eprintln!("agentx-cli: not recorded in messages.db: {err}");
+            }
+        }
+        self.inner.event(event);
+    }
+}
+
+/// The row an event becomes, or nothing when the event is not a message.
+fn records_from(event: &ListenEvent) -> Option<Record> {
+    match event {
+        ListenEvent::State(_) => None,
+        ListenEvent::Message(message) => {
+            let conversation = match message.target_kind {
+                "group" => Conversation::Group {
+                    group_did: message.group_did.clone()?,
+                },
+                _ => Conversation::Direct {
+                    peer_did: message.from.clone(),
+                },
+            };
+            let mut record = Record::incoming(conversation, &message.from, &message.message_id);
+            record.content_type = Some(message.content_type.clone());
+            body_of(&mut record, message.text.as_deref(), message.payload.as_ref());
+            // A service-visible delivery, so this is the number the local cursor follows.
+            record.service_seq = Some(message.seq);
+            record.accepted_at = message.accepted_at.clone();
+            Some(record)
+        }
+        ListenEvent::Group(GroupEvent::Notice { .. }) => None,
+        ListenEvent::Group(GroupEvent::Message {
+            group_did,
+            from,
+            message_id,
+            group_event_seq,
+            group_state_version,
+            accepted_at,
+            content_type,
+            text,
+            payload,
+        }) => {
+            let mut record = Record::incoming(
+                Conversation::Group {
+                    group_did: group_did.clone(),
+                },
+                from,
+                message_id,
+            );
+            record.content_type = Some(content_type.clone());
+            body_of(&mut record, text.as_deref(), payload.as_ref());
+            // No `service_seq`: a §12 frame arrives on the **device queue**, not in this
+            // recipient's `deliveries`, so it carries no delivery number to move the cursor
+            // with (design §4.1). Its order within the group is `group_event_seq`.
+            record.group_event_seq = group_event_seq.clone();
+            record.group_state_version = Some(group_state_version.clone());
+            record.accepted_at = accepted_at.clone();
+            Some(record)
+        }
+    }
+}
+
+/// §7.4's exactly-one-of, kept apart in the row: when a body carried a JSON object, `text` is
+/// a *rendering* of it, and recording both would store the same content twice.
+fn body_of(record: &mut Record, text: Option<&str>, payload: Option<&Value>) {
+    match payload {
+        Some(value) => record.payload = Some(value.clone()),
+        None => record.text = text.map(str::to_string),
+    }
+}
+
 /// `scheme://host[:port]` — the inbox's identity, without the RPC path inside it.
 fn origin_of(endpoint: &str) -> String {
     match reqwest::Url::parse(endpoint) {
@@ -450,6 +557,7 @@ fn sql_err(context: &'static str) -> impl Fn(rusqlite::Error) -> AgentxError {
 mod tests {
     use super::*;
     use crate::identity::test_support;
+    use crate::message::listen::{ListenMessage, ListenState};
 
     fn store(name: &str) -> (tempdir::Dir, MessageStore) {
         let dir = tempdir::Dir::new(name);
@@ -648,6 +756,161 @@ mod tests {
             MessageStore::open(&location, &identity, "http://127.0.0.1:8787/x", "dev").unwrap();
         assert_eq!(store.message_count().unwrap(), 1);
         assert_eq!(store.applied_seq().unwrap(), Some(1));
+    }
+
+    // ---- the write hook ------------------------------------------------------------------
+
+    /// A view that only counts, standing in for the terminal: what the write hook must not do
+    /// is change what the person sees.
+    #[derive(Default)]
+    struct Spy {
+        seen: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ListenView for Spy {
+        fn event(&self, _event: &ListenEvent) {
+            self.seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn delivery(seq: u64) -> ListenEvent {
+        ListenEvent::Message(ListenMessage {
+            kind: "message",
+            seq,
+            message_id: "m-1".to_string(),
+            from: "did:wba:example.com:bob".to_string(),
+            target_kind: "agent",
+            group_did: None,
+            content_type: "text/plain".to_string(),
+            text: Some("hello".to_string()),
+            payload: None,
+            accepted_at: Some("2026-10-02T10:00:00Z".to_string()),
+        })
+    }
+
+    #[test]
+    fn a_direct_delivery_is_recorded_and_the_view_still_shows_it() {
+        let (_dir, store) = store("hook-direct");
+        let spy = Arc::new(Spy::default());
+        let view = RecordingView::new(store, spy.clone());
+
+        view.event(&delivery(5));
+        assert_eq!(spy.seen.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let store = view.store.lock().unwrap();
+        assert_eq!(store.message_count().unwrap(), 1);
+        assert_eq!(store.applied_seq().unwrap(), Some(5));
+    }
+
+    #[test]
+    fn a_group_frame_is_recorded_without_moving_the_delivery_cursor() {
+        let (_dir, store) = store("hook-group");
+        let view = RecordingView::new(store, Arc::new(Spy::default()));
+
+        // A §12 frame: it came off the device queue, so it has no delivery number.
+        view.event(&ListenEvent::Group(GroupEvent::Message {
+            group_did: "did:wba:example.com:g:team".to_string(),
+            from: "did:wba:example.com:bob".to_string(),
+            message_id: "m-1".to_string(),
+            group_event_seq: Some("7".to_string()),
+            group_state_version: "3".to_string(),
+            accepted_at: None,
+            content_type: "text/plain".to_string(),
+            text: Some("secret".to_string()),
+            payload: None,
+        }));
+
+        let store = view.store.lock().unwrap();
+        assert_eq!(store.message_count().unwrap(), 1);
+        assert_eq!(
+            store.applied_seq().unwrap(),
+            None,
+            "nothing was delivered to this device's inbox"
+        );
+        let (event, version): (i64, i64) = store
+            .conn
+            .query_row(
+                "SELECT group_event_seq, group_state_version FROM messages",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((event, version), (7, 3));
+    }
+
+    #[test]
+    fn a_payload_body_is_recorded_as_a_payload_not_as_its_rendering() {
+        let (_dir, store) = store("hook-payload");
+        let view = RecordingView::new(store, Arc::new(Spy::default()));
+
+        view.event(&ListenEvent::Message(ListenMessage {
+            kind: "message",
+            seq: 1,
+            message_id: "m-1".to_string(),
+            from: "did:wba:example.com:bob".to_string(),
+            target_kind: "agent",
+            group_did: None,
+            content_type: "application/json".to_string(),
+            // `text` is the same object pretty-printed, per `ListenMessage`'s own contract.
+            text: Some("{\n  \"k\": 1\n}".to_string()),
+            payload: Some(serde_json::json!({"k": 1})),
+            accepted_at: None,
+        }));
+
+        let store = view.store.lock().unwrap();
+        let (text, payload): (Option<String>, Option<String>) = store
+            .conn
+            .query_row("SELECT text, payload_json FROM messages", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(text, None, "§7.4's two arms are not the same arm twice");
+        assert_eq!(
+            serde_json::from_str::<Value>(&payload.unwrap()).unwrap(),
+            serde_json::json!({"k": 1})
+        );
+    }
+
+    #[test]
+    fn a_state_line_is_forwarded_and_records_nothing() {
+        let (_dir, store) = store("hook-state");
+        let spy = Arc::new(Spy::default());
+        let view = RecordingView::new(store, spy.clone());
+
+        view.event(&ListenEvent::State(ListenState::Connecting {
+            service: "http://127.0.0.1:8787".to_string(),
+        }));
+        assert_eq!(spy.seen.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(view.store.lock().unwrap().message_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn a_message_the_store_refuses_is_still_shown() {
+        let (_dir, store) = store("hook-refuse");
+        let spy = Arc::new(Spy::default());
+        let view = RecordingView::new(store, spy.clone());
+
+        view.event(&ListenEvent::Group(GroupEvent::Message {
+            group_did: "did:wba:example.com:g:team".to_string(),
+            from: "did:wba:example.com:bob".to_string(),
+            message_id: "m-1".to_string(),
+            group_event_seq: None,
+            // Not a decimal number: the row cannot hold it, so nothing is written.
+            group_state_version: "v3".to_string(),
+            accepted_at: None,
+            content_type: "text/plain".to_string(),
+            text: Some("secret".to_string()),
+            payload: None,
+        }));
+
+        assert_eq!(
+            spy.seen.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a write failure must not swallow what someone said"
+        );
+        let store = view.store.lock().unwrap();
+        assert_eq!(store.message_count().unwrap(), 0);
+        assert_eq!(store.applied_seq().unwrap(), None);
     }
 
     /// A store root of one test's own, removed when it drops.
