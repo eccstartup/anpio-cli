@@ -40,13 +40,24 @@ pin 为准**，源码阅读用 `git show origin/release/0929:rust/...`。
 
 store 根是 `AGENTXCLI_HOME`（缺省 `~/.agentx-cli`），一条身份由 `--agent` / `--profile`
 命名——两个都可以不写：`--agent` > `$AGENTXCLI_AGENT` > 当前 agent（`agent use` 选的）>
-`default`，`--profile` > `$AGENTXCLI_PROFILE` > `default`。`cargo test` 全绿（128 个单测）。
+`default`，`--profile` > `$AGENTXCLI_PROFILE` > `default`。`cargo test` 全绿（132 个单测）。
 
 - **`did create | show | list | register`** —— 身份存储 + DID 文档。
   `list` 与 `agent list` 不是一回事：后者答"现在是谁"（选择），前者答"这里有哪些 DID"（身份），
   所以第三列是 DID 而**不是** handle，也不带 `current` 标记；`did create` 注册失败留下的那个
   有目录、没 DID 的身份不会被藏起来，它写 `not registered`——那一行正是这个命令存在的理由。
   没有 `curve` 列：这边绑定钥永远是 `e1_` 的 Ed25519，每行都一样的列是噪音。
+  `create` 与 `register` 都会把主机随受理一起发下来的 **bearer token** 存进 `session.json`
+  （同目录，明文 `0600`）——它是唯一能喂给主机自己那几个方法的凭据，下面两条读它。
+- **`did publish [--agent] [--profile] [--json]`** —— 把本地的文档推给主机，走的是主机的
+  `update_document` 而不是 ANP 的签名路。三件事按这个顺序：`get_me` 取回主机**正在服务**的那份
+  文档、哈希它（`sha256:` + base64url sha256(JCS(doc))，正是主机算 CAS 的方式）、
+  然后拿这个值当 `expected_document_hash` 发出去。文档在本地改过就得**重签**（proof 覆盖文档
+  自己的字节，改一笔就作废，主机回 `did_document_proof_invalid`），所以 `resign_document`
+  用 key-1 重签，成功后把主机回的那份**写回 store**——不写回，磁盘上就留着一份 proof 盖不住
+  自己的文档。本地与在册两份的比对**忽略 `proof`**：没有两份 proof 是逐字节相等的（`created`
+  是时间戳），照整体比会把每次发布都当成一次变更。`register` 的响应丢了（主机有、本地不确定）
+  也是这条命令的理由。
 - **`did resolve | restore`** —— `resolve` 是解析面：不给 `--chain` 就取那一份文档
   （`document_is_superseded` 时退出 2，并提示 `--chain`），给 `--chain` 就按 crate 的
   `resolve_current_did` 走完更新链，把"当前的是哪个 DID、中间每一跳的 assurance"打出来
@@ -76,6 +87,13 @@ store 根是 `AGENTXCLI_HOME`（缺省 `~/.agentx-cli`），一条身份由 `--a
   或 body 里取，缓存进 `session.json`（同目录，明文 `0600`，和私钥一样），键是 **`host:port`**
   而不是 host——同一台机器两个端口是两个签发方，共用一条等于后一次登录吃掉前一次；
   写失败只警告不失败，token 已经在手里了。`--no-save-session` / `--session-ttl 7d` / `--json`。
+- **`me show | set`** —— 主机给这条身份记的资料：昵称、简介、头像。
+  这一族**不是 ANP 协议**：协议里根本没有昵称这一类东西（`member_list` 的每一项只有
+  `{agent_did, role, status, joined_at}`，群自己的名字是 `group_profile.display_name`，
+  走 `group.update_profile`）。资料落在**服务该 DID 的那台主机**上，`get_me` / `update_me`
+  收的是 `display_name` / `description` / `avatar_uri` / `profile_uri`；旗标按人话命名
+  （`--name` / `--bio` / `--avatar` / `--profile-url`），只有点过名的才发出去，所以改昵称
+  不会顺手清掉头像。它与 `did publish` 是缓存里那个 token **仅有的**两个消费者。
 - **`version`** —— 词形的版本号（`--json` 给 `{"version": …}`），与 `--version` 是同一个事实。
 - **`agent show | use | list`** —— 本机现在是谁（当前 agent 存在 store 根的一个文件里，
   所以是整机范围而不是单进程）。`use` 允许点名一个还没存身份的 agent——先选 agent、
@@ -133,5 +151,7 @@ cargo run --manifest-path rust/Cargo.toml --example phase0_key_package -- /tmp/a
 
 ## 还没有
 
-身份这块的换钥 / 换设备 / `update_document`（`did update` 是其中的"换钥"那一半）。六族 24 条
-的命令面已经全部有实现。顺序见 TODO5 §6 的 Phase 3。
+Phase 2 的消息库（`messages.db`，TODO5 §4）；以及 Phase 4 的覆盖与收束——本仓的
+`packages/e2e` **不覆盖这个客户端**。身份这块只剩"换设备"，而它核下来是**对端没有这条路**
+（本机 awiki host 对改设备清单回 `device_*_not_supported`，`replace_did` 回 `not_supported`），
+不是待办。六族 24 条的命令面之外新增了 `did publish` 与 `me`。顺序见 TODO5 §6 的 Phase 3/4。

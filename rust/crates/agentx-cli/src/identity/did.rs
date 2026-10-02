@@ -336,6 +336,51 @@ pub fn load_stored_key(pair: &StoredKeyPair) -> Result<PrivateKeyMaterial> {
         .map_err(|err| anyhow!("the stored private key is not readable: {err}"))
 }
 
+/// Re-make a document's proof over the document as it now stands.
+///
+/// A DID document's proof covers the document's own bytes, so **any** edit invalidates it:
+/// the host re-verifies and refuses with `did_document_proof_invalid`, which is exactly what
+/// a locally edited document is. Re-proving is therefore part of publishing an edit rather
+/// than a step beside it, and it is what `retirement_document` does too — the difference is
+/// only that that one adds two fields first.
+///
+/// Signed by key-1, and it has to be: the host refuses a document whose proof names any
+/// other root (`root_change_not_supported`), and key-1 is the key whose fingerprint *is* the
+/// DID. `generate_w3c_proof` drops whatever `proof` the document carried out of the signing
+/// input, so re-proving an already-proven document is what it is for.
+pub fn resign_document(document: &Value, did: &str, key1: &PrivateKeyMaterial) -> Result<Value> {
+    let signed = generate_w3c_proof(
+        document,
+        key1,
+        &format!("{did}#key-1"),
+        ProofGenerationOptions {
+            proof_purpose: Some("assertionMethod".to_string()),
+            proof_type: Some(PROOF_TYPE_DATA_INTEGRITY.to_string()),
+            cryptosuite: Some(CRYPTOSUITE_EDDSA_JCS_2022.to_string()),
+            created: Some(Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()),
+            domain: None,
+            challenge: None,
+        },
+    )
+    .map_err(|err| anyhow!("signing the DID document: {err}"))?;
+    to_multibase_proof_value(signed)
+}
+
+/// The document with its `proof` removed, for comparing two documents without comparing
+/// their proofs.
+///
+/// There is no such thing as two equal proofs: every one carries a `created` timestamp, so a
+/// byte comparison of two whole documents says "changed" even when the only thing that moved
+/// is the clock. Comparing what the proof *covers* is the question a publisher actually has —
+/// is there anything here the host does not already serve.
+pub fn without_proof(document: &Value) -> Value {
+    let mut bare = document.clone();
+    if let Some(object) = bare.as_object_mut() {
+        object.remove("proof");
+    }
+    bare
+}
+
 /// The device's own key pair, and the two verification methods P6 binds it through.
 ///
 /// Distinct from the DID root by construction, which is the whole point: a device that

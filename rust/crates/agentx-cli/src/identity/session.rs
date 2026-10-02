@@ -1,5 +1,9 @@
-//! The short-lived credential cache: the access token a login got back, kept under the host
-//! that issued it.
+//! The short-lived credential cache: the access token a host issued, kept under the host
+//! that issued it. Written by `anp login` and by `did create` / `did register` (the host's
+//! `register` reply carries a token of its own), read back by every command that then talks
+//! to the host's control plane — `did publish` and `me`. Those calls are why the cache is
+//! read at all: the ANP request path always signs, but the **host's own** authenticated
+//! methods take a bearer token, and the spec's origin proof is not what they accept.
 //!
 //! A session is **not** an identity. The next login with the same key is still "you" whatever
 //! this file holds, which is why a corrupt or expired cache is treated as absent rather than
@@ -169,6 +173,36 @@ pub fn save_session(
     let mut file = read_session(&path);
     file.sessions.insert(host.to_string(), entry);
     write_private(&path, &file)
+}
+
+/// The cached token for `host`, or `None` if there is none that is still good.
+///
+/// `None` is the ordinary case, not an error: the cache is an optimization, and every caller
+/// has a way to get a fresh token. Expiry is judged **here**, by this file's own clock,
+/// rather than left to the server — a token this file has already dated is one the caller
+/// would send only to be refused, and a round trip spent learning nothing is worse than a
+/// message saying to log in.
+///
+/// The returned entry carries the DID it was issued to, and the caller is expected to
+/// compare it before using it: a key update moves the DID, the host keys its tokens by DID,
+/// and a token under the old one will be refused there even though it has not expired.
+pub fn load_session(location: &IdentityLocation, host: &str) -> Option<SessionEntry> {
+    let mut file = read_session(&location.session_path());
+    let entry = file.sessions.remove(host)?;
+    if is_expired(&entry) {
+        return None;
+    }
+    Some(entry)
+}
+
+/// Whether the entry's own `expiresAt` has passed. An unparseable one counts as expired: it
+/// is a field this file wrote, so the only way it is malformed is that something wrote it
+/// wrong, and a credential is not the place to guess in the permissive direction.
+fn is_expired(entry: &SessionEntry) -> bool {
+    match DateTime::parse_from_rfc3339(&entry.expires_at) {
+        Ok(expires) => expires.with_timezone(&Utc) <= Utc::now(),
+        Err(_) => true,
+    }
 }
 
 /// The file, or an empty one. A cache that cannot be read is treated as absent — it is only
@@ -349,5 +383,53 @@ mod tests {
         // The bound the caller asked for is a ceiling on top of the server's own exp, so the
         // earlier of the two is what gets written.
         assert!(expires.unwrap() < fallback);
+    }
+
+    #[test]
+    fn what_was_cached_under_one_host_is_not_returned_for_another() {
+        // The whole point of reading the cache back: the entry has to come out under the
+        // same key it went in under, and be absent under every other one.
+        let location = fixture("load");
+        save_session(&location, "127.0.0.1:9111", "tok-a", "did:wba:a", None, None, 3600).unwrap();
+        save_session(&location, "127.0.0.1:9112", "tok-b", "did:wba:b", None, None, 3600).unwrap();
+
+        assert_eq!(load_session(&location, "127.0.0.1:9111").unwrap().token, "tok-a");
+        assert_eq!(load_session(&location, "127.0.0.1:9112").unwrap().token, "tok-b");
+        // The bare host is not the key: these two services share it.
+        assert!(load_session(&location, "127.0.0.1").is_none());
+        assert!(load_session(&location, "elsewhere.example").is_none());
+
+        let _ = fs::remove_dir_all(&location.root);
+    }
+
+    #[test]
+    fn an_expired_entry_reads_as_absent_and_a_live_one_keeps_its_did() {
+        let location = fixture("expired");
+        // TTL of one second, then the recorded `expiresAt` is moved into the past by hand —
+        // `save_session` derives it from `now`, so waiting is the only way through the public
+        // API, and a test that sleeps is a test that flakes.
+        save_session(&location, "h.example", "tok", "did:wba:live", Some("did:wba:subj"), Some("Bearer"), 3600)
+            .unwrap();
+        let entry = load_session(&location, "h.example").unwrap();
+        assert_eq!(entry.did, "did:wba:live");
+        assert_eq!(entry.subject.as_deref(), Some("did:wba:subj"));
+
+        let path = location.session_path();
+        let text = fs::read_to_string(&path).unwrap().replace(&entry.expires_at, "2000-01-01T00:00:00+00:00");
+        fs::write(&path, text).unwrap();
+        assert!(load_session(&location, "h.example").is_none());
+
+        let _ = fs::remove_dir_all(&location.root);
+    }
+
+    /// A store directory under the temp dir, unique per test name and process.
+    fn fixture(label: &str) -> IdentityLocation {
+        let root = std::env::temp_dir().join(format!("agentx-session-test-{label}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        IdentityLocation {
+            root,
+            agent: "a".to_string(),
+            profile: "default".to_string(),
+        }
     }
 }

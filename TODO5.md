@@ -211,6 +211,8 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 | `did` | `resolve` / `restore` | ~~做完~~（`resolve` 带 `--chain`；`restore` 是**明说的拒绝**，见 §6） |
 | `did` | `update` | ~~做完~~（写的那半：`--target` / `--resume`；对真 rig 跑通，见 §6） |
 | `did` | `list` | ~~做完~~（第三列是"这个 store 有没有 DID"，未注册的行不藏——见 §6） |
+| `did` | `publish` | ~~做完~~（`update_document`：bearer token + JCS 哈希 CAS + 重新签名；对真 awiki host 跑通 1→2，见 §6） |
+| — | `me` | ~~做完~~（主机的 `get_me` / `update_me`：昵称/简介/头像；**不是** ANP 协议，见 §6） |
 | — | `discover` | ~~做完~~ |
 | `msg` | `send` / `caps` / `inbox` / `show` / `read` | ~~做完~~（`send` 真阳性；`inbox` 一族对 awiki 为负是**正确**结果） |
 | `msg` | `listen` | ~~做完~~（realtime.md 那条常驻契约） |
@@ -225,7 +227,8 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 | `anp` | `login` | ~~做完~~（对 rig 跑通：401 答一次、403/网页拒绝、409 走链、会话缓存按 `host:port` 合并） |
 | `agent` | `show` / `use` / `list` | ~~做完~~（含 `--agent` 的解析链） |
 | — | `version` | ~~做完~~（词形，与 `--version` 同一事实） |
-| 身份 | 换钥 / 换设备 / `update_document` | 还没 |
+| 身份 | 换钥 / `update_document` | ~~做完~~（换钥是 `did update`；`update_document` 是 `did publish`，见 §6） |
+| 身份 | 换设备 | ~~不做~~（本机 awiki host 对它回 `device_key_or_root_change_not_supported` / `device_enrollment_or_removal_not_supported`，`replace_did` 直接 `not_supported`——不是没做，是对端没有这条路，见 §6） |
 | 库侧 | 信封 / 那一跳 HTTP / SSRF 逐跳 / 身份存储 / MLS store | ~~做完~~ |
 | 库侧 | 消息库 `messages.db`（§4、Phase 2） | 还没 |
 | 收束 | Phase 4：`packages/e2e` 覆盖新客户端 / 命令面定稿 / TS CLI 冻结 | 还没 |
@@ -621,6 +624,47 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
   写 `not registered`，路径跟在旁边，是"没注册"还是"文件读不出来"由它俩一起说。**没有 `curve`
   列**（TS 有）：那边 `--curve` 是个选择，这边绑定钥永远是 `e1_` 的 Ed25519——每行都一样的列
   是噪音不是信息。
+- **`did publish` 与 `me` 已落（2026-10-02）**，这两条一起把 `cli.md` §1 约束 3 改判了。
+  用户当天原话：「bearer token 你是不是应该记录一下？我觉得用这个也是合理的，不需要每次都要签名
+  ……如果你听懂了，你就自己去决定吧」，并明说原来那条约束"可能也没啥用"。四点：
+  （a）**约束改判的不是"签名要不要"，而是"谁收什么"。** `msg` / `group` 仍然每次都签
+  `origin_proof`——那是规范验收的东西，第 6 节那句 MUST NOT 一个字都没动。改的是：
+  **DID host 自己的方法**收的不是签名。`update_document`（`core.py:974`）与
+  `get_me` / `update_me` 都用 `current_did(request)`，也就是 `register` / `login` 发下来的
+  bearer token。于是旧约束的判据（"有没有一条 CLI 路径会消费它"）本身没错，错在漏数了一个消费者。
+  现在缓存有两个写入者（`register`、`login`）与两个消费者（`did publish`、`me`），
+  **依旧没有 `logout`**：一条命令要么当场用一个 token，要么重新签发一个。
+  （b）**CAS 哈希必须是"主机正在服务的那份"，不是本地那份。** 主机算
+  `sha256:` + base64url(sha256(JCS(doc)))，拿它跟 `expected_document_hash` 比。哈希本地文档是
+  最容易犯的那个错，而且**每次都错**——永远不等，每次都回 `did_document_changed`。所以
+  `did publish` 先 `get_me` 拿回主机手上那份、哈希它、再拿这个值当 CAS。JCS 那一半 1.0.5 的
+  `canonicalize_json` 是 `pub(crate)`，所以直接依赖 `serde_json_canonicalizer`（同一棵树里
+  已有的版本）。单测里的两个期望值是用 Python 的 `hashlib` + `urlsafe_b64encode` 手算的——
+  拿另一份实现交叉验证，而不是把 Rust 的话再说一遍。
+  （c）**改过的文档要重新签，这不是额外步骤。** DID 文档的 proof 覆盖文档自己的字节，所以本地
+  改一笔就作废了，主机会回 `did_document_proof_invalid`——这是实跑撞上的，不是推出来的。
+  于是 `resign_document` 用 key-1 重签（也只能是 key-1：换根钥会被 `root_change_not_supported`
+  拒掉）；`retirement_document` 是同一次操作的另一个用法，区别只在它先加两个字段。
+  签完发出去之后**把主机回的那份写回 `identity.json`**：不写回，store 里留着的就是一份
+  "proof 盖不住自己"的文档，下一次签名会失败，而磁盘上没有任何东西解释为什么。
+  （d）**`me` 一族是主机资料面，不是 ANP。** 昵称/简介/头像在协议里**不存在**——
+  `docs/design/groups.md` 通篇没有成员昵称，`member_list` 的每一项只有
+  `{agent_did, role, status, joined_at}`；群自己的名字是 `group_profile.display_name`，
+  走 `group.update_profile`（要 `permissions.update_profile`）。所以"昵称/备注"这类字段
+  落在**服务该 DID 的那台主机**上，`get_me` / `update_me` 收的是
+  `display_name` / `description` / `avatar_uri` / `profile_uri`（别名 `nick_name` / `bio` /
+  `avatar_url`，见 `core.py:1138`）。`me set` 只发点过名的旗标，所以改昵称不会顺手清掉头像。
+  端到端（真 awiki host，`127.0.0.1:8765`）：`did create` 落 token → `did publish` 未变报
+  "already serves this document"（version 1）→ 本地加一条 verificationMethod → `did publish`
+  重签后 version 1→2、写回 store → 再跑一次又是 no-op（version 2）→ `me set --name
+  "Alice 爱丽丝" --bio "…"` → `me show` 读回。失败路径也实跑：删掉 `session.json` 报
+  "no usable access token for 127.0.0.1:8765" 并给出两条修复命令；把缓存里的 `did` 改成别的，
+  两条命令都拒绝并说明"换钥把 DID 挪走了"。
+- **换设备为什么是"不做"而不是"没做"（2026-10-02 核过）**：本机 awiki host 对着改设备清单的
+  `update_document` 回 `device_enrollment_or_removal_not_supported`（清单从无到有或从有到无）与
+  `device_key_or_root_change_not_supported`（设备根变了），`replace_did` 直接 `not_supported`。
+  也就是说"同一个 DID 换一台设备"在**这个对端**没有路；能做的只有铸一个新身份。这条记下来是为了
+  别把它当成待办——按 §1 的判据，一条没有对端的命令行不是缺口，是噪音。
 - **与 TS `connectx` 并存**，`CONNECTX_HOME` 的处理见 §8-F。
 
 **Phase 2 —— 消息库**（还没动）
@@ -638,16 +682,12 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 - [x] ~~`group e2ee send`~~（2026-10-02）
 - [x] ~~`group e2ee` 收包路径：`process_notice_v2` / `decrypt_received_v2`~~（2026-10-02；靠 `msg listen` 投递驱动）
 - [x] ~~`did list`~~（2026-10-02；`did` 一族与 `cli.md` §3.1 的七条对齐，见 §6）
-- [ ] 身份：换钥 / 换设备 / `update_document`。**2026-10-02 核过 `update_document`，它卡在一条
-  已冻结的约束上，不是没写**：awiki host 的 `update_document`（`user_compat/core.py:974`）
-  用 **bearer token 当控制权证明**（`current_did(request)`），而那个 token 只有 `register`
-  那一次会发；`register` 撞到已注册的 DID 时在发 token 之前就 `Conflict` 了。本客户端要在
-  两次调用之间留住它，就得**从 `session.json` 读回**——而 `cli.md` §1 约束 3 **明文冻结**了
-  "CLI 不从缓存里读回 token"（连带不设 `logout`）。按 §1 那条判据（"有没有一条 CLI 路径会
-  消费它"），`update_document` 现在**没有消费它的路径**。要动它得先改 §1 约束 3，那是裁定不是实现。
-  （另外 host 侧它本来就拒绝改设备钥/根钥——`device_key_or_root_change_not_supported` /
-  `root_change_not_supported`——所以"换钥"确实归 `did update` 的 ANP-03 链，"换设备"归
-  设备清单，两者都不是这个 RPC。）
+- [x] ~~身份：换钥 / 换设备 / `update_document`~~（2026-10-02；**换钥**是 `did update` 的
+  ANP-03 链，**`update_document`** 是新的 `did publish`——用户当天裁定"bearer token 记下来、
+  按这个思路用"，于是 `cli.md` §1 约束 3 改判，缓存读回的路径就是这一条；**换设备**核下来是
+  **不做**：本机 awiki host 对改设备清单回 `device_enrollment_or_removal_not_supported` /
+  `device_key_or_root_change_not_supported`，`replace_did` 回 `not_supported`，客户端没有路可走。
+  详见 §6）
 - [x] ~~`did resolve` / `did restore`~~（2026-10-02；`resolve` 的文档面 + `--chain` 走完更新链，
   `restore` 是明说的拒绝。见 §6）
 - [x] ~~`did update`（写的那半：`--target` / `--resume`，与本机钥的生命周期一起）~~（2026-10-02；

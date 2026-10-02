@@ -18,11 +18,13 @@ use agentx::group_e2ee::{
 use agentx::anp::login::login;
 use agentx::anp::{LoginError, Superseded};
 use agentx::identity::{
-    create_identity, current_agent_path, deliver, describe_status, document_is_superseded, fetch_host_service,
-    list_identities, load_stored_key, parse_ttl_seconds, read_current_agent, register_identity, resolve_agent_id,
-    resolve_agent_id_with_source, resolve_chain, retirement_document, save_session, select_current_agent,
-    session_host, snake_case_name, subject_of, successor_of, Accepted, ChainError, ChainResolution, CreateIdentityInput,
-    Hop, Identity, IdentityLocation, SessionWrite, UpdateError,
+    create_identity, current_agent_path, deliver, describe_status, document_hash, document_is_superseded,
+    fetch_host_service, fetch_profile, list_identities, load_session, load_stored_key, parse_ttl_seconds,
+    read_current_agent, register_identity, resign_document, resolve_agent_id, resolve_agent_id_with_source,
+    resolve_chain, retirement_document, save_session, select_current_agent, session_host, snake_case_name, subject_of,
+    successor_of, update_document, update_profile, without_proof, Accepted, ChainError, ChainResolution,
+    CreateIdentityInput, Hop, Identity, IdentityLocation, Issued, SessionWrite, UpdateError,
+    DEFAULT_SESSION_TTL_SECONDS,
 };
 use agentx::message::{
     build_message_request, call, call_device, call_extension, call_group, device_of, did_host, did_to_url,
@@ -118,6 +120,15 @@ enum Command {
     Anp {
         #[command(subcommand)]
         command: AnpCommand,
+    },
+    /// The host's profile for this identity: nickname, blurb, avatar.
+    ///
+    /// Not part of ANP — the protocol has no display name — so this family is the host's
+    /// own surface, and it is the only thing the cached bearer token is read back for
+    /// besides `did publish`.
+    Me {
+        #[command(subcommand)]
+        command: MeCommand,
     },
     /// The version of this binary.
     ///
@@ -247,6 +258,27 @@ enum DidCommand {
         #[arg(long)]
         profile: Option<String>,
     },
+    /// Re-publish a document that changed, over the host's authenticated control plane.
+    ///
+    /// The difference from `register` is not cosmetic. `register` is unauthenticated and
+    /// one-shot: it carries the signed document and, on a DID already on file, is refused
+    /// as `did_already_registered`. So the two cases that actually happen in practice — a
+    /// `register` whose *response* was lost (the host has the DID, the client does not know
+    /// it succeeded) and a local document that changed after it was published — have no
+    /// path through `register` at all. They have this one.
+    ///
+    /// It authenticates with the **bearer token** `register` (or `anp login`) left in
+    /// `session.json`, because that is what the host's `update_document` accepts; and it
+    /// passes the host the hash of the document it is currently serving as a CAS, so a
+    /// document that moved under us is refused as `did_document_changed` rather than
+    /// silently overwritten.
+    Publish {
+        /// Print the served document and its new version as JSON.
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        own: OwnIdentity,
+    },
     /// Retire this identity's DID in favour of a successor key (ANP-03 §2.5.3).
     ///
     /// Three steps, in this order: the successor key is minted and **staged** before anything
@@ -300,6 +332,48 @@ enum DidCommand {
     /// one back — so this refuses rather than pretending. It exists so the gap is a
     /// definite answer instead of an "Unknown subcommand".
     Restore,
+}
+
+/// The host's user profile: the nickname and blurb a chat client puts next to a DID.
+///
+/// This is **the host's** surface, not the protocol's. ANP defines identity (a DID, a
+/// stable subject, the keys that prove them) and leaves display names to the application —
+/// `docs/design/groups.md` has no per-member nickname anywhere, and the only name a group
+/// itself carries is `group_profile.display_name`, which is a *group's* name and is changed
+/// through `group.update_profile`. So this family is where "昵称 / 备注" actually live, and
+/// they live per DID, on the service that hosts it.
+///
+/// Every method here authenticates with the cached bearer token rather than an ANP
+/// signature: it is the host's own control plane, and `get_me` / `update_me` are what it
+/// accepts.
+#[derive(Subcommand)]
+enum MeCommand {
+    /// The profile the host holds for this identity, plus the document it serves.
+    Show {
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        own: OwnIdentity,
+    },
+    /// Change one or more profile fields and print the profile as the host now holds it.
+    Set {
+        /// The display name — the nickname a chat client shows. `display_name` on the host.
+        #[arg(long, value_name = "TEXT")]
+        name: Option<String>,
+        /// A short blurb. The host calls this `description`.
+        #[arg(long, value_name = "TEXT")]
+        bio: Option<String>,
+        /// An avatar URI. The host calls this `avatar_uri`.
+        #[arg(long, value_name = "URI")]
+        avatar: Option<String>,
+        /// A profile page URI. The host calls this `profile_uri`.
+        #[arg(long = "profile-url", value_name = "URI")]
+        profile_url: Option<String>,
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        own: OwnIdentity,
+    },
 }
 
 /// The store's CURRENT agent — the id a command acts as when neither `--agent` nor
@@ -764,6 +838,7 @@ async fn main() -> anyhow::Result<()> {
             } => cmd_did_show(agent.as_deref(), profile.as_deref(), json),
             DidCommand::List { json } => cmd_did_list(json),
             DidCommand::Register { agent, profile } => cmd_did_register(agent.as_deref(), profile.as_deref()).await,
+            DidCommand::Publish { json, own } => cmd_did_publish(json, &own).await,
             DidCommand::Resolve { did, chain, json } => cmd_did_resolve(&did, chain, json, &allow_private).await,
             DidCommand::Update {
                 target,
@@ -1045,6 +1120,27 @@ async fn main() -> anyhow::Result<()> {
                 .await
             }
         },
+        Command::Me { command } => match command {
+            MeCommand::Show { json, own } => cmd_me_show(json, &own).await,
+            MeCommand::Set {
+                name,
+                bio,
+                avatar,
+                profile_url,
+                json,
+                own,
+            } => {
+                cmd_me_set(
+                    name.as_deref(),
+                    bio.as_deref(),
+                    avatar.as_deref(),
+                    profile_url.as_deref(),
+                    json,
+                    &own,
+                )
+                .await
+            }
+        },
         // `--version` is answered by clap before dispatch, so reaching here means the word
         // was typed. Same string either way: the two spellings are one fact.
         Command::Version { json } => {
@@ -1161,7 +1257,18 @@ async fn cmd_did_create(
     println!("stored:  {}", location.identity_path().display());
 
     match register_identity(&client, &base, &identity).await {
-        Ok(_) => println!("registered with {host} as {handle}"),
+        Ok(issued) => {
+            // The host hands back a bearer token with the acceptance, and that is the only
+            // credential its own control plane (`update_document`, `me`) accepts — the ANP
+            // request path signs instead. The reply that carries it is this one, so it is
+            // cached here, next to where `anp login` caches the one it gets.
+            match cache_issued_token(&location, &identity, &issued) {
+                Ok(true) => println!("token:   cached in {}", location.session_path().display()),
+                Ok(false) => {}
+                Err(err) => eprintln!("warning: could not cache the access token: {err:#}"),
+            }
+            println!("registered with {host} as {handle}");
+        }
         Err(err) => {
             // The keys are already on disk; a failed publish is retryable and must not
             // look like a failed create.
@@ -1497,8 +1604,258 @@ async fn cmd_did_register(agent: Option<&str>, profile: Option<&str>) -> anyhow:
     let base = Url::parse(&identity.did_host)
         .map_err(|err| anyhow::anyhow!("the stored host is not a URL: {err}"))?;
     let client = http_client()?;
-    register_identity(&client, &base, &identity).await?;
+    let issued = register_identity(&client, &base, &identity).await?;
+    // Same credential, same place as `did create`: a re-register is one of the two ways the
+    // token ever gets into the cache in the first place.
+    match cache_issued_token(&location, &identity, &issued) {
+        Ok(true) => println!("token:   cached in {}", location.session_path().display()),
+        Ok(false) => {}
+        Err(err) => eprintln!("warning: could not cache the access token: {err:#}"),
+    }
     println!("registered {} with {}", identity.did, identity.did_host);
+    Ok(())
+}
+
+/// Put the bearer token a host issued into the session cache.
+///
+/// Returns whether there was one to cache: `register` issues a token, `update_document` does
+/// not, and a caller that already holds one keeps it. A failure here is returned rather than
+/// swallowed so the caller can warn — but it is never fatal, because the token is in hand
+/// either way and the cache is only a place to keep it.
+fn cache_issued_token(
+    location: &IdentityLocation,
+    identity: &Identity,
+    issued: &Issued,
+) -> anyhow::Result<bool> {
+    let Some(token) = issued.token.as_deref() else {
+        return Ok(false);
+    };
+    let host = session_host(&identity.did_host)?;
+    let subject = subject_of(&identity.did);
+    save_session(
+        location,
+        &host,
+        token,
+        &identity.did,
+        Some(&subject),
+        issued.token_type.as_deref(),
+        DEFAULT_SESSION_TTL_SECONDS,
+    )?;
+    Ok(true)
+}
+
+/// This identity's host, and the bearer token the host issued for it.
+///
+/// Both ends of the check live here rather than at each call site because both are ways a
+/// cached token is *the wrong token*: it is keyed by the authority that issued it (two
+/// servers on one machine are two issuers), and it was issued to one DID (a key update moves
+/// the DID, and the host keys its tokens by DID). Either mismatch is a refusal from the host
+/// after a round trip; catching it here turns that into a sentence saying what to run.
+fn host_and_token(location: &IdentityLocation, identity: &Identity) -> anyhow::Result<(Url, String)> {
+    let base = Url::parse(&identity.did_host)
+        .map_err(|err| anyhow::anyhow!("the stored host is not a URL: {err}"))?;
+    let host = session_host(&identity.did_host)?;
+    let entry = load_session(location, &host).ok_or_else(|| {
+        anyhow::anyhow!(
+            "no usable access token for {host} — run `agentx-cli did register --agent {agent}` \
+             or `agentx-cli anp login --target {target}`",
+            agent = location.agent,
+            target = identity.did_host,
+        )
+    })?;
+    if entry.did != identity.did {
+        anyhow::bail!(
+            "the cached token for {host} was issued to {} but this identity is {} — a key update \
+             moved the DID, so that token is for the old one; log in again",
+            entry.did,
+            identity.did
+        );
+    }
+    Ok((base, entry.token))
+}
+
+/// `did publish` — make the host serve what this store holds, over its authenticated plane.
+///
+/// Three steps, and the middle one is the point: read what the host serves (`get_me`, which
+/// hands back the document and its version), hash **that** as the compare-and-swap value,
+/// then `update_document` with it. Hashing the local document instead would be the easy
+/// mistake and it fails every time — the host compares the CAS against what it stores, so a
+/// digest of anything else can only ever be a mismatch, and every publish would come back
+/// `did_document_changed`.
+///
+/// The document that goes out is **re-proved** with key-1 first, because an edit to a DID
+/// document invalidates its proof and the host re-verifies (`did_document_proof_invalid`).
+/// So the two cases this command exists for — a `register` whose response was lost, and a
+/// document that changed here after it was published — are one operation.
+///
+/// Whether anything was published is read off the host's answer rather than guessed by
+/// comparing documents locally: the version it reports moves only when the document it now
+/// holds differs from the one it held. The local comparison that decides whether to send at
+/// all ignores `proof` on both sides, since no two proofs are ever byte-equal.
+async fn cmd_did_publish(json: bool, own: &OwnIdentity) -> anyhow::Result<()> {
+    let location = own.location()?;
+    let mut identity = Identity::load(&location)?;
+    let (base, token) = host_and_token(&location, &identity)?;
+    let client = http_client()?;
+
+    let before = fetch_profile(&client, &base, &token).await?;
+    let served = before
+        .get("did_document")
+        .ok_or_else(|| anyhow::anyhow!("the host's profile carried no did_document"))?;
+    let version_before = before.get("document_version").and_then(Value::as_u64);
+    let expected = document_hash(served)?;
+
+    let key1 = load_stored_key(identity.keys.get("key-1").ok_or_else(|| {
+        anyhow::anyhow!("{} has no key-1, so its document cannot be re-proved", location.identity_path().display())
+    })?)?;
+    let document = resign_document(&identity.did_document, &identity.did, &key1)?;
+
+    // Nothing to say to the host when the only difference is the proof we just replaced. The
+    // token was still worth reading back: this call is also how a lost `register` response
+    // gets resolved, and getting here at all means the host has the identity.
+    if without_proof(served) == without_proof(&document) {
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "agent": location.agent,
+                    "profile": location.profile,
+                    "did": identity.did,
+                    "host": identity.did_host,
+                    "changed": false,
+                    "documentVersion": version_before,
+                }))?
+            );
+            return Ok(());
+        }
+        println!("{} already serves this document", identity.did_host);
+        if let Some(version) = version_before {
+            println!("version: {version}");
+        }
+        return Ok(());
+    }
+
+    let issued = update_document(&client, &base, &token, &document, &expected).await?;
+    let version_after = issued.result.get("document_version").and_then(Value::as_u64);
+
+    // The store now holds a document whose proof no longer covers it — that is what an edit
+    // does — so the re-proved document that the host just accepted is what goes back. Keeping
+    // the edited one would leave the store describing something that was never published, and
+    // the next signature over it would fail for a reason nothing on disk explains.
+    //
+    // The host's reply is the version to write, not the local `document`: the host is
+    // authoritative about what it stores, and its own normalization (adding the message
+    // service, say) happens before it does. When the document it was sent already carried
+    // that, the two are the same object.
+    if let Some(accepted) = issued.result.get("document") {
+        identity.did_document = accepted.clone();
+        identity.save(&location)?;
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "agent": location.agent,
+                "profile": location.profile,
+                "did": identity.did,
+                "host": identity.did_host,
+                "changed": true,
+                "documentVersion": version_after,
+                "document": issued.result.get("document"),
+            }))?
+        );
+        return Ok(());
+    }
+
+    println!("published {} to {}", identity.did, identity.did_host);
+    if version_after != version_before {
+        match (version_before, version_after) {
+            (Some(before), Some(after)) => println!("version: {before} -> {after}"),
+            (_, Some(after)) => println!("version: {after}"),
+            _ => println!("version: (the host did not say)"),
+        }
+    }
+    println!("store:   {}", location.identity_path().display());
+    Ok(())
+}
+
+/// `me show` — the profile the host holds for this identity.
+///
+/// Read with the bearer token rather than by signing, which is the whole reason the token is
+/// cached: `get_me` is the host's method, and an ANP signature is not what it takes.
+async fn cmd_me_show(json: bool, own: &OwnIdentity) -> anyhow::Result<()> {
+    let location = own.location()?;
+    let identity = Identity::load(&location)?;
+    let (base, token) = host_and_token(&location, &identity)?;
+    let client = http_client()?;
+    let profile = fetch_profile(&client, &base, &token).await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&profile)?);
+        return Ok(());
+    }
+    let field = |label: &str, name: &str| {
+        let value = profile.get(name).and_then(Value::as_str).unwrap_or("—");
+        println!("{label:<9}{value}");
+    };
+    println!("{:<9}{}", "did", identity.did);
+    field("handle", "handle");
+    field("name", "display_name");
+    field("bio", "description");
+    field("avatar", "avatar_uri");
+    field("profile", "profile_uri");
+    Ok(())
+}
+
+/// `me set` — change profile fields and print what the host now holds.
+///
+/// The host's own field names are the ones sent (`display_name`, `description`, …); the flags
+/// are named after what a person calls them. Only the flags given are sent, so setting the
+/// nickname cannot blank the avatar — that is the host's `update_me`, which writes exactly
+/// the keys it is handed.
+async fn cmd_me_set(
+    name: Option<&str>,
+    bio: Option<&str>,
+    avatar: Option<&str>,
+    profile_url: Option<&str>,
+    json: bool,
+    own: &OwnIdentity,
+) -> anyhow::Result<()> {
+    let mut fields = serde_json::Map::new();
+    if let Some(name) = name {
+        fields.insert("display_name".to_string(), Value::String(name.to_string()));
+    }
+    if let Some(bio) = bio {
+        fields.insert("description".to_string(), Value::String(bio.to_string()));
+    }
+    if let Some(avatar) = avatar {
+        fields.insert("avatar_uri".to_string(), Value::String(avatar.to_string()));
+    }
+    if let Some(url) = profile_url {
+        fields.insert("profile_uri".to_string(), Value::String(url.to_string()));
+    }
+    if fields.is_empty() {
+        // Refused rather than sent as an empty PATCH: a call that changes nothing is
+        // indistinguishable from one that failed to name the right fields.
+        anyhow::bail!("nothing to set — pass at least one of --name, --bio, --avatar, --profile-url");
+    }
+
+    let location = own.location()?;
+    let identity = Identity::load(&location)?;
+    let (base, token) = host_and_token(&location, &identity)?;
+    let client = http_client()?;
+    let profile = update_profile(&client, &base, &token, Value::Object(fields)).await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&profile)?);
+        return Ok(());
+    }
+    let display = profile
+        .get("display_name")
+        .and_then(Value::as_str)
+        .unwrap_or("(unnamed)");
+    println!("updated {}: {display}", identity.did);
     Ok(())
 }
 

@@ -21,8 +21,21 @@
 2. **推送只走 `msg listen` 一条路**。它是 CLI 里**唯一**的常驻进程，
    契约（输出 / 退出码 / 信号 / `--once`）单独在 [realtime.md](realtime.md) 里定死。
    其余命令一律是"一次调用、一个结果"。
-3. **CLI 不从缓存里读回 token**。`login` 每次重新签名 + POST 然后覆盖缓存；
-   因此**不设 `logout`**——没有一条命令会消费被清掉的缓存。
+3. **签名是 ANP 方法唯一的证明方式；bearer token 只喂给主机自己的控制面**。
+   `msg` / `group` 一族每次照样签 `origin_proof`，那是规范验收的东西，
+   第 6 节那句 "MUST NOT 替代 `origin_proof`" 说的就是这件事，仍然成立。
+   但 **DID host 自己的方法**（`update_document`、`get_me` / `update_me`）不收签名，
+   只收 `register` / `login` 发下来的 bearer token——所以缓存是**要读回的**，
+   读它的正是那两条路径。
+
+> **2026-10-02 用户裁定，改判第 3 条。** 原文是"CLI 不从缓存里读回 token……
+> 因此不设 `logout`"。用户原话：「bearer token 你是不是应该记录一下？我觉得用这个也是合理的，
+> 不需要每次都要签名……这个约束可能也没啥用。」原文的判据（'有没有一条 CLI 路径会消费它'）
+> 本身没错，错在**看漏了一条消费者**：主机的 `update_document` 用的正是它。
+> 于是现在的形状是：缓存有两个写入者（`register`、`login`）与两个消费者（`did publish`、`me`），
+> **仍然没有 `logout`**——一条命令要么当场用一个 token，要么重新签发一个，
+> "清掉缓存"这个动作没有位置。`session.json` 仍然 keyed by `host:port`，
+> 并且读回时**比对 `did`**：换钥会把 DID 挪走，而主机是按 DID 认 token 的。
 
 ## 2. 与原 CLI 的差异
 
@@ -296,11 +309,11 @@ connectx anp login --wallet web3 --provider <module> --address 0x… --chain-id 
 
 | 不做 | 理由 |
 |---|---|
-| `connectx logout` | 没有一条命令会消费被清掉的缓存 |
+| `connectx logout` | 没有一条命令会消费被清掉的缓存——`register` 与 `login` 各自签发一个新的覆盖旧的，没有"清空"这个动作的位置（§1 第 3 条，2026-10-02 改判后仍然如此） |
 | `project init` / `project generate` | 脚手架，不是 ANP 协议 |
 | `--zk*` 全部 | 用户裁定不要 ZK |
 | `msg send --wallet web3` | 见第 4 节待定项 |
-| 本地 bearer token 那条路 | 规范里它只是**可选优化**，且 **MUST NOT** 替代 `origin_proof`（P3 §9.5）。CLI **始终**签名，于是对任何符合规范的服务都能用 |
+| 用 bearer token 替代 `msg` / `group` 的 `origin_proof` | 规范里它只是**可选优化**，且 **MUST NOT** 替代 `origin_proof`（P3 §9.5）。消息族**始终**签名，于是对任何符合规范的服务都能用 |
 
 ### `msg listen`（2026-10-01 裁定：做）
 
@@ -332,7 +345,7 @@ connectx anp login --wallet web3 --provider <module> --address 0x… --chain-id 
     identity.json       # 已注册的 DID + host + handle
     key.json            # keystore V3，静态加密
     key.next            # did update 暂存的继任钥
-    session.json        # token 缓存（CLI 从不读回，见 §1.3）
+    session.json        # token 缓存（host:port 为键；did publish / me 读回，见 §1.3）
   current-agent         # agent use 写的当前 agent
 ```
 

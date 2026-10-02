@@ -14,6 +14,15 @@ rust-version = "1.88.0"
 anp = "1.0.5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The host's `update_document` is CAS'd on `sha256:` of the **JCS** (RFC 8785) form of the
+# document, so this client has to canonicalize exactly as the host does. The `anp` crate
+# already depends on this for the same purpose, but its own wrapper around it is
+# `pub(crate)` — importing it here reuses the version already in the tree rather than
+# reimplementing canonicalization.
+serde_json_canonicalizer = "0.3"
+# The other half of that digest. Already in `anp`'s tree (it signs with it), so this adds
+# no second crypto stack.
+sha2 = "0.10"
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 anyhow = "1"

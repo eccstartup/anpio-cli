@@ -15,10 +15,16 @@ mod update;
 pub use chain::{
     describe_status, document_is_superseded, resolve_chain, snake_case_name, ChainError, ChainResolution,
 };
-pub use did::{create_identity, load_stored_key, retirement_document, subject_of, successor_of, CreateIdentityInput};
-pub use host::{fetch_host_service, register_identity, HostService};
+pub use did::{
+    create_identity, load_stored_key, resign_document, retirement_document, subject_of, successor_of,
+    without_proof, CreateIdentityInput,
+};
+pub use host::{
+    document_hash, fetch_host_service, fetch_profile, register_identity, update_document, update_profile,
+    HostService, Issued,
+};
 pub use session::{
-    parse_ttl_seconds, save_session, session_host, SessionEntry, SessionFile, SessionWrite,
+    load_session, parse_ttl_seconds, save_session, session_host, SessionEntry, SessionFile, SessionWrite,
     DEFAULT_SESSION_TTL_SECONDS, SESSION_FILE,
 };
 pub use store::{
