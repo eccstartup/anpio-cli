@@ -42,7 +42,7 @@ pub const DID_SUPERSEDED: &str = "anp.did_superseded";
 pub const DIRECT_SEND: &str = "direct.send";
 pub const DIRECT_PROFILE: &str = "anp.direct.base.v1";
 
-/// P4 §5.1: the group family's Profile, and its five methods. The one thing P4 does not let
+/// P4 §5.1: the group family's Profile, and its methods. The one thing P4 does not let
 /// this be a constant is `meta.target` — `group.create` names the service, every other
 /// method names the group (`CallRequest.target`).
 pub const GROUP_PROFILE: &str = "anp.group.base.v2";
@@ -51,6 +51,10 @@ pub const GROUP_GET_INFO: &str = "group.get_info";
 pub const GROUP_JOIN: &str = "group.join";
 pub const GROUP_LEAVE: &str = "group.leave";
 pub const GROUP_SEND: &str = "group.send";
+/// The group's own name lives in `group_profile.display_name` (§7.4), and this is the only
+/// method that writes it. Its body is `group_profile_patch` under RFC 7386 merge semantics
+/// (§8.7.2), so a field left out is a field left unchanged.
+pub const GROUP_UPDATE_PROFILE: &str = "group.update_profile";
 
 /// P6 §4.1: the group E2EE family's Profile and its six methods.
 ///

@@ -115,8 +115,11 @@ cargo run --manifest-path rust/Cargo.toml -- discover http://127.0.0.1:8787
   `message/stream.rs` 是传输（地址推导 + WebSocket 拆成读写两条任务），`message/listen.rs`
   是状态机。游标在服务端按 `(owner_did, device_id)` 存，`stream.ack` 是唯一写入者；
   Ctrl-C 退出 0，掉线按 2s→30s 退避重连；`--once` 只补拉。
-- **`group create | info | members | join | leave | send`** —— P4 `anp.group.base.v2`。
+- **`group create | info | members | join | leave | send | update-profile`** —— P4 `anp.group.base.v2`。
   `src/group.rs` 放策略逻辑（§7.1 的推荐策略、`--policy` 的浅合并、封闭集合校验）。
+  `update-profile --name` 改的是**群自己的名字** `group_profile.display_name`（§7.4），
+  正文是 `group_profile_patch`（RFC 7386 合并，§8.7.2），要走 `permissions.update_profile`——
+  这是 CLI 里唯一能写群名的地方；`group info` 把它读出来。
   **端到端要打本仓的 `packages/service`**：本机 awiki host 对 `group create` 回 HTTP 401，
   是它自己不许 public RPC 建群的策略（`group.remote_create_not_allowed`），
   详见 [TODO5.md](../TODO5.md) §6 Phase 1。

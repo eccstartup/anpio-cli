@@ -62,8 +62,10 @@
 
 ### 2.2 清单
 
-- [ ] **§2.1 的裁定落成一句话**，写在 `docs/design/cli.md` 开头：这个仓库的 CLI 是哪个二进制，
+- [x] **§2.1 的裁定落成一句话**，写在 `docs/design/cli.md` 开头：这个仓库的 CLI 是哪个二进制，
       另一个是什么状态。**先做这条**，它是其余各条的前置。
+      —— 2026-10-02 定：`agentx-cli` 是 CLI，`connectx` 冻结；用户原话「ts的cli暂时不要动，
+      也不加功能，主攻rust cli」。已写进 `docs/design/cli.md` 开头。
 - [ ] `rust/README.md` 的**命令面一节**升级成参考页级别的逐条说明
       （今天它是散文，缺"每个旗标的默认值"与"失败时说什么"）。
 - [ ] `vercel/reference/cli.md` 与 `vercel/en/reference/cli.md`：按 2.1 的裁定改写，
@@ -157,11 +159,15 @@ ANP 的定址单位是 **DID**，`msg send --to` 只吃 DID。
 
 ### 4.2 要做的事
 
-- [ ] **`group update-profile <group_did> --name <s>`**：改群自己的名字。
+- [x] **`group update-profile <group_did> --name <s>`**：改群自己的名字。
       先确认本仓 `packages/service` 支持这个方法、且权限判断对
       （不支持的端要回 `-32601`，那是**正确的负结果**，见 §5 最后一条）。
-- [ ] **`group info` 打出 `group_profile.display_name`**：先查今天打不打；
+      —— 2026-10-02 核过：`packages/service/src/rpc/groups.ts` 有 `group.update_profile`，
+      权限键 `update_profile` 在 `PERMISSION_KEYS` 里，正文收 `group_profile_patch`（RFC 7386）。
+      命令已落地，走 `anp.group.base.v2`、target 是群、subject 是 `group_did`。
+- [x] **`group info` 打出 `group_profile.display_name`**：先查今天打不打；
       不打就是一条现成的补丁。
+      —— 今天**已经打**（`report_group_info` → `name:`），不是缺口。
 - [ ] **群里成员的名字**：`group members` 今天只出 did / role / status / joined_at。
       加名字有两条路，要选：
       ① `--names` 显式开关，逐个去主机取 profile（群大了会很慢，但总是新的）；
@@ -217,12 +223,11 @@ msg * / group * / group e2ee *  ──►  packages/service（本仓，:8787 之
 
 ### 5.3 计划
 
-- [ ] **进 CI 的最小一步：`cargo test` + `cargo clippy`。** 与 5.2 无关，可以立刻做。
+- [x] **进 CI 的最小一步：`cargo test` + `cargo clippy`。** 与 5.2 无关，可以立刻做。
       今天 Rust 这边**完全不在门禁里**，改坏了没有任何东西会红。
-      （`cargo fmt --check` **不要**加：这个仓库没有 `rustfmt.toml` 且是手写格式，
-      `examples/phase0_key_package.rs` 今天就不过——加上去等于加一个假门禁。
-      clippy 现有的 `needless_question_mark`（`message/client.rs:13`）要么修要么 allow，
-      别让它变成"反正本来就有一个警告"。）
+      —— 2026-10-02 做了：`.github/workflows/ci.yml` 新增 `rust` job，跑
+      `cargo test --all-targets` 与 `cargo clippy -- -D warnings`；顺手修掉唯一那条
+      `needless_question_mark`（`message/client.rs`）。`cargo fmt --check` 未加（见原文）。
 - [ ] **一个可复跑的 e2e 配方**（先是一份 `scripts/e2e.sh`，不是测试框架）：
       起 host → 起 service → 走完整条链路 → 断言。今天这条链路是**手工走过一遍**的
       （见 §6），把它写成脚本的第一版就是把 5.1 第二档钉住。

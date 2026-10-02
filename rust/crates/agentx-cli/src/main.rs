@@ -35,8 +35,8 @@ use agentx::message::{
     Sender, TargetKind, CORE_BINDING, DIRECT_PROFILE, DIRECT_SEND, DID_SUPERSEDED,
     GET_CAPABILITIES, GET_KEY_PACKAGE, GROUP_CREATE, GROUP_E2EE_ADD, GROUP_E2EE_CREATE,
     GROUP_E2EE_PROFILE, GROUP_E2EE_REMOVE, GROUP_E2EE_SEND, GROUP_GET_INFO, GROUP_JOIN,
-    GROUP_LEAVE, GROUP_PROFILE, GROUP_SEND, INBOX_GET, INBOX_MARK_READ, MESSAGE_GET_BATCH,
-    PUBLISH_KEY_PACKAGE, TRANSPORT_PROTECTED,
+    GROUP_LEAVE, GROUP_PROFILE, GROUP_SEND, GROUP_UPDATE_PROFILE, INBOX_GET, INBOX_MARK_READ,
+    MESSAGE_GET_BATCH, PUBLISH_KEY_PACKAGE, TRANSPORT_PROTECTED,
 };
 use agentx::mls::{
     abort_commit, application_plaintext, device_signing_key, finalize_commit, generate_key_package,
@@ -631,6 +631,24 @@ enum GroupCommand {
         #[command(flatten)]
         own: OwnIdentity,
     },
+    /// Rename a group (P4 `group.update_profile`, §7.4 / §8.7.2).
+    ///
+    /// The name a group carries is `group_profile.display_name`, and this is the only method
+    /// that writes it. The patch is RFC 7386 (merge, not replace), so fields left out stay
+    /// as they are — there is no way to blank a name with this command, which is deliberate:
+    /// a group with no name is a group a chat client cannot label.
+    UpdateProfile {
+        #[arg(value_name = "GROUP_DID")]
+        group_did: String,
+        /// The new `display_name`. Required: this command exists to change the name, and a
+        /// call that changed nothing would still consume a state version on the service.
+        #[arg(long, value_name = "NAME")]
+        name: String,
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        own: OwnIdentity,
+    },
     /// End-to-end encryption for groups (P6 `anp.group.e2ee.v2`).
     ///
     /// A subfamily rather than six more `group` verbs: P6 is a different Profile with its own
@@ -977,6 +995,12 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .await
             }
+            GroupCommand::UpdateProfile {
+                group_did,
+                name,
+                json,
+                own,
+            } => cmd_group_update_profile(&own, &group_did, &name, json, &allow_private).await,
             GroupCommand::E2ee { command } => match command {
                 GroupE2eeCommand::Publish {
                     key_package_id,
@@ -2929,6 +2953,53 @@ async fn cmd_group_info(
         report_roster(&result)?;
     } else {
         report_group_info(&result);
+    }
+    Ok(())
+}
+
+/// The group's name lives in `group_profile.display_name`, and `group.update_profile` is the
+/// only writer (§7.4). The body field is `group_profile_patch` under RFC 7386 merge semantics
+/// (§8.7.2), so a field left out is a field left unchanged — there is no other way to change
+/// a name, which is why this is a command and not a flag hung off `group info`.
+async fn cmd_group_update_profile(
+    own: &OwnIdentity,
+    group_did: &str,
+    name: &str,
+    json: bool,
+    allow_private: &[String],
+) -> anyhow::Result<()> {
+    let (client, channel) = group_channel(own, group_did, allow_private).await?;
+
+    let mut body = Map::new();
+    body.insert(
+        "group_profile_patch".to_string(),
+        json!({ "display_name": name }),
+    );
+
+    let result = call_group(
+        &client,
+        &channel,
+        GROUP_UPDATE_PROFILE,
+        group_target(group_did),
+        body,
+        group_did,
+    )
+    .await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+    report_group_profile(&result)
+}
+
+/// §8.7: `group_did`, the new state version, and the merged profile.
+fn report_group_profile(result: &Value) -> anyhow::Result<()> {
+    field("group:", result.get("group_did"));
+    field("state version:", result.get("group_state_version"));
+    if let Some(profile) = result.get("group_profile").and_then(as_row) {
+        field("name:", profile.get("display_name"));
+        field("description:", profile.get("description"));
     }
     Ok(())
 }
