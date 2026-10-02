@@ -271,7 +271,11 @@ function harness(
 describe(`${PUBLISH_KEY_PACKAGE} (§8.1)`, () => {
   it('accepts a KeyPackage bound to the publishing device, and files it as available', async () => {
     const h = harness()
-    const outcome = await h.call(publishRequest())
+    // One signed object, reused for the request and the assertion: the binding proof
+    // carries a second-granularity `created`, so re-signing at assertion time makes
+    // this flake when the second ticks over.
+    const kp = keyPackage()
+    const outcome = await h.call(publishRequest({ body: { group_key_package: kp } }))
     expect(outcome.json?.error).toBeUndefined()
     // §8.1.3 L718–722 的五个字段。
     expect(outcome.json?.result).toEqual({
@@ -285,7 +289,7 @@ describe(`${PUBLISH_KEY_PACKAGE} (§8.1)`, () => {
     // `group.e2ee.add` 的那个 owner，见 `groupE2ee.ts` 的 `insertGroupKeyPackage` 调用点）。
     const row = h.storage.groupKeyPackage(publisher.did, PUB_DEVICE, 'kp-1')
     expect(row?.state).toBe('available')
-    expect(JSON.parse(row?.packageJson ?? '{}')).toEqual(keyPackage())
+    expect(JSON.parse(row?.packageJson ?? '{}')).toEqual(kp)
   })
 
   it('refuses an object that is not a KeyPackage, with 5001', async () => {
