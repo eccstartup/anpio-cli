@@ -294,6 +294,50 @@ cargo run --manifest-path rust/Cargo.toml --example phase0_key_package -- /tmp/a
   `--json` 强制 NDJSON（不给时"管道也是机器"）。不支持 stream 的对端在握手上就终止，
   报 `unsupported_extension` 而**不重连**——答案是同一个，重连只会看起来像在工作。
 
+### `group`（含 `group e2ee`）
+
+| 命令 | 位置参数 | 旗标（默认值） |
+| --- | --- | --- |
+| `group create` | — | `--name <NAME>`、`--policy <JSON>`（在 P4 §7.1 的推荐结构上**浅合并**）、`--json`、`--agent`、`--profile` |
+| `group info` | `<GROUP_DID>` | `--json`、`--agent`、`--profile` |
+| `group members` | `<GROUP_DID>` | `--names`、`--json`、`--agent`、`--profile` |
+| `group join` / `group leave` | `<GROUP_DID>` | `--json`、`--agent`、`--profile` |
+| `group send` | `<GROUP_DID>` | `--text` / `--body`（二选一，规则同 `msg send`）、`--content-type`、`--operation-id`、`--json` |
+| `group update-profile` | `<GROUP_DID>` | `--name <NAME>`（**必填**）、`--json`、`--agent`、`--profile` |
+| `group set-remark` | `<GROUP_DID> [REMARK]` | `--clear`（与 `REMARK` 互为取反）、`--json`、`--agent`、`--profile` |
+| `group e2ee publish` | — | `--key-package-id <ID>`、`--valid-days <DAYS>`（7）、`--json` |
+| `group e2ee get-key-package` | — | `--target-did <DID>`、`--target-device <ID>`（都必填）、`--suite <SUITE>`、`--require-fresh`、`--json` |
+| `group e2ee create` | `<GROUP_DID>` | `--key-package-id <ID>`、`--operation-id <UUID>`、`--json` |
+| `group e2ee add` / `remove` | `<GROUP_DID>` | `--member-did <DID>`、`--member-device <ID>`（都必填）、`--operation-id`、`--json` |
+| `group e2ee send` | `<GROUP_DID>` | `--text` / `--body`、`--content-type`（**自由**，见下）、`--operation-id`、`--json` |
+
+失败时说什么：
+
+- **`group set-remark` 既没给 REMARK 也没给 `--clear`**：clap 的用法错误，**退出 2**，
+  stderr 上是 `error: the following required arguments were not provided: <REMARK>` 加一行
+  `Usage:`。给了空串是另一种：`a remark cannot be empty; --clear is how one is dropped`，
+  退出 1。两条都写出来，是因为"用错了"与"内容不合格"是两件事，而**它们的退出码不同**。
+- **`group create --policy` 越界**：封闭集合先校验再联网，例如
+  `Error: message_invalid: --policy admission_mode must be one of admin-add, open-join
+  (P4 §7.1 L349)`，退出 1，**一个字节都没发**。默认策略里 `admission_mode` 是 `open-join`。
+- **`group join` 而群不是 `open-join`**：服务按 §8.3.2 拒，错误里带 `policyViolation`
+  （3003）。这不是客户端的毛病——"这个群不让自助加入"是群策略在说话。
+- **`group e2ee` 的四条控制方法**：服务答得"不像成功"时**不当作成功**——`publish` 要
+  `published: true`、`create` 要 `created: true`、`add` / `remove` / `send` 要
+  `accepted: true`，少了就退出 1 并引规范条款。服务拒绝则 abort，传输失败留给 crate 的
+  `reconcile_pending_v2`（那时"服务到底收没收"是不知道的）。
+- **`group e2ee send --content-type`**：这是**加密内容**的类型（P6 §7.4
+  `application_content_type`），是自由的；外层 `meta.content_type` 才是被 §9.5.3 钉死成
+  一个值的那一个。两者不是一回事，别按 `msg send` 那套去理解。
+- **`group members --names` 取不到名字**：末尾多一行，**不是失败**——可执行的那一半（DID）
+  照样在：
+
+  ```text
+  note: N member(s) could not be named (no public profile on their host); their DID is printed instead
+  ```
+
+  名字在这一族里只走**非 `--json`** 那一档。
+
 ## 还没有
 
 Phase 2 的消息库（`messages.db`，TODO5 §4）；以及 Phase 4 的覆盖与收束——本仓的
