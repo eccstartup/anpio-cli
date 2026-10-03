@@ -1,9 +1,13 @@
 # `agentx-cli` —— Rust 客户端
 
 [TODO5.md](../TODO5.md) 落地的那个客户端。**与服务端分开**：`packages/service` 继续是 TS 的
-ANPMessageService，`packages/cli` 是旧的 TS 客户端（冻结，见 TODO5 §0.1 第 5 条），
-这一份是新的。**它也有自己的 store 根**（`AGENTXCLI_HOME`，缺省 `~/.agentx-cli`），
-不碰 TS 客户端的 `~/.connectx/`（TODO5 §0.1 第 1 条）。
+ANPMessageService，这一份是它的客户端。**它有自己的 store 根**（`AGENTXCLI_HOME`，缺省
+`~/.agentx-cli`）。
+
+> 本仓库曾经有一个 TypeScript 客户端（`packages/cli`，二进制名 `connectx`，store 根
+> `~/.connectx/`），2026-10-03 用户裁定**退役并删除**（[cli.md](../docs/design/cli.md) §1）。
+> 所以下面凡提到与它并存、或"不碰 `~/.connectx/`"的地方，都已经没有第二个客户端了——
+> 那句话保留只是因为 store 布局本身是那个形状。
 
 ## 为什么在这里、为什么是 Rust
 
@@ -107,8 +111,8 @@ store 根是 `AGENTXCLI_HOME`（缺省 `~/.agentx-cli`），一条身份由 `--a
 cargo run --manifest-path rust/Cargo.toml -- discover http://127.0.0.1:8787
 ```
 
-- **`msg send | caps | inbox | show | read`** —— `src/message/channel.rs` 是 `channel.ts`
-  的移植（`Sender` / `Endpoint` / `Channel`、`call` / `call_extension` / `call_group`）。
+- **`msg send | caps | inbox | show | read`** —— `src/message/channel.rs` 是那条消息层的
+  一跳（`Sender` / `Endpoint` / `Channel`、`call` / `call_extension` / `call_group`）。
   `msg send --to` 收 **DID 或通讯录里的名字**：DID 形状的参数（`looks_like_a_did` 是语法
   测试，不是方法白名单）直接进发现，其余当名字查通讯录（见下面 `contacts` 那条），
   两个名字指向同一人时**退出 1 并列出候选**，不随便挑一个。
@@ -243,10 +247,10 @@ tests/cli_surface.rs` 里逐字列着今天每一个页面，删一个或改一�
 **2** 这份文档已不是当前（链走过了，或是退役声明），**3** 更新链没验过，**0** 当前；
 取不到文档是普通失败，给 1。
 
-**失败长什么样。** stderr 上一行 `Error: <稳定码>: <人话>`，退出 1。稳定码与 TS 客户端的
-`ConnectxError.code` **同一套拼写**（`message_invalid` / `message_send_failed` /
+**失败长什么样。** stderr 上一行 `Error: <稳定码>: <人话>`，退出 1。稳定码沿用旧 TS 客户端
+`ConnectxError.code` 的那套拼写（`message_invalid` / `message_send_failed` /
 `unsupported_extension` / `did_resolve_blocked` / `message_service_not_found` …），
-所以脚本按它分支，不必解析人话。
+所以脚本按它分支，不必解析人话——那套拼写比那个客户端活得久。
 
 ### `did` 与 `agent`
 
@@ -450,7 +454,11 @@ tests/cli_surface.rs` 里逐字列着今天每一个页面，删一个或改一�
 
 ## 还没有
 
-Phase 2 的消息库（`messages.db`，TODO5 §4）；以及 Phase 4 的覆盖与收束——本仓的
-`packages/e2e` **不覆盖这个客户端**。身份这块只剩"换设备"，而它核下来是**对端没有这条路**
-（本机 awiki host 对改设备清单回 `device_*_not_supported`，`replace_did` 回 `not_supported`），
-不是待办。六族 24 条的命令面之外新增了 `did publish` 与 `me`。顺序见 TODO5 §6 的 Phase 3/4。
+身份这块只剩"换设备"，而它核下来是**对端没有这条路**（本机 awiki host 对改设备清单回
+`device_*_not_supported`，`replace_did` 回 `not_supported`），不是待办。
+命令面本身没有测试长的第三档之外的东西：覆盖是库侧单测 + `scripts/e2e.sh`（真服务、真
+socket、真 WebSocket），顺序见 TODO5 §6 的 Phase 3/4。
+
+> 本仓的 `packages/e2e`（对着真服务跑 `connectx` 命令函数的那套 TS 端到端）2026-10-03
+> 随 TS 客户端一起删了。它没覆盖这个客户端，所以这里少掉的不是这条；少掉的那一条独有覆盖
+> （跨域中继的 `groupFederation`）记在 [TODO7.md](../TODO7.md) §5。

@@ -24,7 +24,7 @@
 | DID Service（托管 `did.json`、发 handle） | 兄弟仓库 `awiki-open-server` |
 | 应用服务端（登录、签发站点 token） | `agent-on` 一类的站点 |
 | 中继 / 网关 | **规范里没有这种东西**（P8 §3.1 明确不新增 Relay 方法） |
-| 客户端库 | `packages/core` + `packages/cli` |
+| 客户端库 | `packages/core`（协议原语）；命令行客户端是本仓库外的 Rust `agentx` crate |
 
 **`AgentXAgent` 不托管别人的 DID 文档，但需要解析它们**——发件人身份、入口服务发现、群成员
 校验都要。**一处例外**：它**自己名下**的群 DID 文档由它自己发布（§13、[groups.md](groups.md)
@@ -101,7 +101,7 @@
 
 ⚠ **Node 24 的版本下限取 24.16.0**：`node:sqlite` 的 TEXT 解码器在遇到内嵌 NUL 时
 会**静默截断**，该 bug 在 24.16.0 与 26.1.0 才修。消息体是任意字节，这条不能忽略。
-`packages/core` 与 `packages/cli` 不受此限，仍可保持 ≥ 22.12（与旧仓库一致）。
+`packages/core` 不受此限，仍可保持 ≥ 22.12（与旧仓库一致）。
 
 HTTP 层用 `node:http` 自己写路由：服务一共只有**四条**路由（控制面、取件流、两段附件
 数据面），引框架的收益是负的。
@@ -684,9 +684,14 @@ sync.bootstrap / sync.delta / sync.thread_after
 message.get_batch
 ```
 
+**这一族 2026-10-03 只剩一条 `sync.delta`**（已实现的那几条里；上表是当初比对方法名时的
+那份清单，不是今天的实现范围）。读搬到本地之后 `inbox.get` / `inbox.mark_read` /
+`message.get_batch` 都没有调用者了，详见 §9.3。**沿用名字的那个理由也随之一半失效**：
+留着 `sync.delta` 是因为补齐只有服务端做得了，不是因为名字与 awiki 一致。
+
 ### 9.1 扩展面自己的 Profile：`x_agentx.inbox.v1`
 
-**这六个方法不是"没有 Profile"的，而是有它们自己的一个。** P1 §6.2.2 L277 把
+**这些扩展方法不是"没有 Profile"的，而是有它们自己的一个。** P1 §6.2.2 L277 把
 `meta.profile` 定成 **MUST**，且说它是"本次请求的**唯一解释** Profile"——所以一个
 扩展方法在线上必须给出一个能解释它的 Profile 值，而这个值不可能是任何一个规范 Profile
 （那才是对客户端撒谎）。取值就是**扩展自己的标识符**，`x_` 前缀正是 P1 §12 给扩展留的命名空间。
@@ -714,14 +719,14 @@ body                    = <下面的参数>
 #### 9.1.1 目标建模：`{kind: "agent", did: <收件箱主人>}`
 
 **这一行不能省。** P1 附录 A.4 L1068：`当某方法要求 auth.origin_proof 时，meta.target MUST 存在`
-——这六个方法每一个都要求。P1 A.4 L1069 又限定 `kind` 只能取 `agent` / `group` / `service`。
+——本节这些方法每一个都要求。P1 A.4 L1069 又限定 `kind` 只能取 `agent` / `group` / `service`。
 而 P1 A.4 L1070 把剩下的问题指名交给本 Profile：
 `endpoint-local 方法若未来需要引入 auth.origin_proof，MUST 由对应 Profile 显式定义其目标建模与重建规则`
 ——取件面正是一组 endpoint-local 方法，所以**建模规则写在下面，服务端按它实现校验，不算实现细节**。
 
 **建模：`kind` 取 `agent`，`did` 取收件箱主人，与 `meta.sender_did` 同值。**
 
-- 不取 `group`：群消息也进同一个收件箱（§9.3 的 `inbox.get` 一次返回两种），
+- 不取 `group`：群消息也进同一个投递序列（§9.3 的 `sync.delta` 一次返回两种），
   而 `kind` 描述的是**这次请求作用在谁的身份上**，不是里面装了哪些消息。
   群自己的 `kind: "group"` 出现在**投递帧自己的** `meta.target` 里（§8.2），那是另一个信封，不是请求的。
 - 不取 `service`：`service` 是"服务自身"这一类目标（如 §13 自述），
@@ -760,29 +765,40 @@ Profile"的答案，混进一个 `x_` 值就把它变成另一个问题了。扩
 `POST /im/rpc` 上，那条路由（`app/routes.py`）以 `strict_anp=False` 直接
 `dispatch`，**不做任何信封校验**。
 
-结论：**`connectx` 的取件命令够不着 awiki 的取件面。** CLI 不持 bearer（见
-[cli.md](cli.md) §6：规范里 bearer 只是可选优化，且 MUST NOT 替代 `origin_proof`，
-所以 CLI 始终签名），而 awiki 只看 bearer。**沿用方法名的收益因此只剩"名字一致"**，
-不能再说成"同一个 `connectx` 对两个服务都能用"。方法名与参数形状以本文为准。
+结论：**本仓库的命令行客户端够不着 awiki 的取件面。** 它不持 bearer（规范里 bearer 只是
+可选优化，且 MUST NOT 替代 `origin_proof`，所以客户端始终签名），而 awiki 只看 bearer。
+**沿用方法名的收益因此只剩"名字一致"**，不能说成"同一个客户端对两个服务都能用"。
+方法名与参数形状以本文为准。
 
 ### 9.3 方法与参数形状
 
-写在这里是因为两边都要实现它：`packages/service` 实现它，
-`packages/cli` 的 `msg inbox` / `show` / `read` 调用它。`params.body` 就是下表那一列。
+写在这里是因为服务端要按它实现。`params.body` 就是下表那一列。
 
 | 方法 | `body` | 结果 |
 |---|---|---|
-| `inbox.get` | `{limit?, skip?, include_read?, device_id?}`，`limit` 默认 20 | `{messages: [...], total, has_more}` |
-| `inbox.mark_read` | `{message_ids: [...]}` | `{updated_count, message_ids, read_at}` |
-| `message.get_batch` | `{message_ids: [...], device_id?}`，≤ 100 且不重复 | `{items: [{message_id, message}], unavailable: [...]}` |
 | `direct.get_history` | `{peer_did, since_seq?, limit?}` | `{messages: [...], has_more}` |
 | `sync.delta` | `{since, limit?, device_id?}` | `{messages: [{seq, method, params}], next_since, has_more}` |
+
+**这张表 2026-10-03 从五行减到两行。** 另外三条（`inbox.get` / `inbox.mark_read` /
+`message.get_batch`）随读侧搬回本地一起退场（用户裁定；落地理由见
+[`rpc/inbox.ts`](../../packages/service/src/rpc/inbox.ts) 的抬头与
+[cli.md](cli.md) §1）：读本地之后 `inbox.get` 与 `message.get_batch` 由本地查询取代，
+`inbox.mark_read` 由本地那次写取代（[client-messages.md](client-messages.md) §8.5），
+三者都没有调用者了。
+
+**留下 `sync.delta` 不是"留一条看看"。** 它是补齐，而补齐这件事只有服务端做得了——本地库
+是记录之源，但"服务端手上还有哪些客户端没搬走的投递"这个问题的答案不在客户端手里。
+`msg fetch` 与 `msg listen` 的回填都走它，所以它是这一族里**唯一必须存在**的成员。
+
+删掉那三条不是把功能丢掉：方法表（`rpc/methods.ts` 的 `METHODS`）同时驱动分发与对外的
+能力面，所以删掉它们的 spec，`/.well-known` 与 `anp.get_capabilities` 就不再宣告它们——
+客户端不会看到一条答不了的方法。这是"别让读 = 本地与服务端还在答 `inbox.get` 同时为真"
+那条要求的落点。
 
 `device_id` 是 P5 之后加的第三列，**选填**，语义见 [e2ee-direct.md](e2ee-direct.md) §4：
 一台设备只能读到账号级那一批加上**投给它的**那一批（§10.7.1 L1407 的读侧）。**缺席不是
 "没有限制"**，是"没声明自己是谁"——那样就只有账号级的那批。订阅路的 `stream.auth` 早
 就是按这个规则推的，拉取这一侧跟上之后，同一条信箱的两半才说得出一致的答案。
-`inbox.mark_read` 没有这一项：已读状态是账号级的，它不是交付。
 
 表里是 `POST /anp-im/rpc` 上**可达**的那几个。流自己的两个方法
 （`stream.auth` / `stream.ack`，各自的 Profile 是 `x_agentx.stream.v1`）不在其中，因为
@@ -796,40 +812,23 @@ Profile"的答案，混进一个 `x_` 值就把它变成另一个问题了。扩
 [realtime.md](realtime.md) §5.1），而 `peer_did` 问的是**一个会话里**的历史。
 "会话内第 N 条"这个数本服务手上没有，造一个（按 `created_at` 排名？）会得到一个
 在不同实现间对不上的私有游标，正是 `sync.delta` 的 `seq` 已经做对的事。
-所以 v1 不发这个方法，也**不用 `inbox.get` 的 `skip` 顶替**：`skip` 是**时间序偏移**，
-会话之外的新消息落进来会让它错位——那不是游标，是页码。
-实现一个还在犹豫用的东西，不如先让 `inbox.get` + `message.get_batch` 把这一半跑顺。
+所以 v1 不发这个方法，也**不用时间序偏移顶替**——那不是游标，是页码。
+
+**这条挂着是对的，而且有本地那一半接着。** "会话级历史"在本地库成为记录之源之后由
+**本地查询**回答更自然，`msg history <peer_did>` 就是它（客户端按 peer DID 取一条线、
+正序），压根不经过这里。所以挂着不是缺口，是分工。
 
 `sync.delta` 的每一项就是订阅路会推的那一帧，原样（`method` 是
 `direct.incoming` / `group.incoming` / `group.state_changed` / `group.e2ee.notice`，
 `params` 是 §8.2 那个形状），外加它被分配的**交付序号** `seq`。这样补齐与实时两条路
 在客户端汇成同一个渲染器——[realtime.md](realtime.md) §5.5 说明为什么实时帧上不需要带 `seq`。
 
-`inbox.get` 的每一行就是 `direct.send` 的 `body` 加上投递元数据，并**必须**带：
-
-```
-message_id         # 与 `id` 同值；`message.get_batch` 收的就是它
-sender_did / recipient_did
-content_type
-direction          # "incoming" / "outgoing"，按 sender_did 与会话主人的关系算
-created_at
-read_at            # 未读为 null
-```
-
-**`message.get_batch` 收 `message_ids`，不是 awiki 的 `event_ids`。** 这一处是**故意**偏离：
-`event_id` 是服务端同步日志的内部标识符，`inbox.get` 从不返回它，于是
-`connectx msg show <id>` 拿 `msg inbox` 打印出来的 id 根本调不动 awiki 那个形状——
-一个命令的第一个参数取不到第二个命令给的输出，这不是兼容性差异，是断链。
-改收 `message_id` 之后，`msg show` 的参数就是 `msg inbox` 打出来的那个 `id`。
-
-**`--all` 不是一个新的参数形状。** `connectx msg read --all` 的语义是"把此刻未读的全部
-标为已读"，实现是先 `inbox.get`（`include_read=false`）翻页取齐，再把这些 id 交给
-`inbox.mark_read`。这样"标记"这一步永远作用在**明确列举过的 id** 上，
-落在两次调用之间的新消息不会被静默吞掉。
+**`deliveries` 一条都不删，但 `sync.delta` 只答最近 30 天。** 保留契约与那个可读窗口是两件
+不同的事，逐字写在 §7 的 `deliveries` 建表处与 §14 的 `AGENTX_DELIVERY_READ_WINDOW_MS`。
 
 P5 的 **Mailbox** 不是这条路。Mailbox 是范围为 `(recipient_did, recipient_device_id)` 的
 **不透明密文队列**，不持有 Ratchet 状态，**不是群/私聊历史**。
-E2EE 会话里的取件走 Mailbox，明文历史走 `inbox.get`。两者别混。
+E2EE 会话里的取件走 Mailbox，明文的补齐走 `sync.delta`，本地历史走本地库。三者别混。
 
 ### 9.4 通讯录扩展面：`x_agentx.contacts.v1`
 

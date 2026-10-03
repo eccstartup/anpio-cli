@@ -4,7 +4,7 @@ layout: home
 hero:
   name: AgentX
   text: ANP 消息层
-  tagline: connectx 命令行 + AgentXAgent ANPMessageService。设计先行，实现逐块落地。
+  tagline: agentx-cli 命令行 + AgentXAgent ANPMessageService。设计先行，实现逐块落地。
   actions:
     - theme: brand
       text: 从服务端开始
@@ -18,8 +18,8 @@ features:
     details: 方法面、存储、取件流与联邦。规范 I/O 是本模块唯一的对外形状。
     link: /docs/design/message-service
     linkText: message-service
-  - title: 命令面 · connectx
-    details: CLI 是薄壳：消息层不出现在命令面上；兼容 CAIP-10 的链上账户身份接入。
+  - title: 命令面 · agentx-cli
+    details: Rust 客户端。薄壳判据、与服务端的分工、退出码契约——命令面本身以 `--help` 为准。
     link: /docs/design/cli
     linkText: cli
   - title: 实时接收 · msg listen

@@ -1,28 +1,29 @@
 # ANPMessageService
 
-ANP（Agent Network Protocol）消息层的**客户端 + 服务端**实现：一个命令行客户端
-`connectx`，一个可自建的消息服务 `AgentXAgent`。
+ANP（Agent Network Protocol）消息层的实现：一个可自建的消息服务 `AgentXAgent`，以及它
+依赖的协议原语库。
 
-## 三块 + 一个测试包
+## 两块
 
 | 包 | 产物 | 角色 |
 |---|---|---|
 | `packages/core` | `@agentx/core` | 协议原语：DID 组合、RFC 9421 签名与验签、密钥解析、CAIP-10 身份、JCS 规范化 |
-| `packages/cli` | `connectx` | 命令行客户端：身份、登录、收发消息 |
 | `packages/service` | `agentx` | ANPMessageService：接收、存储、推送、取件，群组与附件 |
 
-`core` 不含传输与进程，`cli` 与 `service` 都建在它上面。
+`core` 不含传输与进程，`service` 建在它上面。
 
-`packages/e2e` 是第四个包，只装测试：它把 `connectx` 的命令函数对着一个真跑起来的
-`AgentXAgent` 跑，中间是真 HTTP、真签名、真 WebSocket。它**不产出任何东西**，只
-回答一个别处回答不了的问题——这两块拼起来还成立吗。`npm run test:e2e`。
+**客户端不在这里。** 命令行客户端是 Rust 的 `agentx-cli`，住在 [`rust/`](rust/)，
+以 [`anp`](https://crates.io/crates/anp) crate 发布。本仓库曾经有一个 TypeScript 的客户端
+（`packages/cli`，二进制名 `connectx`），2026-10-03 用户裁定**退役**：读搬到本地、服务端那三条
+读方法随之摘掉之后，它没有剩下的用处，而且两份客户端意味着签名、规范化、DID 解析各存在两遍。
+它连同只为驱动它而存在的测试包 `packages/e2e` 一起删掉了。
 
 ## 两处服务
 
 ANP 里有两个可以被"自己搭一个"的服务，本仓库做的是第二个：
 
 - **DID Service** —— 托管 `did.json`、发号（handle）。独立部署，不属于本仓库。
-  `connectx` 是它的**客户端**（`did register` / `did resolve` / `did update`）。
+  `agentx-cli` 是它的**客户端**（`did register` / `did resolve` / `did update`）。
 - **ANPMessageService** —— 接收并投递 agent 之间的消息。**`AgentXAgent` 就是它。**
 
 两者分开部署，**分工是清楚的：DID Service 只管身份，本服务承载社交应用**（2026-10-02 的
@@ -42,10 +43,10 @@ npm run build
 # 起一个消息服务（全部配置走环境变量，没有命令行旗标）
 AGENTX_LISTEN=127.0.0.1:8787 node packages/service/dist/main.js
 
-# 另开一个终端：备一个身份，发一条消息，再取回来
-npx connectx did create
-npx connectx msg send --to did:wba:... --text "hello"
-npx connectx msg inbox
+# 另开一个终端：备一个身份，发一条消息，再取回来（客户端在 rust/ 下）
+cargo run -p agentx-cli -- did create
+cargo run -p agentx-cli -- msg send --to did:wba:... --text "hello"
+cargo run -p agentx-cli -- msg inbox
 ```
 
 `msg send` 返回成功表示**已进入对方入口服务的处理边界**，不表示对方已读。
@@ -61,8 +62,7 @@ npm run docs:build    # 构建静态站点
 ```
 
 这个目录是一个自包含的 VitePress 站点，部署在 Vercel 上，项目的 Root Directory 指向
-`vercel/`。`connectx --help` 每条 `See:` 行指的就是这个站——那条链接由 `help.test.ts`
-的第四条门禁守着，改文档页名会让它红。
+`vercel/`。`agentx-cli --help` 每条 `See:` 行指的就是这个站。
 
 ## 开发设计文档
 
