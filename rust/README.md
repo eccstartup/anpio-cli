@@ -116,10 +116,11 @@ cargo run --manifest-path rust/Cargo.toml -- discover http://127.0.0.1:8787
   在服务端回 `accepted: true` **之后**写，`message_id` 就是 `--operation-id` 那个值。
   留不下只是 stderr 一句话——信已经发出去了，一个满盘不该让脚本以为没发成。
   `msg send` 两个本机身份**双向** `direct.send` 跑通（两边都回 `accepted: true`）；
-  `inbox` / `show` / `read` 是 `x_agentx.inbox.v1` 扩展面，仅实现规范的对端回 `-32601`
-  是**正确的负结果**（cli.md §5），不是缺陷：它报成 `unsupported_extension` 并退出 1，
+  `msg fetch` 与 `msg listen` 走的是 `x_agentx.inbox.v1` 扩展面（`fetch` 用 `sync.delta`、
+  `listen` 用 `stream.*`），仅实现规范的对端回 `-32601` 是**正确的负结果**（cli.md §5），
+  不是缺陷：它报成 `unsupported_extension` 并退出 1，
   与"对端拒绝了"（`message_send_failed`）分开——两句话要能分开，脚本才分得出"该换个对端"
-  和"这次没成"。`msg listen` 的握手同理。这两条各有单测咬住，真主机那半在
+  和"这次没成"。这两条各有单测咬住，真主机那半在
   `scripts/e2e.sh --with-awiki` 里断言。
 - **`contacts list | add | set-remark | remove | resolve`** —— 名字 ↔ DID 那一层（TODO6 §3）。
   表不在本地文件里，在**本仓 `packages/service` 的库**里（`x_agentx.contacts.v1`），
@@ -150,6 +151,16 @@ cargo run --manifest-path rust/Cargo.toml -- discover http://127.0.0.1:8787
   终端看到的东西一个字不变；写失败只在 stderr 说一句、不退出——那一行的游标没有前进，
   下次重连服务端会重放。P6 的 §12 帧走**设备队列**，没有交付号，所以它只落行、不动游标。
   文件明文 0600，**按密钥对待**（TODO4 §E）：没有导出命令，备份它就是备份聊天记录。
+- **读那一侧：`messages.db` 的读，与 `msg fetch`** —— `inbox` / `history` / `show` 都只有
+  `MessageStore` 的查询，**一个连接都不开**：`open_read_only` 不解析服务、不建文件，
+  真没有就答"这儿还没有"。所以这一族的**可断言行为**是断网照答（e2e 里真把服务端杀掉再读
+  一次）。`msg fetch` 是唯一联网的那条，而且它是一次**写**：`sync.delta` 的每条 entry
+  本来就是流会推的那个通知，`decode_message` 把它变成监听会看到的那一帧，
+  `records_from` + `MessageStore::record` 是**监听自己那条写入路径**——一份映射，
+  两半才不会对"什么算一条投递"各说各话。幂等是双重的：去重键
+  `(conversation, sender, message_id)` 管行、单调游标管序。搬不回来的（服务端裁掉的、
+  设备队列过期的、换钥后挂在旧 DID 下的、以及它没有 MLS 接收侧解不开的 P6 密文）
+  **点名说清**，不假装本地就是全部。
 - **`group create | info | members | join | leave | send | update-profile | set-remark`** —— P4 `anp.group.base.v2`。
   `src/group.rs` 放策略逻辑（§7.1 的推荐策略、`--policy` 的浅合并、封闭集合校验）。
   `update-profile --name` 改的是**群自己的名字** `group_profile.display_name`（§7.4），
@@ -278,14 +289,28 @@ tests/cli_surface.rs` 里逐字列着今天每一个页面，删一个或改一�
 
 ### `msg`
 
+**读这一族读的是本地。** `msg inbox` / `msg history` / `msg show` 打开的是这台机器上的
+`messages.db`，**不是服务端**，所以服务端关着它们照样答（2026-10-03 用户裁定"读聊天记录
+就是读本地，远程是 `fetch`"；完整的重画在
+[client-messages.md](../docs/design/client-messages.md) §8）。`msg inbox` 的名字没变，
+**变的是它回答的问题**：从"服务端有什么"变成"我有什么"。要联网的是**另一条**命令
+`msg fetch`，而且它是一次**写**（把服务端**还有的**搬进本地库）。
+
 | 命令 | 位置参数 | 旗标（默认值） |
 | --- | --- | --- |
 | `msg send` | — | `--to <DID\|NAME>`（必填）、`--text` 与 `--body` **二选一**、`--content-type`（`--text` 缺省 `text/plain`，`--body` 缺省 `application/json`）、`--operation-id`、`--json`、`--agent`、`--profile` |
 | `msg caps` | `<DID>` | `--json` |
-| `msg inbox` | — | `--limit <N>`（20）、`--include-read`、`--json`、`--agent`、`--profile` |
+| `msg inbox` | — | `--limit <N>`（20）、`--unread`、`--json`、`--agent`、`--profile` |
+| `msg history` | `<PEER_DID>` | `--limit <N>`（20）、`--json`、`--agent`、`--profile` |
 | `msg show` | `<MESSAGE_ID>` | `--json`、`--agent`、`--profile` |
 | `msg read` | `[MESSAGE_ID]…` 或 `--all` | `--all`、`--json`、`--agent`、`--profile` |
+| `msg fetch` | — | `--since <SEQ>`、`--limit <N>`（100）、`--json`、`--agent`、`--profile` |
 | `msg listen` | — | `--device <ID>`（缺省=本机 `agent/profile`）、`--since <SEQ>`、`--ack`、`--once`、`--json`、`--agent`、`--profile` |
+
+`msg history` 要的是**一个 DID**，不是一个名字：名字只活在服务端的通讯录里，收名字就等于
+让这条读命令联网。手上有名字就先 `contacts resolve`。同理，`msg read` 是**本地写**——
+已读状态只有**一个**归属，就在这一台机器的 `messages.db` 里，所以服务端的
+`inbox.mark_read` 不再有客户端（TODO7 §4，2026-10-03 裁定）。
 
 失败时说什么：
 
@@ -298,18 +323,27 @@ tests/cli_surface.rs` 里逐字列着今天每一个页面，删一个或改一�
 - **`--to` 是名字而名字有歧义**：退出 1，**逐个列出**候选的 DID 与备注，不挑"拼写更准"的
   那个。所以 `Alice` 与 `alice` 同时在册时，`msg send --to Alice` 不会猜。
 - **`msg inbox --limit 0`**（或任何不能解析成正整数的值）：`--limit must be a positive
-  integer (got "0")`。默认 20。
-- **`msg show <id>` 这个 id 不在收件箱里**：`no message <id> in this inbox`，退出 1。不渲染
-  成"空收件箱"——"这条消息不存在"与"我用错了 id"的观感在别处是一样的，所以要分开。
+  integer (got "0")`。默认 20，`msg fetch` 与 `msg history` 同理。
+- **`msg history <name>` 给的是名字**：退出 1，并指到 `contacts resolve`。本地库按 DID 归档，
+  而查名字要读服务端的册子——这条命令不联网。
+- **`msg show <id>` 这台机器上没有这一行**：`no message <id> in the local record`，退出 1，
+  并说明 `msg fetch` 补的是"服务端**还有的**"。不渲染成"空收件箱"——"这条消息这台机器
+  没见过"与"我用错了 id"的观感在别处是一样的，所以要分开。
 - **`msg read` 的两种说错**：既没给 `<message_id>` 也没有 `--all` →
   `missing required argument <message_id>, or --all`；两个都给 →
   `--all and <message_id> are two spellings of the same thing; pass one`。
-  `--all` 点的是**列出来的那些** id（列表与写入之间新到的消息仍是未读，这是对的）。
-- **扩展面对只实现规范的对端**：`inbox` / `show` / `read` 报 `unsupported_extension`，退出 1，
-  并说清这是实现扩展、规范未定义。**这是正确答案**，不是缺陷（上文那条）。
+  `--all` 落的是**问的那一刻**未读的那些行。标不动的 id（已读、不在本地、或自己发出去的
+  那些）不计数：报成"标了"会让这个数字什么都不说明。
+- **`msg fetch` 断网**：明确失败并说清它是**要联网的那一条**，而不是装作"本地就是全部"。
+  它对**只实现规范**的对端报 `unsupported_extension`（`sync.delta` 是实现扩展、规范未定义），
+  退出 1，**这是正确答案**不是缺陷。
+- **`msg fetch` 搬不回来的**：已经 ack 掉又被服务端裁掉的、设备队列过期了的、换钥后仍挂在
+  旧 DID 下的，都搬不回来。P6 的密文帧尤其——这台命令没有 MLS 接收侧，解不开，所以它会
+  **点名**说哪些没取，而不是把密文当成正文记下来。
 - **`msg listen`**：Ctrl-C 退出 **0**；掉线按 2s→30s 退避重连；`--once` 补拉完就退出 0；
   `--json` 强制 NDJSON（不给时"管道也是机器"）。不支持 stream 的对端在握手上就终止，
   报 `unsupported_extension` 而**不重连**——答案是同一个，重连只会看起来像在工作。
+  `--ack` 除了给服务端发 `stream.ack`，还**把刚落的那一行标成本地已读**（已读只有一个归属）。
 
 ### `group`（含 `group e2ee`）
 

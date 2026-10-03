@@ -33,18 +33,21 @@ use agentx::identity::{
     DEFAULT_SESSION_TTL_SECONDS,
 };
 use agentx::message::{
-    build_message_request, call, call_device, call_extension, call_group, device_of, did_host, did_to_url,
+    build_message_request, call, call_device, call_extension, call_group, decode_message, device_of,
+    did_host, did_to_url,
     discover, document_in_crate_form, document_url, group_e2ee_security_profile, http_client, now_rfc3339,
     open_channel, open_channel_for, parse_capabilities, payload_from, payload_of, policy_for, post_message,
     resolve_did_document, rejection, run_listen, uuid_v4, view_for, websocket_connect, AnpMeta,
-    AnpResponse, AnpTarget, CallRequest, Channel, ConnectFn, ListenArgs, ListenDeps, ResolvePolicy,
+    AnpResponse, AnpTarget, CallRequest, Channel, ConnectFn, ListenArgs, ListenDeps, ListenEvent,
+    ResolvePolicy,
     Sender, TargetKind, CONTACTS_LIST, CONTACTS_PROFILE, CONTACTS_PUT, CONTACTS_REMOVE,
-    CORE_BINDING, DIRECT_PROFILE, DIRECT_SEND, DID_SUPERSEDED,
+    CORE_BINDING, DELTA_PAGE, DIRECT_PROFILE, DIRECT_SEND, DID_SUPERSEDED,
     GET_CAPABILITIES, GET_KEY_PACKAGE, GROUP_CREATE, GROUP_E2EE_ADD, GROUP_E2EE_CREATE,
-    GROUP_E2EE_PROFILE, GROUP_E2EE_REMOVE, GROUP_E2EE_SEND, GROUP_GET_INFO, GROUP_JOIN,
+    GROUP_E2EE_PROFILE, GROUP_E2EE_REMOVE, GROUP_E2EE_SECURITY_PROFILE, GROUP_E2EE_SEND,
+    GROUP_GET_INFO, GROUP_JOIN,
     GROUP_LEAVE, GROUP_PROFILE, GROUP_REMARKS_LIST, GROUP_REMARKS_PROFILE, GROUP_REMARKS_PUT,
-    GROUP_REMARKS_REMOVE, GROUP_SEND, GROUP_UPDATE_PROFILE, INBOX_GET, INBOX_MARK_READ,
-    INBOX_PROFILE, MESSAGE_GET_BATCH, PUBLISH_KEY_PACKAGE, TRANSPORT_PROTECTED,
+    GROUP_REMARKS_REMOVE, GROUP_SEND, GROUP_UPDATE_PROFILE, INBOX_PROFILE,
+    PUBLISH_KEY_PACKAGE, SYNC_DELTA, TRANSPORT_PROTECTED,
 };
 use agentx::mls::{
     abort_commit, application_plaintext, device_signing_key, finalize_commit, generate_key_package,
@@ -52,7 +55,8 @@ use agentx::mls::{
     CreateInput, KEY_PACKAGE_VALID_DAYS, RemoveInput, SendInput,
 };
 use agentx::messages::{
-    Conversation, MessageStore, Record as MessageRecord, RecordingView,
+    records_from, Conversation, Direction, MessageStore, Record as MessageRecord, RecordingView,
+    StoredMessage,
 };
 use anp::group_e2ee::v2_models::V2GroupKeyPackage;
 use anp::group_e2ee::GROUP_CIPHER_CONTENT_TYPE;
@@ -499,20 +503,44 @@ enum MsgCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Show this identity's inbox (extension `inbox.get`).
+    /// Show what this identity has, newest first — read from the local store.
+    ///
+    /// Reads `messages.db`, **not the service**: this answers with the network down
+    /// (client-messages.md §8.1). It is the same question `msg inbox` has always asked, with
+    /// the subject changed from "what does the service hold" to "what do I have" — what the
+    /// service still holds and this device does not is what `msg fetch` is for.
     Inbox {
-        /// How many rows to ask for (default 20).
+        /// How many rows to show (default 20).
         #[arg(long, value_name = "N")]
         limit: Option<String>,
-        /// Include the messages that have already been read.
-        #[arg(long = "include-read")]
-        include_read: bool,
+        /// Only the ones not read yet. Read state is local (client-messages.md §4), so this
+        /// needs no network either.
+        #[arg(long)]
+        unread: bool,
         #[arg(long)]
         json: bool,
         #[command(flatten)]
         own: OwnIdentity,
     },
-    /// Show one message by id (extension `message.get_batch`).
+    /// Show one conversation, oldest first — read from the local store.
+    ///
+    /// A conversation and an inbox are two questions: `msg inbox` is every conversation on one
+    /// timeline, this is a single thread in the order it was said. Neither goes online.
+    History {
+        /// The other end: a DID, never a name. Names live in the service's address book, and
+        /// resolving one here would make a read go online (client-messages.md §8.2) — use
+        /// `contacts resolve` first if you have a name.
+        #[arg(value_name = "PEER_DID")]
+        peer_did: String,
+        /// How many of the newest rows to show (default 20).
+        #[arg(long, value_name = "N")]
+        limit: Option<String>,
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        own: OwnIdentity,
+    },
+    /// Show one message by id — read from the local store.
     Show {
         #[arg(value_name = "MESSAGE_ID")]
         message_id: String,
@@ -521,7 +549,10 @@ enum MsgCommand {
         #[command(flatten)]
         own: OwnIdentity,
     },
-    /// Mark messages as read (extension `inbox.mark_read`).
+    /// Mark messages as read — a local write.
+    ///
+    /// Read state has one home, this device's `messages.db` (client-messages.md §4,
+    /// 2026-10-03), so this is not a service call and works offline.
     Read {
         #[arg(value_name = "MESSAGE_ID")]
         message_ids: Vec<String>,
@@ -529,6 +560,27 @@ enum MsgCommand {
         /// arriving between the listing and the write stays unread.
         #[arg(long)]
         all: bool,
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        own: OwnIdentity,
+    },
+    /// Bring what the service still holds into the local store.
+    ///
+    /// **The one read command that goes online**, and it is a *write*: it lands the delivery
+    /// frames this device has not applied and moves the local cursor with them, through the
+    /// same `MessageStore::record` the listener uses (client-messages.md §8.3). Called twice it
+    /// changes nothing the second time, and with no `--since` it resumes where this device
+    /// stopped. What it cannot bring back — a delivery the service has dropped, or a P6 frame
+    /// whose device-queue entry expired — it cannot bring back, and says so.
+    Fetch {
+        /// Start from this delivery number instead of the stored cursor. A debugging
+        /// override; the ordinary call resumes where this device stopped.
+        #[arg(long, value_name = "SEQ")]
+        since: Option<u64>,
+        /// How many to ask for per page (default 100).
+        #[arg(long, value_name = "N")]
+        limit: Option<String>,
         #[arg(long)]
         json: bool,
         #[command(flatten)]
@@ -554,8 +606,8 @@ enum MsgCommand {
         /// override for this run only; it is not written back.
         #[arg(long, value_name = "SEQ")]
         since: Option<u64>,
-        /// Confirm each message as it is printed: `inbox.mark_read` (read state) and
-        /// `stream.ack` (this device's cursor). Off by default — an unconfirmed message is
+        /// Confirm each message as it is printed: `stream.ack` (this device's cursor) here,
+        /// and the local row is marked read. Off by default — an unconfirmed message is
         /// replayed on reconnect, an over-confirmed one is gone.
         #[arg(long)]
         ack: bool,
@@ -979,8 +1031,6 @@ enum GroupE2eeCommand {
     },
 }
 
-/// How many unread ids `msg read --all` asks for at a time.
-const ALL_PAGE: u64 = 100;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -1053,21 +1103,33 @@ async fn main() -> anyhow::Result<()> {
             MsgCommand::Caps { did, json } => cmd_msg_caps(&did, json, &allow_private).await,
             MsgCommand::Inbox {
                 limit,
-                include_read,
+                unread,
                 json,
                 own,
-            } => cmd_msg_inbox(&own, limit, include_read, json, &allow_private).await,
+            } => cmd_msg_inbox(&own, limit, unread, json),
+            MsgCommand::History {
+                peer_did,
+                limit,
+                json,
+                own,
+            } => cmd_msg_history(&own, &peer_did, limit, json),
             MsgCommand::Show {
                 message_id,
                 json,
                 own,
-            } => cmd_msg_show(&own, &message_id, json, &allow_private).await,
+            } => cmd_msg_show(&own, &message_id, json),
             MsgCommand::Read {
                 message_ids,
                 all,
                 json,
                 own,
-            } => cmd_msg_read(&own, message_ids, all, json, &allow_private).await,
+            } => cmd_msg_read(&own, message_ids, all, json),
+            MsgCommand::Fetch {
+                since,
+                limit,
+                json,
+                own,
+            } => cmd_msg_fetch(&own, since, limit, json, &allow_private).await,
             MsgCommand::Listen {
                 device,
                 since,
@@ -2827,11 +2889,14 @@ async fn cmd_msg_caps(did: &str, json: bool, allow_private: &[String]) -> anyhow
     Ok(())
 }
 
-// ---- msg inbox / show / read ---------------------------------------------------
+// ---- msg inbox / history / show / read: the local read family -------------------
 
-/// Open the identity in use and resolve its own message service, in one place: all three
-/// read commands need exactly this pair, and none of them should be able to disagree about
-/// which identity they read.
+/// Open the identity in use and resolve its own message service.
+///
+/// The `msg` commands that go online need exactly this pair. The read family
+/// (`inbox` / `history` / `show`) deliberately does **not** call it: reading is local
+/// (client-messages.md §8.1), so routing a read through here would make the one family that
+/// has to answer with the network down the one that cannot.
 async fn own_channel(
     own: &OwnIdentity,
     allow_private: &[String],
@@ -2843,7 +2908,18 @@ async fn own_channel(
     Ok((client, channel))
 }
 
-/// message-service.md §9.3: `inbox.get` takes `limit` (default 20), `skip`, `include_read`.
+/// The local record for the identity in use, opened **for reading**.
+///
+/// `open_read_only`, not `open`: a read has no discovered `serviceEndpoint` to key the cursor
+/// with, and must not create a file that is not there. "Nothing here" is the right answer for
+/// an identity that has never listened, and it is an answer — not an error (design §8.1).
+fn local_store(own: &OwnIdentity) -> anyhow::Result<MessageStore> {
+    Ok(MessageStore::open_read_only(&own.location()?)?)
+}
+
+/// How many rows to show. The default is the one the service-side `inbox.get` took (20), kept
+/// so the two readings of this flag do not change under anyone; a local read has no
+/// server-side ceiling to respect and no paging to do.
 fn limit_of(raw: Option<&str>) -> anyhow::Result<u64> {
     let Some(raw) = raw else { return Ok(20) };
     match raw.parse::<u64>() {
@@ -2852,83 +2928,155 @@ fn limit_of(raw: Option<&str>) -> anyhow::Result<u64> {
     }
 }
 
-async fn cmd_msg_inbox(
-    own: &OwnIdentity,
-    limit: Option<String>,
-    include_read: bool,
-    json: bool,
-    allow_private: &[String],
-) -> anyhow::Result<()> {
-    let (client, channel) = own_channel(own, allow_private).await?;
-
+/// A stored row in the shape the renderer already speaks: the service's own `inbox.get` row.
+///
+/// One renderer for both sources (TODO5 §7.3). A message read out of `messages.db` and the
+/// same message read off the service must *look* the same, or the move to a local read would
+/// have changed the output as a side effect. The keys are the service's, which is why the
+/// outgoing arm has to synthesise `recipient_did` — the file keys a row by the peer it is
+/// filed under, and that peer is the recipient when we sent it.
+fn row_of_stored(message: &StoredMessage) -> Value {
+    let peer = match &message.conversation {
+        Conversation::Group { group_did } => group_did,
+        Conversation::Direct { peer_did } => peer_did,
+    };
+    let direction = match message.direction {
+        Direction::Incoming => "incoming",
+        Direction::Outgoing => "outgoing",
+    };
+    // §7.4's two arms, kept apart here as they are in the file: a `payload` reads as JSON, a
+    // `text` reads as text, and a row with neither says so (`content_of`).
     let mut body = Map::new();
-    body.insert("limit".to_string(), json!(limit_of(limit.as_deref())?));
-    if include_read {
-        body.insert("include_read".to_string(), json!(true));
+    match (&message.payload, &message.text) {
+        (Some(payload), _) => {
+            body.insert("payload".to_string(), payload.clone());
+        }
+        (None, Some(text)) => {
+            body.insert("text".to_string(), json!(text));
+        }
+        (None, None) => {}
     }
-    let result = call_extension(&client, &channel, INBOX_GET, INBOX_PROFILE, body).await?;
+    json!({
+        "message_id": &message.message_id,
+        "sender_did": &message.sender_did,
+        "recipient_did": match message.direction {
+            Direction::Outgoing => json!(peer),
+            Direction::Incoming => Value::Null,
+        },
+        "content_type": &message.content_type,
+        "direction": direction,
+        // The service's own time where there is one, and otherwise when *this device* wrote
+        // the row down. A message the service never numbered (a §12 group frame) has only the
+        // second, and it is a real answer rather than an empty field.
+        "created_at": message.accepted_at.as_deref().unwrap_or(&message.received_at),
+        "read_at": &message.read_at,
+        "body": Value::Object(body),
+    })
+}
 
+/// Print stored rows the way the read family has always printed them.
+///
+/// `empty` is the sentence for no rows, and it is a parameter because "nothing here yet" and
+/// "nothing unread" are different facts and only the caller knows which it asked for.
+fn print_stored(rows: &[StoredMessage], json: bool, empty: &str) -> anyhow::Result<()> {
+    let rendered: Vec<Value> = rows.iter().map(row_of_stored).collect();
     if json {
-        println!("{}", serde_json::to_string_pretty(&result)?);
-        return Ok(());
-    }
-    let rows = rows_of(&result, "messages");
-    if rows.is_empty() {
         println!(
             "{}",
-            if include_read {
-                "no messages"
-            } else {
-                "no unread messages; pass --include-read to see the rest"
-            }
+            serde_json::to_string_pretty(&json!({ "messages": rendered }))?
         );
         return Ok(());
     }
-    println!("{}", summary_of(&rows, &result));
-    for row in rows {
-        println!("{}", render_message(row).join("\n"));
-    }
-    Ok(())
-}
-
-async fn cmd_msg_show(
-    own: &OwnIdentity,
-    id: &str,
-    json: bool,
-    allow_private: &[String],
-) -> anyhow::Result<()> {
-    let (client, channel) = own_channel(own, allow_private).await?;
-
-    let mut body = Map::new();
-    body.insert("message_ids".to_string(), json!([id]));
-    let result = call_extension(&client, &channel, MESSAGE_GET_BATCH, INBOX_PROFILE, body).await?;
-
-    if json {
-        println!("{}", serde_json::to_string_pretty(&result)?);
+    let maps: Vec<&Map<String, Value>> = rendered.iter().filter_map(as_row).collect();
+    if maps.is_empty() {
+        println!("{empty}");
         return Ok(());
     }
-    let rows: Vec<&Map<String, Value>> = rows_of(&result, "items")
-        .into_iter()
-        .filter_map(|item| item.get("message").and_then(as_row))
-        .collect();
-    // `unavailable` is the peer's list of ids it could not resolve, and it is why this is
-    // reported rather than rendered as an empty inbox — a message that does not exist and one
-    // that was asked for under the wrong id look identical otherwise.
-    if rows.is_empty() {
-        anyhow::bail!("no message {id} in this inbox")
-    }
-    for row in rows {
+    // `has_more` is a word from the paged service read, and there is no service here: the
+    // summary is given a null result so it does not claim there is more than what is shown.
+    println!("{}", summary_of(&maps, &Value::Null));
+    for row in maps {
         println!("{}", render_message(row).join("\n"));
     }
     Ok(())
 }
 
-async fn cmd_msg_read(
+fn cmd_msg_inbox(
+    own: &OwnIdentity,
+    limit: Option<String>,
+    unread: bool,
+    json: bool,
+) -> anyhow::Result<()> {
+    let rows = local_store(own)?.recent(limit_of(limit.as_deref())?, unread)?;
+    print_stored(
+        &rows,
+        json,
+        if unread {
+            "nothing unread"
+        } else {
+            "nothing here yet — `msg fetch` brings in what the service still holds"
+        },
+    )
+}
+
+fn cmd_msg_history(
+    own: &OwnIdentity,
+    peer_did: &str,
+    limit: Option<String>,
+    json: bool,
+) -> anyhow::Result<()> {
+    // A DID, never a name. Names live in the **service's** address book, so accepting one
+    // would mean resolving it, and this command must answer with the network down
+    // (client-messages.md §8.2). `contacts resolve` is the command that goes and looks; this
+    // one says which command that is rather than quietly going online.
+    if !looks_like_a_did(peer_did) {
+        anyhow::bail!(
+            "{peer_did:?} is not a DID. The local record is filed by DID, and looking a name \
+             up would need the service's address book — run `agentx-cli contacts resolve \
+             {peer_did}` and pass the DID it prints"
+        )
+    }
+    let rows = local_store(own)?.conversation_with(peer_did, limit_of(limit.as_deref())?)?;
+    print_stored(
+        &rows,
+        json,
+        &format!("nothing with {peer_did} yet"),
+    )
+}
+
+fn cmd_msg_show(own: &OwnIdentity, id: &str, json: bool) -> anyhow::Result<()> {
+    let store = local_store(own)?;
+    let rows = store.find(id)?;
+    if json {
+        let rendered: Vec<Value> = rows.iter().map(row_of_stored).collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({ "messages": rendered }))?
+        );
+        return Ok(());
+    }
+    if rows.is_empty() {
+        // Two different facts, and the message has to say which: an id this device has never
+        // recorded (it was never fetched, or the service has since dropped it) is not the
+        // same as an id that does not exist. Only the first is something the caller can fix.
+        anyhow::bail!(
+            "no message {id} in the local record — `msg fetch` brings in what the service \
+             still holds, and never-fetched is not the same as never-sent"
+        )
+    }
+    for message in &rows {
+        let row = row_of_stored(message);
+        let Some(row) = as_row(&row) else { continue };
+        println!("{}", render_message(row).join("\n"));
+    }
+    Ok(())
+}
+
+fn cmd_msg_read(
     own: &OwnIdentity,
     ids: Vec<String>,
     all: bool,
     json: bool,
-    allow_private: &[String],
 ) -> anyhow::Result<()> {
     if all && !ids.is_empty() {
         anyhow::bail!("--all and <message_id> are two spellings of the same thing; pass one")
@@ -2936,76 +3084,199 @@ async fn cmd_msg_read(
     if !all && ids.is_empty() {
         anyhow::bail!("missing required argument <message_id>, or --all")
     }
-    let (client, channel) = own_channel(own, allow_private).await?;
-
-    let message_ids = if all {
-        unread_ids(&client, &channel).await?
+    let location = own.location()?;
+    // Writable, because this is the one read-family command that writes: read state lives
+    // here and nowhere else (design §4, 2026-10-03). `open_unsynced` rather than `open`,
+    // because marking a row read needs neither a resolved service nor a device — and it must
+    // not go online to get them, or the family §8.1 keeps offline would have one member that
+    // is not. It creates the file if there is none, which `open_read_only` would not, and
+    // that is right: `--all` over an identity with no record is a write of zero rows.
+    let mut store = MessageStore::open_unsynced(&location)?;
+    let (marked, count) = if all {
+        let changed = store.mark_all_read()?;
+        (Vec::new(), changed)
     } else {
-        ids
+        let marked = store.mark_read(&ids)?;
+        let count = marked.len() as u64;
+        (marked, count)
     };
-    if message_ids.is_empty() {
-        if json {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&json!({
-                    "updated_count": 0,
-                    "message_ids": [],
-                    "read_at": Value::Null,
-                }))?
-            );
-        } else {
-            println!("nothing unread");
-        }
-        return Ok(());
-    }
-
-    let mut body = Map::new();
-    let count = message_ids.len();
-    body.insert("message_ids".to_string(), json!(message_ids));
-    let result = call_extension(&client, &channel, INBOX_MARK_READ, INBOX_PROFILE, body).await?;
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&result)?);
+        // No `read_at` here. The store stamps each row with its own clock, and echoing a
+        // second reading of *this* clock would be a value that is not what was written —
+        // `msg show --json` carries the real one, per row.
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "updated_count": count,
+                "message_ids": marked,
+            }))?
+        );
         return Ok(());
     }
-    let updated = result
-        .get("updated_count")
-        .and_then(Value::as_u64)
-        .unwrap_or(count as u64);
-    field("marked read:", Some(&json!(updated)));
-    field("read at:", result.get("read_at"));
+    if count == 0 {
+        // Not an error: an id that is already read, or was never here, changes nothing, and
+        // saying "0" is more useful than a refusal that hides which of the two happened.
+        println!(
+            "{}",
+            if all { "nothing unread" } else { "nothing changed" }
+        );
+        return Ok(());
+    }
+    field("marked read:", Some(&json!(count)));
     Ok(())
 }
 
-/// Every unread id, paged. `--all` marks the ids that were LISTED, not "whatever is unread
-/// when the write lands": a message arriving between the two calls is left unread, which is
-/// the only reading of the flag that does not silently swallow one (message-service.md §9.3).
-async fn unread_ids(client: &reqwest::Client, channel: &Channel) -> anyhow::Result<Vec<String>> {
-    let mut ids = Vec::new();
-    let mut skip: u64 = 0;
+/// Bring in what the service still holds — the one read-family command that goes online.
+///
+/// It is a **write** (client-messages.md §8.3): each `sync.delta` entry is the notification
+/// the stream would have pushed, `decode_message` makes the frame the listener would have
+/// seen, and `records_from` → `MessageStore::record` is the listener's own write path. One
+/// mapping for one frame is what keeps the two halves from disagreeing about what a delivery
+/// is. Calling it twice changes nothing the second time: the dedupe key catches the rows and
+/// the cursor only moves forward (`record`).
+async fn cmd_msg_fetch(
+    own: &OwnIdentity,
+    since: Option<u64>,
+    limit: Option<String>,
+    json: bool,
+    allow_private: &[String],
+) -> anyhow::Result<()> {
+    let location = own.location()?;
+    let identity = Identity::load(&location)?;
+    let client = http_client()?;
+    let channel = open_channel(&client, &identity, allow_private).await?;
+    // The same device `msg listen` uses by default, so a fetch resumes exactly where a listen
+    // stopped. A different device is a different slice of the inbox, and this command has no
+    // `--device`: the record it writes to belongs to this identity *on this machine*.
+    let device = device_of(&channel.sender, None)?;
+    let mut store = MessageStore::open(
+        &location,
+        &identity,
+        &channel.endpoint.target.endpoint,
+        &device,
+    )?;
+
+    // Where to resume. The stored cursor is the answer unless the caller overrode it, and a
+    // record that has never applied anything starts at 0 — `sync.delta` is a "since" read, so
+    // 0 is "everything this device was ever sent".
+    let mut cursor = match since {
+        Some(explicit) => explicit,
+        None => store.applied_seq()?.unwrap_or(0),
+    };
+    let start = cursor;
+    let page_size = limit_of(limit.as_deref())?.min(DELTA_PAGE);
+
+    let mut applied = 0u64;
+    let mut replayed = 0u64;
+    let mut offline: Vec<String> = Vec::new();
     loop {
         let mut body = Map::new();
-        body.insert("limit".to_string(), json!(ALL_PAGE));
-        body.insert("skip".to_string(), json!(skip));
-        body.insert("include_read".to_string(), json!(false));
-        let page = call_extension(client, channel, INBOX_GET, INBOX_PROFILE, body).await?;
+        body.insert("since".to_string(), json!(cursor));
+        body.insert("limit".to_string(), json!(page_size));
+        body.insert("device_id".to_string(), json!(device));
+        let page = call_extension(&client, &channel, SYNC_DELTA, INBOX_PROFILE, body).await?;
 
-        let rows = rows_of(&page, "messages");
-        for row in &rows {
-            if let Some(id) = id_of(row) {
-                ids.push(id.to_string());
+        for entry in page.get("messages").and_then(Value::as_array).into_iter().flatten() {
+            let Some(row) = entry.as_object() else { continue };
+            let seq = entry.get("seq").and_then(Value::as_u64).unwrap_or(cursor);
+            let frame = json!({
+                "jsonrpc": "2.0",
+                "method": row.get("method"),
+                "params": row.get("params"),
+            });
+            // A §12 frame whose device-queue entry has expired is not in `deliveries` at all,
+            // but one that is still queued can arrive here — and this command has no MLS
+            // receiver, so it can neither decrypt it nor record the ciphertext as if it were
+            // the message. Named and skipped, not silently dropped: "what fetch cannot bring
+            // back it says so about" is the whole of §8.3's second half.
+            if is_group_e2ee_frame(&frame) {
+                if let Some(did) = group_did_of(&frame) {
+                    if !offline.contains(&did) {
+                        offline.push(did);
+                    }
+                }
+                continue;
+            }
+            let Some(message) = decode_message(&frame, seq) else { continue };
+            if let Some(record) = records_from(&ListenEvent::Message(message)) {
+                if store.record(&record)? {
+                    applied += 1;
+                } else {
+                    replayed += 1;
+                }
             }
         }
-        // A page that contributes nothing under `has_more` would repeat forever, so an empty
-        // page ends the walk whatever the flag says.
-        if page.get("has_more").and_then(Value::as_bool) != Some(true) || rows.is_empty() {
-            return Ok(ids);
+
+        if page.get("has_more").and_then(Value::as_bool) != Some(true) {
+            break;
         }
-        skip += rows.len() as u64;
+        // A page that does not move the cursor would repeat forever, and one that is empty
+        // while claiming more would too — the same guard `msg listen`'s backfill carries.
+        match page.get("next_since").and_then(Value::as_u64) {
+            Some(next) if next > cursor => cursor = next,
+            _ => break,
+        }
     }
+
+    let held = store.message_count()?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "applied": applied,
+                "replayed": replayed,
+                "since": start,
+                "next_since": cursor,
+                "held": held,
+                "unfetchable": offline,
+            }))?
+        );
+        return Ok(());
+    }
+    field("brought in:", Some(&json!(applied)));
+    if replayed > 0 {
+        // A replay is normal (the same frame pushed and fetched), so it is reported rather
+        // than hidden — otherwise "brought in: 0" on a second call would read as a failure.
+        field("already had:", Some(&json!(replayed)));
+    }
+    field("local cursor:", Some(&json!(cursor)));
+    field("held locally:", Some(&json!(held)));
+    if !offline.is_empty() {
+        println!(
+            "  {} not fetched: group-e2ee ciphertext needs `msg listen` to decrypt it, and \
+             the device queue may already have dropped it",
+            joined(&offline)
+        );
+    }
+    Ok(())
+}
+
+/// Is this notification P6's? The two `group.incoming` methods share a name (P4's plaintext
+/// one and §12's ciphertext one) and §12.5's security profile is the only thing on the wire
+/// that tells them apart — the same test the receiver makes, made here because this command
+/// has no receiver to make it.
+fn is_group_e2ee_frame(frame: &Value) -> bool {
+    frame
+        .get("params")
+        .and_then(|params| params.get("meta"))
+        .and_then(|meta| meta.get("security_profile"))
+        .and_then(Value::as_str)
+        == Some(GROUP_E2EE_SECURITY_PROFILE)
+}
+
+fn group_did_of(frame: &Value) -> Option<String> {
+    frame
+        .get("params")
+        .and_then(|params| params.get("meta"))
+        .and_then(|meta| meta.get("target"))
+        .and_then(|target| target.get("did"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 // ---- contacts (TODO6 §3) --------------------------------------------------------
+
 
 /// The whole book, as the identity in use has it.
 ///
@@ -3280,7 +3551,7 @@ async fn cmd_msg_listen(
         connect: websocket_connect_fn(),
         // Recording is a decorator, so the terminal still shows every event and the store is
         // never on the path that decides what to print.
-        view: Arc::new(RecordingView::new(store, view_for(options.json))),
+        view: Arc::new(RecordingView::new(store, view_for(options.json), options.ack)),
         abort: interrupt_signal(),
         // `rand::random::<f64>()` is `[0, 1)`, which is the range the jitter expects.
         random: Arc::new(rand::random::<f64>),

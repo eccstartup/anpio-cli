@@ -225,8 +225,39 @@ impl MessageStore {
         Ok(store)
     }
 
-    /// Bring the file up to [`SCHEMA_VERSION`], or refuse it.
+    /// Open the file for **writing**, without resolving a service first.
     ///
+    /// `msg read` is the caller: it writes one column and no delivery, so it needs neither an
+    /// `endpoint` nor a `device_id`, and it must not go online to get them (design §8.1). The
+    /// cursor those two key is untouched by such a write, which is why empty values here are
+    /// not a lie about which inbox this is — [`record`](Self::record) is the only thing that
+    /// reads them, and it is not called on this path.
+    ///
+    /// Creates the file if there is none, unlike [`open_read_only`](Self::open_read_only):
+    /// "mark everything read" over a record that does not exist yet is a write of zero rows,
+    /// not a missing record.
+    pub fn open_unsynced(location: &IdentityLocation) -> Result<MessageStore> {
+        let path = messages_path(location);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|err| {
+                AgentxError::MessageInvalid(format!("creating {}: {err}", parent.display()))
+            })?;
+        }
+        let conn = Connection::open(&path).map_err(|err| {
+            AgentxError::MessageInvalid(format!("opening {}: {err}", path.display()))
+        })?;
+        let mut store = MessageStore {
+            conn,
+            endpoint: String::new(),
+            owner_did: String::new(),
+            device_id: String::new(),
+        };
+        store.prepare()?;
+        restrict_permissions(&path);
+        Ok(store)
+    }
+
+    /// Bring the file up to [`SCHEMA_VERSION`], or refuse it.
     /// Refusing a **newer** file rather than writing into it is the service's own stance
     /// (`packages/service/src/storage/sqlite.ts`), copied because the failure it prevents is
     /// silent: a binary older than the file would write yesterday's columns into it.
@@ -381,6 +412,253 @@ impl MessageStore {
             .map_err(sql_err("counting messages"))?;
         Ok(count as u64)
     }
+
+    // ---- reading (design §8) ------------------------------------------------------------
+
+    /// Open the record **for reading**: no inbox, and nothing created.
+    ///
+    /// The opposite duties of [`MessageStore::open`], which is why this is a second constructor
+    /// rather than an argument on the first. A read never goes online (design §8.1), so it
+    /// cannot discover a `serviceEndpoint` and must not need one; and a read must not **write**,
+    /// so a record that is not there yet answers "nothing here" instead of being created.
+    /// `msg listen` is where a record gets built.
+    pub fn open_read_only(location: &IdentityLocation) -> Result<MessageStore> {
+        let path = messages_path(location);
+        // A file that is there but has no `messages` table is a record with no history — an
+        // interrupted first `Connection::open` leaves exactly that. It is answered as empty
+        // rather than upgraded, because upgrading writes and this path must not.
+        let empty = || -> Result<Connection> {
+            let conn =
+                Connection::open_in_memory().map_err(sql_err("opening an empty in-memory record"))?;
+            conn.execute_batch(SCHEMA).map_err(sql_err("building the schema"))?;
+            Ok(conn)
+        };
+        let conn = if path.exists() {
+            let conn = Connection::open(&path).map_err(|err| {
+                AgentxError::MessageInvalid(format!("opening {}: {err}", path.display()))
+            })?;
+            let version: i64 = conn
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .map_err(sql_err("reading the schema version"))?;
+            if version > SCHEMA_VERSION {
+                return Err(AgentxError::MessageInvalid(format!(
+                    "this messages.db was written by a newer agentx-cli (schema {version}, this \
+                     build reads {SCHEMA_VERSION}) — upgrade to read it"
+                )));
+            }
+            let tables: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'messages'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(sql_err("looking for the schema"))?;
+            if tables == 0 {
+                empty()?
+            } else {
+                conn
+            }
+        } else {
+            empty()?
+        };
+        // `endpoint` / `owner_did` / `device_id` key the cursor, and no read touches the
+        // cursor. Empty rather than a second struct: a store that is only read from is not a
+        // reason to duplicate every query.
+        Ok(MessageStore {
+            conn,
+            endpoint: String::new(),
+            owner_did: String::new(),
+            device_id: String::new(),
+        })
+    }
+
+    /// What this identity has, newest first — the whole of `msg inbox`'s answer (design §8.2).
+    ///
+    /// `unread_only` is a **local** question: read state lives in this file and nowhere else
+    /// (design §4, 2026-10-03), so it is answerable with the network down. "Unread" is
+    /// incoming-only — our own outgoing rows have no read state to be in.
+    pub fn recent(&self, limit: u64, unread_only: bool) -> Result<Vec<StoredMessage>> {
+        let filter = if unread_only {
+            "AND m.direction = 'in' AND m.read_at IS NULL"
+        } else {
+            ""
+        };
+        self.select(
+            &format!("{SELECT_ROWS} WHERE 1 = 1 {filter} ORDER BY m.id DESC LIMIT ?1"),
+            params![limit as i64],
+        )
+    }
+
+    /// One conversation's thread, **oldest first** — the whole of `msg history`'s answer.
+    ///
+    /// The window is the newest `limit` rows and then reversed, not the first `limit`: a chat
+    /// shows where the conversation *is*, so a truncation has to drop the far past rather than
+    /// the messages just said.
+    pub fn conversation(
+        &self,
+        conversation: &Conversation,
+        limit: u64,
+    ) -> Result<Vec<StoredMessage>> {
+        let mut rows = self.select(
+            &format!(
+                "{SELECT_ROWS} WHERE c.kind = ?1 AND c.peer_did = ?2 ORDER BY m.id DESC LIMIT ?3"
+            ),
+            params![conversation.kind(), conversation.peer_did(), limit as i64],
+        )?;
+        rows.reverse();
+        Ok(rows)
+    }
+
+    /// One thread, keyed by the **peer's DID alone** — what `msg history <peer_did>` asks.
+    ///
+    /// The kind is not part of the question, and asking the caller for it would be asking them
+    /// to know something the file already knows. It is also the one place the two could be
+    /// confused: a group DID (`…:g:<id>`) and an agent DID (`…:user:<handle>`) are disjoint
+    /// spellings, so a peer string names at most one conversation, and no prefix test that
+    /// would have to be kept in step with the service is needed here.
+    pub fn conversation_with(&self, peer_did: &str, limit: u64) -> Result<Vec<StoredMessage>> {
+        let mut rows = self.select(
+            &format!("{SELECT_ROWS} WHERE c.peer_did = ?1 ORDER BY m.id DESC LIMIT ?2"),
+            params![peer_did, limit as i64],
+        )?;
+        rows.reverse();
+        Ok(rows)
+    }
+
+    /// Every row whose sender chose this id.
+    ///
+    /// A `Vec` because the id is **sender-scoped**: the unique key is
+    /// `(conversation, sender, message_id)` (module comment #2), so the same string from two
+    /// senders is two rows and neither of them is "the" one.
+    pub fn find(&self, message_id: &str) -> Result<Vec<StoredMessage>> {
+        self.select(
+            &format!("{SELECT_ROWS} WHERE m.message_id = ?1 ORDER BY m.id"),
+            params![message_id],
+        )
+    }
+
+    /// Mark rows read, **locally**. Returns the ids that were actually changed.
+    ///
+    /// Locally is the ruling (design §4, 2026-10-03): the read state has one home, this file,
+    /// which is why there is no service call behind this. An id that is not here, is already
+    /// read, or is one of our own outgoing rows is **not** in the return: reporting it as
+    /// marked would make the count say nothing about what happened.
+    pub fn mark_read(&mut self, ids: &[String]) -> Result<Vec<String>> {
+        let read_at = now();
+        let tx = self.conn.transaction().map_err(sql_err("opening a transaction"))?;
+        let mut marked = Vec::new();
+        {
+            let mut stmt = tx
+                .prepare(
+                    "UPDATE messages SET read_at = ?1
+                      WHERE message_id = ?2 AND direction = 'in' AND read_at IS NULL",
+                )
+                .map_err(sql_err("preparing the read marker"))?;
+            for id in ids {
+                let changed = stmt.execute(params![read_at, id]).map_err(sql_err("marking read"))?;
+                if changed > 0 {
+                    marked.push(id.clone());
+                }
+            }
+        }
+        tx.commit().map_err(sql_err("committing"))?;
+        Ok(marked)
+    }
+
+    /// Mark everything incoming read. Returns how many rows changed.
+    pub fn mark_all_read(&mut self) -> Result<u64> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE messages SET read_at = ?1 WHERE direction = 'in' AND read_at IS NULL",
+                params![now()],
+            )
+            .map_err(sql_err("marking everything read"))?;
+        Ok(changed as u64)
+    }
+
+    /// How many incoming rows are unread.
+    pub fn unread_count(&self) -> Result<u64> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE direction = 'in' AND read_at IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(sql_err("counting unread messages"))?;
+        Ok(count as u64)
+    }
+
+    fn select(&self, sql: &str, params: impl rusqlite::Params) -> Result<Vec<StoredMessage>> {
+        let mut stmt = self.conn.prepare(sql).map_err(sql_err("preparing a read"))?;
+        let rows = stmt
+            .query_map(params, stored_of)
+            .map_err(sql_err("reading messages"))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(sql_err("reading messages"))
+    }
+}
+
+/// One row of the local record, as a reader wants it (design §8).
+///
+/// [`Record`]'s inverse for the columns the two share, plus what only a reader needs:
+/// `received_at` (when *this device* wrote it down — not the service's `accepted_at`), and
+/// `read_at`, which after the 2026-10-03 ruling is the one and only read state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredMessage {
+    pub conversation: Conversation,
+    pub direction: Direction,
+    pub sender_did: String,
+    pub message_id: String,
+    pub content_type: Option<String>,
+    pub text: Option<String>,
+    pub payload: Option<Value>,
+    /// The delivery number, and the number this row's own inbox gave it — incoming only.
+    pub service_seq: Option<i64>,
+    pub group_event_seq: Option<i64>,
+    pub accepted_at: Option<String>,
+    pub received_at: String,
+    pub read_at: Option<String>,
+}
+
+/// The columns every read here selects, in the order [`stored_of`] reads them.
+const SELECT_ROWS: &str = "
+SELECT c.kind, c.peer_did, m.direction, m.sender_did, m.message_id, m.content_type,
+       m.text, m.payload_json, m.service_seq, m.group_event_seq, m.accepted_at,
+       m.received_at, m.read_at
+  FROM messages m JOIN conversations c ON c.id = m.conversation_id";
+
+/// One row of [`SELECT_ROWS`], in that column order.
+fn stored_of(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredMessage> {
+    let kind: String = row.get(0)?;
+    let peer: String = row.get(1)?;
+    let direction: String = row.get(2)?;
+    // A payload the file itself cannot re-parse is not a reason to fail the whole read: the
+    // column was written by this binary, and the text arm (if any) still renders.
+    let payload_json: Option<String> = row.get(7)?;
+    Ok(StoredMessage {
+        conversation: if kind == "group" {
+            Conversation::Group { group_did: peer }
+        } else {
+            Conversation::Direct { peer_did: peer }
+        },
+        direction: if direction == "out" {
+            Direction::Outgoing
+        } else {
+            Direction::Incoming
+        },
+        sender_did: row.get(3)?,
+        message_id: row.get(4)?,
+        content_type: row.get(5)?,
+        text: row.get(6)?,
+        payload: payload_json.and_then(|json| serde_json::from_str(&json).ok()),
+        service_seq: row.get(8)?,
+        group_event_seq: row.get(9)?,
+        accepted_at: row.get(10)?,
+        received_at: row.get(11)?,
+        read_at: row.get(12)?,
+    })
 }
 
 /// The table definitions (design §3).
@@ -445,16 +723,22 @@ CREATE TABLE sync_state (
 /// (design §7): an event is recorded when this client has acted on it, and a frame the
 /// transport merely received is not yet that. The inner view still gets every event, so a
 /// failed write changes what is on disk and never what the person sees.
+///
+/// `ack` marks each recorded row read, which is where read state lives after the 2026-10-03
+/// ruling (design §4): the transport asks for a confirmation, and the confirmation is a local
+/// write. The transport itself still knows nothing about sqlite.
 pub struct RecordingView {
     store: Mutex<MessageStore>,
     inner: Arc<dyn ListenView>,
+    ack: bool,
 }
 
 impl RecordingView {
-    pub fn new(store: MessageStore, inner: Arc<dyn ListenView>) -> RecordingView {
+    pub fn new(store: MessageStore, inner: Arc<dyn ListenView>, ack: bool) -> RecordingView {
         RecordingView {
             store: Mutex::new(store),
             inner,
+            ack,
         }
     }
 }
@@ -463,7 +747,15 @@ impl ListenView for RecordingView {
     fn event(&self, event: &ListenEvent) {
         if let Some(record) = records_from(event) {
             let outcome = match self.store.lock() {
-                Ok(mut store) => store.record(&record).map(|_| ()).map_err(|err| err.to_string()),
+                Ok(mut store) => store
+                    .record(&record)
+                    .and_then(|_| {
+                        if self.ack {
+                            store.mark_read(std::slice::from_ref(&record.message_id))?;
+                        }
+                        Ok(())
+                    })
+                    .map_err(|err| err.to_string()),
                 // A panic in an earlier write. The store may hold a half-open transaction and
                 // the cursor is no longer trustworthy, so nothing is written.
                 Err(_) => Err("the message store was poisoned by an earlier panic".to_string()),
@@ -480,7 +772,13 @@ impl ListenView for RecordingView {
 }
 
 /// The row an event becomes, or nothing when the event is not a message.
-fn records_from(event: &ListenEvent) -> Option<Record> {
+///
+/// Public because `msg fetch` is the *same* write path as the listener's: it decodes a
+/// `sync.delta` entry into the frame the stream would have pushed, offers it here, and hands
+/// the result to [`MessageStore::record`]. Two mappings for one frame is how the two halves
+/// would come to disagree about what a delivery is. (The bin target is a separate crate from
+/// this library, so "used by the bin" means `pub` here, not `pub(crate)`.)
+pub fn records_from(event: &ListenEvent) -> Option<Record> {
     match event {
         ListenEvent::State(_) => None,
         ListenEvent::Message(message) => {
@@ -601,17 +899,30 @@ mod tests {
 
     fn store(name: &str) -> (tempdir::Dir, MessageStore) {
         let dir = tempdir::Dir::new(name);
-        let location = location(&dir);
-        let identity = test_support::mint("alice");
+        let store = writer(&dir);
+        (dir, store)
+    }
+
+    /// A store opened the way `msg listen` opens one, so a test can write rows for a reader.
+    fn writer(dir: &tempdir::Dir) -> MessageStore {
+        let location = location(dir);
         std::fs::create_dir_all(location.dir()).unwrap();
-        let store = MessageStore::open(
+        let identity = test_support::mint("alice");
+        MessageStore::open(
             &location,
             &identity,
             "http://127.0.0.1:8787/anp-im/rpc",
             &identity.device_id,
         )
-        .unwrap();
-        (dir, store)
+        .unwrap()
+    }
+
+    fn reader(dir: &tempdir::Dir) -> MessageStore {
+        MessageStore::open_read_only(&location(dir)).unwrap()
+    }
+
+    fn thread(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|id| id.to_string()).collect()
     }
 
     fn location(dir: &tempdir::Dir) -> IdentityLocation {
@@ -852,7 +1163,7 @@ mod tests {
     fn a_direct_delivery_is_recorded_and_the_view_still_shows_it() {
         let (_dir, store) = store("hook-direct");
         let spy = Arc::new(Spy::default());
-        let view = RecordingView::new(store, spy.clone());
+        let view = RecordingView::new(store, spy.clone(), false);
 
         view.event(&delivery(5));
         assert_eq!(spy.seen.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -863,9 +1174,27 @@ mod tests {
     }
 
     #[test]
+    fn acknowledging_on_the_way_in_marks_the_row_it_just_wrote() {
+        // `msg listen --ack` says "I have this one" to the service and, since 2026-10-03, the
+        // same act marks the local row: read state has one home (design §4), so a client that
+        // acknowledges must not leave the row it acknowledged sitting there unread.
+        let (_dir, acknowledged) = store("hook-ack");
+        let view = RecordingView::new(acknowledged, Arc::new(Spy::default()), true);
+
+        view.event(&delivery(5));
+        assert_eq!(view.store.lock().unwrap().unread_count().unwrap(), 0);
+
+        // And without the flag the row arrives unread, which is what the flag is for.
+        let (_dir, quiet) = store("hook-no-ack");
+        let view = RecordingView::new(quiet, Arc::new(Spy::default()), false);
+        view.event(&delivery(5));
+        assert_eq!(view.store.lock().unwrap().unread_count().unwrap(), 1);
+    }
+
+    #[test]
     fn a_group_frame_is_recorded_without_moving_the_delivery_cursor() {
         let (_dir, store) = store("hook-group");
-        let view = RecordingView::new(store, Arc::new(Spy::default()));
+        let view = RecordingView::new(store, Arc::new(Spy::default()), false);
 
         // A §12 frame: it came off the device queue, so it has no delivery number.
         view.event(&ListenEvent::Group(GroupEvent::Message {
@@ -901,7 +1230,7 @@ mod tests {
     #[test]
     fn a_payload_body_is_recorded_as_a_payload_not_as_its_rendering() {
         let (_dir, store) = store("hook-payload");
-        let view = RecordingView::new(store, Arc::new(Spy::default()));
+        let view = RecordingView::new(store, Arc::new(Spy::default()), false);
 
         view.event(&ListenEvent::Message(ListenMessage {
             kind: "message",
@@ -935,7 +1264,7 @@ mod tests {
     fn a_state_line_is_forwarded_and_records_nothing() {
         let (_dir, store) = store("hook-state");
         let spy = Arc::new(Spy::default());
-        let view = RecordingView::new(store, spy.clone());
+        let view = RecordingView::new(store, spy.clone(), false);
 
         view.event(&ListenEvent::State(ListenState::Connecting {
             service: "http://127.0.0.1:8787".to_string(),
@@ -948,7 +1277,7 @@ mod tests {
     fn a_message_the_store_refuses_is_still_shown() {
         let (_dir, store) = store("hook-refuse");
         let spy = Arc::new(Spy::default());
-        let view = RecordingView::new(store, spy.clone());
+        let view = RecordingView::new(store, spy.clone(), false);
 
         view.event(&ListenEvent::Group(GroupEvent::Message {
             group_did: "did:wba:example.com:g:team".to_string(),
@@ -971,6 +1300,199 @@ mod tests {
         let store = view.store.lock().unwrap();
         assert_eq!(store.message_count().unwrap(), 0);
         assert_eq!(store.applied_seq().unwrap(), None);
+    }
+
+    // ---- reading (design §8) --------------------------------------------------------------
+
+    #[test]
+    fn reading_a_record_that_is_not_there_creates_nothing() {
+        let dir = tempdir::Dir::new("read-missing");
+        let store = reader(&dir);
+        assert_eq!(store.message_count().unwrap(), 0);
+        assert!(store.recent(10, false).unwrap().is_empty());
+        assert_eq!(store.unread_count().unwrap(), 0);
+        assert!(
+            !messages_path(&location(&dir)).exists(),
+            "a read must not create the record it was going to read"
+        );
+    }
+
+    #[test]
+    fn recent_is_newest_first_and_unread_only_drops_what_was_read() {
+        let dir = tempdir::Dir::new("read-recent");
+        {
+            let mut store = writer(&dir);
+            store.record(&incoming(1, "m-1")).unwrap();
+            store.record(&incoming(2, "m-2")).unwrap();
+            store.mark_read(&thread(&["m-1"])).unwrap();
+        }
+
+        let store = reader(&dir);
+        let all = store.recent(10, false).unwrap();
+        assert_eq!(
+            all.iter().map(|m| m.message_id.as_str()).collect::<Vec<_>>(),
+            ["m-2", "m-1"],
+            "newest first"
+        );
+        assert!(all[1].read_at.is_some(), "m-1 was marked read");
+        assert!(all[0].read_at.is_none());
+
+        let unread = store.recent(10, true).unwrap();
+        assert_eq!(
+            unread.iter().map(|m| m.message_id.as_str()).collect::<Vec<_>>(),
+            ["m-2"]
+        );
+        assert_eq!(store.unread_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn a_thread_is_oldest_first_and_truncates_the_far_past() {
+        let dir = tempdir::Dir::new("read-thread");
+        {
+            let mut store = writer(&dir);
+            for seq in 1..=5 {
+                store.record(&incoming(seq, &format!("m-{seq}"))).unwrap();
+            }
+            // Another peer's message, so the thread must not pick it up.
+            let mut other = incoming(6, "m-other");
+            other.conversation = Conversation::Direct {
+                peer_did: "did:wba:example.com:carol".to_string(),
+            };
+            store.record(&other).unwrap();
+        }
+
+        let store = reader(&dir);
+        let thread = store
+            .conversation(
+                &Conversation::Direct {
+                    peer_did: "did:wba:example.com:bob".to_string(),
+                },
+                3,
+            )
+            .unwrap();
+        assert_eq!(
+            thread.iter().map(|m| m.message_id.as_str()).collect::<Vec<_>>(),
+            ["m-3", "m-4", "m-5"],
+            "the newest three, oldest first — a chat truncates the far past"
+        );
+    }
+
+    #[test]
+    fn a_thread_can_be_asked_for_by_peer_alone() {
+        let dir = tempdir::Dir::new("read-by-peer");
+        {
+            let mut store = writer(&dir);
+            store.record(&incoming(1, "m-1")).unwrap();
+            store.record(&incoming(2, "m-2")).unwrap();
+            // The same peer string filed as a group: the two never collide, because a group
+            // DID and an agent DID are disjoint spellings — and asking by peer must not
+            // need the caller to say which.
+            let mut group = incoming(3, "m-3");
+            group.conversation = Conversation::Group {
+                group_did: "did:wba:example.com:bob".to_string(),
+            };
+            store.record(&group).unwrap();
+        }
+
+        let store = reader(&dir);
+        let direct = store.conversation_with("did:wba:example.com:bob", 10).unwrap();
+        assert_eq!(
+            direct.iter().map(|m| m.message_id.as_str()).collect::<Vec<_>>(),
+            ["m-1", "m-2", "m-3"],
+            "oldest first, and only this peer's rows"
+        );
+        assert!(store
+            .conversation_with("did:wba:example.com:carol", 10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn find_returns_every_sender_scoped_row_with_that_id() {
+        let dir = tempdir::Dir::new("read-find");
+        {
+            let mut store = writer(&dir);
+            store.record(&incoming(1, "m-1")).unwrap();
+            let mut other = incoming(2, "m-1");
+            other.sender_did = "did:wba:example.com:carol".to_string();
+            store.record(&other).unwrap();
+        }
+
+        let store = reader(&dir);
+        assert_eq!(
+            store.find("m-1").unwrap().len(),
+            2,
+            "message_id is sender-scoped, so this is two rows"
+        );
+        assert!(store.find("m-none").unwrap().is_empty());
+    }
+
+    #[test]
+    fn marking_read_reports_only_what_changed() {
+        let dir = tempdir::Dir::new("read-mark");
+        let mut store = writer(&dir);
+        store.record(&incoming(1, "m-1")).unwrap();
+        let sent = Record::outgoing(
+            Conversation::Direct {
+                peer_did: "did:wba:example.com:bob".to_string(),
+            },
+            "did:wba:example.com:alice",
+            "m-out",
+            "text/plain",
+            Some("hi".to_string()),
+            None,
+        );
+        store.record(&sent).unwrap();
+
+        let marked = store
+            .mark_read(&thread(&["m-1", "m-none", "m-out"]))
+            .unwrap();
+        assert_eq!(
+            marked,
+            ["m-1"],
+            "an id that is not here and our own outgoing row were not marked"
+        );
+        assert!(
+            store.mark_read(&thread(&["m-1"])).unwrap().is_empty(),
+            "already read, so nothing changed"
+        );
+        assert_eq!(store.unread_count().unwrap(), 0);
+        assert!(
+            store.recent(10, true).unwrap().is_empty(),
+            "an outgoing row is never 'unread'"
+        );
+    }
+
+    #[test]
+    fn marking_everything_read_counts_the_incoming_rows_it_changed() {
+        let dir = tempdir::Dir::new("read-mark-all");
+        let mut store = writer(&dir);
+        store.record(&incoming(1, "m-1")).unwrap();
+        store.record(&incoming(2, "m-2")).unwrap();
+        store.record(&incoming(3, "m-3")).unwrap();
+        store.mark_read(&thread(&["m-1"])).unwrap();
+
+        assert_eq!(store.mark_all_read().unwrap(), 2, "only the two still unread");
+        assert_eq!(store.unread_count().unwrap(), 0);
+        assert_eq!(store.mark_all_read().unwrap(), 0, "a second run changes nothing");
+    }
+
+    #[test]
+    fn the_reader_refuses_a_newer_schema_without_touching_it() {
+        let dir = tempdir::Dir::new("read-refuse-newer");
+        let location = location(&dir);
+        std::fs::create_dir_all(location.dir()).unwrap();
+        {
+            let conn = Connection::open(messages_path(&location)).unwrap();
+            conn.pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+                .unwrap();
+        }
+        let err = MessageStore::open_read_only(&location)
+            .expect_err("a file from the future must not be read");
+        assert!(
+            err.to_string().contains("newer agentx-cli"),
+            "the refusal must say why: {err}"
+        );
     }
 
     /// A store root of one test's own, removed when it drops.

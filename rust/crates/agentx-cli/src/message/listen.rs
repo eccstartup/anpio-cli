@@ -33,12 +33,8 @@ use super::stream::{
     STREAM_AUTH, STREAM_HELLO, STREAM_PROFILE, SYNC_DELTA,
 };
 
-/// `inbox.mark_read` is the read-state write (`msg inbox --include-read` reads it back), the
-/// other of realtime.md §6's two calls.
-const INBOX_MARK_READ: &str = "inbox.mark_read";
-
-/// realtime.md §9: the read surface's Profile — `sync.delta` and `inbox.mark_read` are
-/// business extension methods, not transport ones, so they are interpreted under this.
+/// realtime.md §9: the read surface's Profile — `sync.delta` is a business extension method,
+/// not a transport one, so it is interpreted under this.
 const INBOX_PROFILE: &str = "x_agentx.inbox.v1";
 
 /// realtime.md §7.2: exponential backoff, bounded. The base is 2s so attempt 2 lands on the
@@ -578,24 +574,20 @@ async fn live(
         let Some(message) = decode_message(&frame, cursor) else {
             continue;
         };
-        let message_id = message.message_id.clone();
         ctx.view.event(&ListenEvent::Message(message));
 
         if ctx.args.ack {
-            // §6: two different questions, two calls. `inbox.mark_read` is the read state that
-            // `msg inbox --include-read` reads back; `stream.ack` is what moves this device's
-            // delivery cursor, and therefore what keeps a reconnect from replaying. Neither is
-            // a read receipt for the sender — the spec defines none (§6's ⚠).
+            // §6: what is left of the two calls is the one that has to be online. `stream.ack`
+            // moves this device's delivery cursor, and is therefore what keeps a reconnect
+            // from replaying. The *read* state used to be a second call here
+            // (`inbox.mark_read`); after the 2026-10-03 ruling it lives in `messages.db`, and
+            // `RecordingView` marks the row it just wrote (design §4) — so this side stays
+            // unaware of it. Neither is a read receipt for the sender: the spec defines none
+            // (§6's ⚠).
             //
             // The backfill is deliberately not acked: the cursor only ever moves forwards, so
             // the first live ack carries it past everything the backfill showed, and `--once`
             // has to stay the read-only one-shot §7.2 calls it.
-            let mut read = Map::new();
-            read.insert("message_ids".to_string(), json!([message_id]));
-            match request(outbound, arrivals, ctx, INBOX_MARK_READ, read).await {
-                Step::Frame(_) => {}
-                other => return other,
-            }
             let mut ack = Map::new();
             ack.insert("seq".to_string(), json!(cursor));
             match request(outbound, arrivals, ctx, STREAM_ACK, ack).await {
@@ -1042,8 +1034,9 @@ mod tests {
     fn the_two_profiles_are_chosen_per_method() {
         assert_eq!(profile_for(STREAM_AUTH), STREAM_PROFILE);
         assert_eq!(profile_for(STREAM_ACK), STREAM_PROFILE);
+        // `sync.delta` is the one extension method `msg listen` still calls, and the only
+        // member of `x_agentx.inbox.v1` the client has left (design §4, 2026-10-03).
         assert_eq!(profile_for(SYNC_DELTA), INBOX_PROFILE);
-        assert_eq!(profile_for(INBOX_MARK_READ), INBOX_PROFILE);
     }
 
     #[test]
@@ -1454,16 +1447,6 @@ mod tests {
             )
             .await;
             server_out.send(Frame::Raw(live_notification("direct.incoming"))).unwrap();
-
-            let read = answer(
-                &mut server_in,
-                &server_out,
-                INBOX_MARK_READ,
-                json!({"updated_count": 1, "message_ids": ["msg-2"], "read_at": "2026-10-02T00:01:01Z"}),
-            )
-            .await;
-            assert_eq!(read["params"]["body"]["message_ids"], json!(["msg-2"]));
-            assert_eq!(read["params"]["meta"]["profile"], INBOX_PROFILE);
 
             let ack = answer(&mut server_in, &server_out, STREAM_ACK, json!({"cursor": 2})).await;
             assert_eq!(ack["params"]["body"]["seq"], 2);
