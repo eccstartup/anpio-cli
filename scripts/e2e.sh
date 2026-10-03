@@ -673,6 +673,92 @@ else
   FAILED=$((FAILED + 1))
 fi
 
+# ---- 换钥没走完的那几条路 ------------------------------------------------------
+#
+# `did update` 有三种结局，前两种各自收尾得很干净，第三种不是：请求送出去了，可是对方到底
+# 收没收到**此刻不可知**。这时唯一正确的动作是**把那把钥留下**——它可能是这个 DID 已经搬过去
+# 的那个钥的**唯一一份**。`did update --resume` 来结这个悬案：去问 DID 服务器"你现在服务的
+# 是哪个 DID"，答案三种，动作三种。
+#
+# 三种都走一遍，需要一台**会在半路上断掉**的主机。"回程断了"恰好是客户端最需要被考的那一
+# 道，而一台正常的主机永远演不出来，所以玩具主机把它演出来（`did_host.py` 里那两个
+# `-lost-*` 端点，那里写着它们**不是**从规范里抄来的路径）。
+section "did update — a delivery that ends in the middle leaves the question open"
+
+# 三条路各自的端点。规范不定管理接口的路径（ANP-03 §2.5.3 只说交付的**形状**），所以
+# 这三条都是这台玩具主机自己的约定——`did_host.py` 里写着哪一条是从规范来的、哪一条不是。
+UPDATE_PATH="/user-service/v1/did/update"
+UPDATE_LOST_ANSWER_PATH="/user-service/v1/did/update-lost-answer"
+UPDATE_LOST_REQUEST_PATH="/user-service/v1/did/update-lost-request"
+UPDATE_REFUSED_PATH="/user-service/v1/did/update-refused"
+
+export AGENTXCLI_HOME="$WORK/home"
+run "$CLI" did create --host "http://localhost:${HOST_PORT}" --handle frank --agent frank
+expect_status "did create frank succeeds" 0
+run_quiet "$CLI" did show --agent frank --json
+FRANK_OLD="$(field did)"
+
+# 结局一：请求到了主机，它一件事都没做就断了。客户端看见的和一次纯粹的网络故障一模一样。
+run "$CLI" did update --agent frank --target "http://localhost:${HOST_PORT}${UPDATE_LOST_REQUEST_PATH}"
+expect_status "an update whose outcome is unknown exits 1" 1
+expect "  and says the outcome is not knowable from here" "NOT knowable"
+expect "  and says the staged key was kept" "has been KEPT"
+expect "  and names the command that settles it" "did update --resume"
+
+# 留着那把钥的理由：交付**可能**已经落地，而它是唯一一份。所以第二次 `did update` 不是覆盖，
+# 是**拒绝**。
+run "$CLI" did update --agent frank --target "http://localhost:${HOST_PORT}${UPDATE_PATH}"
+expect_status "a second update is refused while one is unsettled" 1
+expect "  and says why it will not overwrite" "already staged"
+expect "  and points at the way to settle it" "Settle it first"
+
+# 结案。DID 服务器仍然服务着旧 DID——那封信确实没落地，于是那把钥没有身份可归，丢掉。
+run "$CLI" did update --agent frank --resume
+expect_status "--resume reports the hop never landed" 1
+expect "  and names the DID the server still serves" "$FRANK_OLD"
+expect "  and says the staged key has been dropped" "has been dropped"
+
+# 结过一次就没有悬案了：再来一次 `--resume` 是一次明确的拒绝，不是一次空转。
+run "$CLI" did update --agent frank --resume
+expect_status "there is nothing left to resume" 1
+expect "  and says so" "nothing to resume"
+
+# 结局二：主机**明确说不**（403）。有回应，而且是个"不"——所以这一次**确定**没落地，
+# 与结局一正好相反：那把钥当场丢掉，不必等 `--resume` 来问。
+run "$CLI" did update --agent frank --target "http://localhost:${HOST_PORT}${UPDATE_REFUSED_PATH}"
+expect_status "an update the host refuses exits 1" 1
+expect "  and quotes the status the host answered with" "answered HTTP 403"
+run "$CLI" did update --agent frank --resume
+expect_status "and a refusal leaves nothing staged" 1
+expect "  and resume says so" "nothing to resume"
+
+# 结局三：**文档已经收下**，回程却断了。这才是 `--resume` 存在的那一种——磁盘上那把钥是
+# 这个 DID 现在唯一能用的钥。
+run "$CLI" did update --agent frank --target "http://localhost:${HOST_PORT}${UPDATE_LOST_ANSWER_PATH}"
+expect_status "an update whose answer was lost exits 1" 1
+expect "  and says the outcome is not knowable" "NOT knowable"
+expect "  and keeps the staged key, because it may already be the live one" "has been KEPT"
+
+run "$CLI" did update --agent frank --resume
+expect_status "--resume settles it in favour of the staged successor" 0
+expect "  and says it resumed" "resumed frank"
+expect "  and names the DID that was superseded" "superseded did:"
+expect "  and reports the assurance of the hop it verified" "assurance:"
+
+run_quiet "$CLI" did show --agent frank --json
+FRANK_NEW="$(field did)"
+if [ -n "$FRANK_NEW" ] && [ "$FRANK_NEW" != "$FRANK_OLD" ]; then
+  printf '    \033[32mok\033[0m   the store now signs as the staged successor\n'
+else
+  printf '    \033[31mFAIL\033[0m --resume promoted nothing (%s)\n' "$FRANK_NEW"
+  FAILED=$((FAILED + 1))
+fi
+
+# 而那把"唯一的钥"确实是主机现在认的那个——这条把 `--resume` 的结论和 DID 服务器对上。
+run "$CLI" did resolve --chain "$FRANK_OLD"
+expect_status "the retired DID's chain confirms the resumed successor" 2
+expect "  and it walks to exactly the DID the store promoted" "$FRANK_NEW"
+
 # ---- 只有 fetch 会联网 --------------------------------------------------------
 #
 # 这是"读搬到本地"那句裁定（TODO7 §2）的**可断言形态**。上面每一节验证的都是"有服务时读

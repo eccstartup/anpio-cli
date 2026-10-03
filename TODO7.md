@@ -311,10 +311,24 @@ TODO6 写完了一整轮**写**侧：本机消息库 `messages.db` 的写入侧�
 - [ ] **验签玩具主机**：一台**会验签**的玩具主机，能咬住"签名到底对不对"。
       这**不是**某条待办的收尾，是能独立成立的一件事——但也不记成"必须做"
       （[TODO6](TODO6.md) §5.3，用户 2026-10-03："五以后再说"）。
-- [ ] **覆盖：`did update` 已进脚本，`--resume`、`anp login` 的 401 挑战还没**
-      （[TODO6](TODO6.md) §5.3）。`did update` 那一半 2026-10-03 补上了——`did_host.py`
-      加了 ANP-03 §2.5.3 的更新端点，`scripts/e2e.sh` 的"换钥"两节真的换了一次钥。剩下的
-      两条各自要一台愿意配合的主机或第二个设备，不是能顺手塞进去的。
+- [ ] **覆盖：`anp login` 的 401 挑战还没**（[TODO6](TODO6.md) §5.3）。`did update` 那一半
+      2026-10-03 补上了——`did_host.py` 加了 ANP-03 §2.5.3 的更新端点，`scripts/e2e.sh` 的
+      "换钥"两节真的换了一次钥。**`--resume` 同日补上**，三档结局各有一条：
+      - **不可知**（`Ambiguous`）：请求送出去了，回程**一个字节都没有**。玩具主机为此演了两种
+        半路失败（`-lost-answer` 收下文档再断、`-lost-request` 什么也不做就断）——一台正常的
+        主机永远演不出来，而这两种恰好是"那把钥必须留着"的全部理由。断言包括那句 `NOT
+        knowable` / `has been KEPT`，以及**第二次 `did update` 被拒**（"already staged"，
+        不是覆盖）——密钥材料上"拒绝"比"顺手"要紧。
+      - **确定没落地**（`Settled`）：主机答一个非 2xx（`-refused` 那条给 403）。有回应、而且是
+        个"不"，所以那把钥当场丢掉，问都不用问。**这一档原先没有落点**：唯一不靠主机配合的路
+        是让 `assert_allowed_host` 拒（私有地址 / 非白名单主机），而 `policy_for` 会把
+        `--target` 那个主机自动加进白名单、`is_loopback_host_name` 又把 `127/8` 一律当回环，
+        于是那条路走不通——这一点是量出来的，不是推出来的。
+      - **落地了**：`--resume` 拿链去问主机，答的是后继 → 提升，并打 `resumed` / `superseded
+        did:` / `assurance: verified`；`did show` 与 `did resolve --chain` 各证一次"它真的换了"。
+      - `-lost-request` 之后 `--resume` 说"仍然服务着旧 DID / 那把钥已丢"，再跑一次说
+        "nothing to resume"——结过一次就不该有悬案。
+      剩下的 `anp login` 401 挑战要一台愿意配合的主机或第二个设备，不是能顺手塞进去的。
 - [x] **`packages/e2e` 的跨域中继覆盖**：`groupFederation` 是两台真服务 + 真中继跨域
       `group.send`，本仓别处没有；`msg listen` 那两条是**真 WebSocket**（脚本只补上了回填那半）。
       迁移判据：等中继那半有了别处的覆盖（或 Rust 侧也起两台服务）再谈搬

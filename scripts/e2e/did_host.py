@@ -16,6 +16,9 @@
   * `POST /user-service/v1/did-auth/rpc`     `register` / `update_document`
   * `POST /user-service/v1/did/profile/rpc`  `get_me` / `update_me`
   * `POST /user-service/v1/did/update`       一次 `did update` 的两个文档（ANP-03 §2.5.3）
+  * `POST …/did/update-lost-answer`          同上，收下之后**不回应**就断（回程丢了）
+  * `POST …/did/update-lost-request`         什么也不做、也不回应就断（请求丢了）
+  * `POST …/did/update-refused`              同上，收下之后**明确说不**（HTTP 403）
 
 路径没有第二个约定：`didToUrl`（`packages/core/src/crypto/resolveDid.ts:498`）说
 `did:wba:<authority>[:<seg>…]` 住在 `/<seg…>/did.json`，所以 DID 自己说了它挂在哪。
@@ -46,6 +49,23 @@ DID_PROFILE_PATH = "/user-service/v1/did/profile/rpc"
 # ANP-03 §2.5.3 不定管理接口的路径，所以 `did update --target` 自己指一个——真部署里这个 URL
 # 由那台主机的运维说了算，这里就挑一个和上面两条同族的。
 DID_UPDATE_PATH = "/user-service/v1/did/update"
+# 交付在**半路上**断掉时的那两条。ANP-03 §2.5.3 定义的是交付的**形状**，没定义"失败长什么样"，
+# 所以这两个不是从规范里抄来的路径，是这台玩具主机**演出来的两种失败**——`did update` 的三种
+# 结局里独有的那一种（`Ambiguous`：送出去了，但对方收没收**不可知**）需要它才跑得出来：
+#
+#   * `-lost-answer`：文档**已经收下**（真的换了），回程却断了。客户端那一侧只看见
+#     "不知道对方收没收到"，而实际上收到了——这正是 `--resume` 存在的理由。
+#   * `-lost-request`：请求到了这儿，可是一件事都没做就断了。同样"不知道"，实际没落地。
+#
+# 两条都**一个字节都不回**就断开（见 `Handler.do_POST`）：客户端读到的既不是 2xx 也不是一个
+# 错误状态，于是落到"不可知"那一档。回一个 500 就不是这个意思了——那叫**确定**没落地
+# （`Settled`），而"确定"那一条本来就有别的办法演。
+DID_UPDATE_LOST_ANSWER_PATH = "/user-service/v1/did/update-lost-answer"
+DID_UPDATE_LOST_REQUEST_PATH = "/user-service/v1/did/update-lost-request"
+# 第三条路：主机**明确说不**（HTTP 403）。它与上面两条是**相反**的结局——一个有字节回来、
+# 一个没有——而这条线把它们分得很开：没有任何回应 = 收没收不可知（那把钥要留着），一个非 2xx
+# 的回应 = **确定**没落地（那把钥可以丢）。少一条，"确定"那一档就只能靠猜。
+DID_UPDATE_REFUSED_PATH = "/user-service/v1/did/update-refused"
 
 
 def jcs(value) -> bytes:
@@ -245,6 +265,37 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def apply_update(self, envelope):
+        """把一次 `did update` 送来的两个文档落下去。返回 `(status, payload)`，**不发**。
+
+        分成"改"与"答"两步，是因为那两个半路的端点（见上面那两个常量）要的正是"改了但不答"
+        ——把写响应留在调用方手里，比在函数里塞一个 `answer=False` 的开关诚实：这里本来就只
+        有一件事（按 DID 存），发不发出去是另一个人做的另一个决定。
+        """
+        retirement = envelope.get("didDocument")
+        retiring_did = envelope.get("did")
+        successor_did = envelope.get("successorDid")
+        successor_document = envelope.get("successorDocument")
+        if not isinstance(retirement, dict) or not isinstance(successor_document, dict):
+            return 400, {"error": "didDocument and successorDocument are required"}
+        if not isinstance(retiring_did, str) or not isinstance(successor_did, str):
+            return 400, {"error": "did and successorDid are required"}
+        old_path = path_for(retiring_did)
+        if self.state.documents.get(old_path) is None:
+            return 404, {"error": f"no document for {retiring_did}"}
+        # 两个文档都必须指着同一个后继，否则这就是一次把 A 退休、把 B 抬上去的交付——
+        # 收下它等于让这台主机替客户端编一份自相矛盾的账。
+        if retirement.get("successorDid") != successor_did or successor_document.get("id") != successor_did:
+            return 400, {"error": "successorDid must be the one both documents name"}
+        self.state.documents[old_path] = retirement
+        self.state.versions[old_path] += 1
+        new_path = path_for(successor_did)
+        self.state.documents[new_path] = successor_document
+        self.state.versions[new_path] = 1
+        self.state.tokens[f"e2e-token-{successor_did}"] = successor_did
+        self.state.profiles.setdefault(successor_did, {"did": successor_did, "handle": ""})
+        return 200, {"did": retiring_did, "successorDid": successor_did}
+
     def handle_update(self, envelope) -> None:
         """ANP-03 §2.5.3 的更新端点：一次 `did update` 送来的两个文档落在这里。
 
@@ -258,33 +309,7 @@ class Handler(BaseHTTPRequestHandler):
         后继文档占住**新 DID** 那条。少了这一手，`did update` 的客户端那一侧就没有一个
         "换过钥之后的世界"可跑——而那正是 e2e 要咬的东西。
         """
-        retirement = envelope.get("didDocument")
-        retiring_did = envelope.get("did")
-        successor_did = envelope.get("successorDid")
-        successor_document = envelope.get("successorDocument")
-        if not isinstance(retirement, dict) or not isinstance(successor_document, dict):
-            self.send_json(400, {"error": "didDocument and successorDocument are required"})
-            return
-        if not isinstance(retiring_did, str) or not isinstance(successor_did, str):
-            self.send_json(400, {"error": "did and successorDid are required"})
-            return
-        old_path = path_for(retiring_did)
-        if self.state.documents.get(old_path) is None:
-            self.send_json(404, {"error": f"no document for {retiring_did}"})
-            return
-        # 两个文档都必须指着同一个后继，否则这就是一次把 A 退休、把 B 抬上去的交付——
-        # 收下它等于让这台主机替客户端编一份自相矛盾的账。
-        if retirement.get("successorDid") != successor_did or successor_document.get("id") != successor_did:
-            self.send_json(400, {"error": "successorDid must be the one both documents name"})
-            return
-        self.state.documents[old_path] = retirement
-        self.state.versions[old_path] += 1
-        new_path = path_for(successor_did)
-        self.state.documents[new_path] = successor_document
-        self.state.versions[new_path] = 1
-        self.state.tokens[f"e2e-token-{successor_did}"] = successor_did
-        self.state.profiles.setdefault(successor_did, {"did": successor_did, "handle": ""})
-        self.send_json(200, {"did": retiring_did, "successorDid": successor_did})
+        self.send_json(*self.apply_update(envelope))
 
     def forward_group_document(self, path: str) -> None:
         url = f"{self.state.service_origin}{path}"
@@ -321,6 +346,19 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == DID_UPDATE_PATH:
             self.handle_update(envelope)
+            return
+        if path in (DID_UPDATE_LOST_ANSWER_PATH, DID_UPDATE_LOST_REQUEST_PATH):
+            # 见那两个常量：`-lost-answer` 把文档收下（真的换了），`-lost-request` 一件事都不做。
+            # 两条都**不回应**就断——那个空白的回程正是"不可知"的全部内容。`close_connection`
+            # 让 http.server 在这一轮之后关掉连接，于是客户端读到的是 EOF 而不是任何状态码。
+            if path == DID_UPDATE_LOST_ANSWER_PATH:
+                self.apply_update(envelope)
+            self.close_connection = True
+            return
+        if path == DID_UPDATE_REFUSED_PATH:
+            # 有回应，而且是个"不"。客户端因此**确定**这次交付没落地——与上面两条正好相反，
+            # 它是"那把钥可以丢掉"的那一档的证据。
+            self.send_json(403, {"error": "this DID server does not accept ownership transfers"})
             return
         if path == DID_AUTH_PATH:
             result, error = handle_auth_rpc(self.state, method, params, token, request_id)
