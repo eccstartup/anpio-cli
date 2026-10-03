@@ -5,6 +5,7 @@
 //! face**. Anything with ongoing state — the identity store, the MLS store, the message
 //! store — lives in the library; what is here parses arguments, calls in, and renders.
 
+use anyhow::Context as _;
 use clap::{Args, Parser, Subcommand};
 use reqwest::Url;
 use serde_json::{json, Map, Value};
@@ -3145,7 +3146,20 @@ async fn cmd_msg_fetch(
     let location = own.location()?;
     let identity = Identity::load(&location)?;
     let client = http_client()?;
-    let channel = open_channel(&client, &identity, allow_private).await?;
+    // Every step from here down is one the rest of the read family does not take, so each of
+    // the two carries the sentence that says so. Without it, "error sending request" off a
+    // dead service reads as if the *record* were broken — and the record is precisely the
+    // thing that is still fine and still answerable.
+    let channel = open_channel(&client, &identity, allow_private)
+        .await
+        .with_context(|| {
+            format!(
+                "`msg fetch` is the one read that goes online: it resolves {} and asks \
+                 its service for what is still held. `msg inbox` / `history` / `show` answer \
+                 from the local record and need no network",
+                identity.did
+            )
+        })?;
     // The same device `msg listen` uses by default, so a fetch resumes exactly where a listen
     // stopped. A different device is a different slice of the inbox, and this command has no
     // `--device`: the record it writes to belongs to this identity *on this machine*.
@@ -3175,7 +3189,16 @@ async fn cmd_msg_fetch(
         body.insert("since".to_string(), json!(cursor));
         body.insert("limit".to_string(), json!(page_size));
         body.insert("device_id".to_string(), json!(device));
-        let page = call_extension(&client, &channel, SYNC_DELTA, INBOX_PROFILE, body).await?;
+        let page = call_extension(&client, &channel, SYNC_DELTA, INBOX_PROFILE, body)
+            .await
+            .with_context(|| {
+                format!(
+                    "`msg fetch` is the one read that goes online: it asks {} for its sync.delta \
+                     page. `msg inbox` / `history` / `show` answer from the local record and need \
+                     no network",
+                    channel.endpoint.target.endpoint
+                )
+            })?;
 
         for entry in page.get("messages").and_then(Value::as_array).into_iter().flatten() {
             let Some(row) = entry.as_object() else { continue };

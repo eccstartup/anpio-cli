@@ -61,18 +61,49 @@ TODO6 写完了一整轮**写**侧：本机消息库 `messages.db` 的写入侧�
         `records_from` + `MessageStore::record`，靠去重键与游标单调双重重幂等）。
       - **`msg read` 的归属仍待裁定**（§4），所以这一条只画到"它在那张表里"，没定。详见
         [client-messages.md](docs/design/client-messages.md) §8 与其 8.1/8.2/8.3/8.4/8.5。
-- [ ] **`fetch` 是一次显式的写，不是一次读。** 语义是"把服务端**还有的**搬进本地库"。
+- [x] **`fetch` 是一次显式的写，不是一次读。** 语义是"把服务端**还有的**搬进本地库"。
       要定死：
       - 它落到哪张表、是不是**与 `msg listen` 同一条写入路径**（`MessageStore::record` + 去重键
         `(conversation_id, sender_did, message_id)`），还是另开一条；
       - **重复调用是幂等的**——靠已有的去重键，还是靠游标（`fetch` 之后本地游标推不推？）；
       - 它和 `msg listen` 的补齐是**同一次搬**还是两条路（`msg listen --once` 今天等于 `inbox`，
         `fetch` 落地后这个"等于"还成不成立）。
-- [ ] **只有 `fetch` 会联网，其余读都不联网。** 这条是上面那句裁定的直接推论，要写成
+
+      **2026-10-03 三条都有答案，而且是同一句话的三个面**（设计见
+      [client-messages.md](docs/design/client-messages.md) §8.3，代码在
+      [main.rs](rust/crates/agentx-cli/src/main.rs) `cmd_msg_fetch`）：
+      - **同一条写入路径**，不是另开一条。`sync.delta` 的每一项本来就是订阅路会推的那一帧
+        `{seq, method, params}`，所以 `decode_message(&frame, seq)` → `records_from` →
+        `MessageStore::record` 三行就是 `msg listen` 的那三行。为此 `records_from` 从
+        `pub(crate)` 提到 `pub`——**它是 lib，bin 是另一个 crate**，"给 bin 用"必须是 `pub`。
+      - **幂等是两重的**：行一级靠去重键（`INSERT OR IGNORE`），游标一级靠
+        `sync_state.applied_seq` 的 `MAX(...)` 单调。**游标推**，因为搬的就是投递——`record`
+        一见到 `service_seq` 就推进它。于是**不带 `--since` 的 `fetch` 是"从我上次停下的地方
+        接着搬"**，`--since` 是显式重搬（排查用）。
+      - **是同一次搬。** `msg listen --once` 之后**等于 `fetch` 再加打印**：两者都走 §8.3 的
+        同一个 `sync.delta` 分页循环（`since` / `limit: DELTA_PAGE` / `device_id`，页到
+        `has_more` 为假，守卫 `next_since > cursor`）。差在**消费者**：listener 把帧交给
+        `RecordingView`（打印 + 落库，并让 §12 的帧走 MLS 收端），`fetch` 直接落库。因此
+        `fetch` 遇到 `meta.security_profile == "group-e2ee"` 的帧**跳过并点名**——它没有 MLS
+        收端，既解不了也不能把密文当成消息记下来（`is_group_e2ee_frame` / `unfetchable`）。
+- [x] **只有 `fetch` 会联网，其余读都不联网。** 这条是上面那句裁定的直接推论，要写成
       **可断言的行为**：断网时 `msg inbox` 照样答（除非真的本地什么都没有），
       而 `fetch` 断网要明确失败并说清"这是要联网的那一条"。
-- [ ] **`--json` 的输出不落盘**（TODO4 §E 那条规矩：`messages.db` 按密钥对待）。
+
+      **2026-10-03 写成了 `scripts/e2e.sh` 最后那一节**（"only msg fetch goes online — the read
+      family answers with the service killed"）：把服务**杀掉**之后再跑，carol（有身份、库里
+      一行没有）的 `msg inbox --json` 退出 0 并说 `"messages": []`，bob（有记录）的
+      `msg inbox` / `history` / `show` / `read` 全部退出 0 并答出内容，而 `msg fetch` 退出 1
+      且**第一行**就点名自己。那句点名是**加出来的**：`cmd_msg_fetch` 的两处联网步骤各带一句
+      `with_context`（发现信道、`sync.delta` 调用），否则断网时的 `error sending request` 读起来
+      像是"本地记录坏了"——而记录恰恰是还好着的那件东西。
+- [x] **`--json` 的输出不落盘**（TODO4 §E 那条规矩：`messages.db` 按密钥对待）。
       读侧一开，这条边界要重新说一遍——今天它只约束写，读侧的输出管道是新的口子。
+
+      **2026-10-03：写进 [client-messages.md](docs/design/client-messages.md) §8.4，并在脚本里钉了
+      一条断言。** 断言用的是 carol（一次都没连过服务的身份）：`msg inbox --json` 跑完
+      `$WORK/home/carol/default/messages.db` **不存在**——"读不落盘"只有在库还没被创建的身份上
+      才查得出来，bob 的库早就在了，光看存在与否分不出读和写。
 
 > **2026-10-03 起，读侧代码开始动**（原话"先放着"指的是"先别急着动手"，交互画完了就该落地）。
 > 落地以本节与 client-messages.md §8 为准，不是从三条旧候选里挑。

@@ -547,17 +547,76 @@ PY
 
     # ---- 负结果：这一条**要的就是失败**（TODO6 §5.3，`cli.md` §5）----------------
     #
-    # awiki 实现的是**规范**，不是这个客户端的扩展面。所以对它读收件箱，正确的答复是
-    # `-32601`——"我没有这个方法"。客户端的正确行为是把这句话原样报成
+    # awiki 实现的是**规范**，不是这个客户端的扩展面。所以对它要扩展面上的东西，正确的答复
+    # 是 `-32601`——"我没有这个方法"。客户端的正确行为是把这句话原样报成
     # `unsupported_extension` 并退出 1：**不是**空收件箱，**不是**崩溃，也**不是**含糊的
     # 失败。这条断言最容易在重构里被悄悄改成"跳过"，所以它留在这儿，取值是**真主机**给的。
-    run "$CLI" msg inbox --agent "$AWIKI_AGENT"
-    expect_status "msg inbox against a spec-only peer exits 1" 1
+    #
+    # 拿来做这件事的是 `msg fetch`，不是 `msg inbox`：读这一族搬回本地之后（TODO7 §2），
+    # `msg inbox` 根本不问服务，拿它去撞一台只有规范的主机什么也证明不了——它会照样答完
+    # 本地的记录再退出 0。**唯一**会去问服务的是 `msg fetch`，也就是这一条。
+    run "$CLI" msg fetch --agent "$AWIKI_AGENT"
+    expect_status "msg fetch against a spec-only peer exits 1" 1
     expect "  and reports the stable code a script branches on" "unsupported_extension"
-    expect "  and says the peer does not implement it" "does not implement inbox.get"
+    expect "  and says the peer does not implement it" "does not implement sync.delta"
     expect "  and quotes the peer's own code" "JSON-RPC error -32601"
   fi
 fi
+
+# ---- 只有 fetch 会联网 --------------------------------------------------------
+#
+# 这是"读搬到本地"那句裁定（TODO7 §2）的**可断言形态**。上面每一节验证的都是"有服务时读
+# 得对"，而这一节验证的是那句裁定本身：把服务杀掉，读这一族照样答，全靠本地那份记录——
+# 唯一会去敲网络的是 `msg fetch`，它必须**明确**失败，并且说清自己是那一条。
+#
+# 这条断言如果不是在这里、而是靠"读命令里没写网络调用"来保证，就会在下次重构里被悄悄
+# 推翻：读路径上加一次发现调用是很容易的，而那时候全绿。
+section "only msg fetch goes online — the read family answers with the service killed"
+
+# carol 的身份是在服务还活着的时候建的，但从头到尾**没连过**它——她的本地库一行都没有。
+# "读不写文件"这条只有在她身上才查得出来：bob 的库早就存在了，光看存在与否分不出读和写。
+export AGENTXCLI_HOME="$WORK/home"
+run_quiet "$CLI" did create --host "http://localhost:${HOST_PORT}" --handle carol --agent carol
+expect_status "did create carol succeeds while the service is still up" 0
+CAROL_DIR="$WORK/home/carol/default"
+
+kill "$SERVICE_PID" 2>/dev/null || true
+wait "$SERVICE_PID" 2>/dev/null || true
+SERVICE_PID=""
+
+run "$CLI" msg inbox --agent carol --json
+expect_status "msg inbox answers with no service at all" 0
+expect "  and says the local record is empty rather than failing" '"messages": []'
+if [ -e "$CAROL_DIR/messages.db" ]; then
+  printf '    \033[31mFAIL\033[0m a read created a database\n'
+  FAILED=$((FAILED + 1))
+else
+  printf '    \033[32mok\033[0m   reading wrote no file\n'
+fi
+
+run "$CLI" msg inbox --agent bob
+expect_status "msg inbox still answers for an identity that has a record" 0
+expect "  and is answered out of that record" "hello bob"
+
+run "$CLI" msg history --agent bob "$ALICE_DID"
+expect_status "msg history answers offline too" 0
+expect "  and finds the thread by the peer's DID alone" "hello bob"
+
+run_quiet "$CLI" msg inbox --agent bob --json
+BOB_MSG_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["messages"][0]["message_id"])' "$LAST_OUT")"
+run "$CLI" msg show --agent bob "$BOB_MSG_ID"
+expect_status "msg show answers offline" 0
+expect "  and prints the row itself" "hello bob"
+
+run "$CLI" msg read --agent bob --all
+expect_status "msg read is a local write, so it needs no service" 0
+
+# 反过来那一半：联网的那一条**必须**失败，而且第一行就得点名自己。没有这句上下文，
+# 断网时的 `error sending request` 读起来像是"本地记录坏了"——而记录恰恰是还好着的那件东西。
+run "$CLI" msg fetch --agent bob
+expect_status "msg fetch fails with the service down" 1
+expect "  and says it is the one that goes online" "the one read that goes online"
+expect "  and names the commands that do not" "msg inbox"
 
 # ---- 收尾 --------------------------------------------------------------------
 
