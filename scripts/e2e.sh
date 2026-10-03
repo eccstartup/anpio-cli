@@ -606,11 +606,12 @@ expect "  and it quotes the status it got" "HTTP 401"
 # 收件人是当时那个 DID，一个还在服务手上的字符串），以及最要紧的那一件：**换钥之后投到旧
 # DID 名下的信，会不会自己找到人**。
 #
-# 最后一件有个时间上的前提，别处没写过：服务发现"对端换了 DID"的时延上界**就是** DID 文档
-# 缓存的 TTL（`config.ts` 的 `DEFAULT_DID_CACHE_TTL_MS` 那一段说的正是这件事——缓存里那份
-# 文档是换钥**之前**抓的，它自己不可能写着后来才发生的事，所以链只能等缓存过期再走一次）。
-# 这一节把服务**用一个 1 毫秒的 TTL 重启一次**：它量的是"换钥之后信会不会回来"，不是
-# "五分钟有多长"。别处跑的一直是出厂的那个数——这条只在这一节里成立。
+# 最后一件有个前提，别处没写过：服务发现"对端换了 DID"走的是**一次绕过文档缓存的解析**。
+# 缓存里那份文档是换钥**之前**抓的，它自己不可能写着后来才发生的事，所以只要还读缓存，链就
+# 只能等 TTL 过期再走一次——而那正是这一节要避开的等待。迁移这一步因此走
+# `chainResolverFor(config, { fresh: true })`（见 `docs/design/message-service.md` §9.6 与
+# `packages/service/src/rpc/ownerDidUpdate.ts`）：换钥在他下一次自址请求上就被看见，不需要
+# 重启服务去压 TTL。
 section "did update — a peer rotates its key, and the DID string moves with it"
 
 export AGENTXCLI_HOME="$WORK/home"
@@ -666,20 +667,6 @@ expect "  and reports how strong that hop was" "assurance:  verified"
 run "$CLI" contacts resolve --agent erin Dave
 expect_status "erin's book still answers for dave" 0
 expect "  and it is still the DID he left behind" "$DAVE_OLD"
-
-# 重启，把这个节的前提摆明（见上面那段）。日志用 `>>` 续写，前面那些行还留着。
-kill "$SERVICE_PID" 2>/dev/null || true
-wait "$SERVICE_PID" 2>/dev/null || true
-AGENTX_LISTEN="127.0.0.1:${SERVICE_PORT}" \
-AGENTX_PUBLIC_URL="http://127.0.0.1:${SERVICE_PORT}" \
-AGENTX_SERVICE_DID="$SERVICE_DID" \
-AGENTX_DB="$WORK/svc/svc.db" \
-AGENTX_OBJECT_DIR="$WORK/svc/objects" \
-AGENTX_DID_DEV_HOSTS="127.0.0.1,localhost" \
-AGENTX_DID_CACHE_TTL_MS=1 \
-  node "$ROOT/packages/service/dist/main.js" >>"$WORK/svc.log" 2>&1 &
-SERVICE_PID=$!
-wait_for_port "$SERVICE_PORT" "the service"
 
 section "the mailbox follows the key — mail sent to the retired DID comes home"
 # 按**旧 DID** 发信。断言的是"服务收下了"，不是"被拒了"：收件人是那个 DID 本身，而它还在

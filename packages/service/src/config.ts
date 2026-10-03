@@ -68,7 +68,9 @@ const DEFAULT_DID_REFRESH_BATCH = 20
 
 /** 一份 DID 文档最多被缓存多久。core 的 `DEFAULT_CACHE_TTL_MS` 就是这个值，这里显式写出来
  *  是因为它在本服务里不只是"省一次抓取"——它是**对端身份变化的发现时延上界**（见
- *  {@link DidResolution.documentStore}）。 */
+ *  {@link DidResolution.documentStore}）。**唯有一处不走缓存**：信箱迁移那一步
+ *  （`rpc/ownerDidUpdate.ts`）用 `chainResolverFor` 的 `fresh` 档实时解析，因为"这个主体的
+ *  当前 DID 是哪个"晚五分钟没有理由（`docs/design/message-service.md` §9.6）。 */
 const DEFAULT_DID_CACHE_TTL_MS = 300_000
 
 export interface ListenAddress {

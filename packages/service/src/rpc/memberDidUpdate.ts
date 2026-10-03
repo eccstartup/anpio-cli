@@ -83,13 +83,23 @@ const UNCONDITIONAL_TRIGGERS: ReadonlySet<string> = new Set([
  *  `trustedDocuments` 传的是那份共享的文档缓存：§2.5.5 规则 2 只肯信一把**停用之前**的文档
  *  授权过的恢复钥，而"停用之前的那份文档"正是这个缓存在上一次解析时留下的那一份。所以
  *  `recovery_verified` 的可达范围就是缓存的 TTL 窗口——这个界记在
- *  [message-service.md](../docs/design/message-service.md) §14，不假装它更宽。 */
-export function chainResolverFor(config: Config): DidChainResolver {
+ *  [message-service.md](../docs/design/message-service.md) §14，不假装它更宽。
+ *
+ *  **`fresh` 档：不传 `documentStore`，于是每一跳都是实时抓取。** `ResolveDidOptions` 说
+ *  "ABSENT 就是完全不缓存"，所以这就是绕过缓存的意思——缓存里那份文档比换钥**早**，它自己
+ *  看不见"这条 DID 已经换过了"，靠它只会把发现推到 TTL 之后。信箱迁移（`ownerDidUpdate.ts`）
+ *  走这一档，因为它要的是"**现在**谁是这个主体的当前 DID"，而不是"我们五分钟前以为是谁"；
+ *  群名册那三条触发路仍走缓存档，它们问的是"受理前要不要补一条名册事实"，晚一点无妨。
+ *  恢复钥的凭据**两种档位都取自同一份缓存**：停用之前的那份文档只有缓存里才有，实时抓来的
+ *  是已经带 `successorDid` 的那一份，替代不了它。 */
+export function chainResolverFor(config: Config, options: { fresh?: boolean } = {}): DidChainResolver {
+  const { documentStore, ...uncached } = config.didResolution
+  const resolution = options.fresh === true ? uncached : config.didResolution
   return (did) =>
     resolveDidChain(did, {
-      ...config.didResolution,
+      ...resolution,
       reportLowAssurance: true,
-      trustedDocuments: config.didResolution.documentStore,
+      trustedDocuments: documentStore,
     })
 }
 
