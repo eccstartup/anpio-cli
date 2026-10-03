@@ -341,10 +341,13 @@ TODO6 写完了一整轮**写**侧：本机消息库 `messages.db` 的写入侧�
       - 驱动改用 core 的 `buildMessageRequest`；**外层签名故意没走**（同原注释：P8 §2.3 按本地
         调用处理，`origin_proof` 才是授权依据）。
       - **`directSend` 那两条仍然不搬**（脚本跑得更真）。
-      - **顺带发现的一件，不改，另记**：`group.get_info` 在 `RELAYED_METHODS` 里但**永远中继
-        不到**（它没有 `targetScope`，`dispatch.ts` 在 `relayFor` 之前就从无状态分支返回了），
-        于是 `dispatch.test.ts` 那条"returns the peer refusal unchanged"是**空过**的——本地处理器
-        对未知群答的正是同一句 `group.not_member`。已单开一条待办，不在这一轮改。
+      - **顺带发现的一件，2026-10-03 已修**：`group.get_info` 在 `RELAYED_METHODS` 里但
+        **永远中继不到**（它没有 `targetScope`，`dispatch.ts` 在 `relayFor` 之前就从无状态
+        分支返回了），于是 `dispatch.test.ts` 那条"returns the peer refusal unchanged"是
+        **空过**的——本地处理器对未知群答的正是同一句 `group.not_member`。修法是让无状态
+        那一支也先过 `relayFor`（自家的群与自己的 `serviceDid` 仍在里面短路成本地），表里那
+        一行因此不再是一句空话；两条单测把它咬住（跨域的读**被转发**、自家的读**不转发**）。
+        顺手把 `relayFor` 那个谁也没用的 `key` 参数删掉——无状态方法根本没有幂等键可给。
 - [ ] **覆盖率**：132 个单测长在库侧，命令面一层几乎没有测试；脚本 + CI 是第三档的载体
       （已裁定，[TODO6](TODO6.md) §5.3）。这一条 2026-10-03 用户原话"以后再说"。
 - [x] **§2、§3、§4 每一条命令，落地时同时写文档**——命令面和文档在同一次改动里。

@@ -641,16 +641,33 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
 
       // 这个方法不改状态：没有幂等作用域，也就没有要记的操作，直接跑（P1 §9.1 L628 的
       // 四段键里 operation_id 的语义是"重试同一次操作"，无状态调用没有这个东西）。
+      //
+      // **无状态不等于本地。** `group.get_info` 走的就是这一支，而它读的群可能住在对端
+      // ——`RELAYED_METHODS` 里那十一条的开头写着"读"，说的正是它。转发判据与有状态那条路
+      // 是同一个 `relayFor`，所以自己命名空间里的群和自己的 `serviceDid` 仍在那里短路成本地，
+      // 这里转发出去的只有**别人的**群。
+      //
+      // 少了这一句，一次跨域的 `group.get_info` 会被**本地处理器**答成 `group.not_member`
+      // ——"我们这儿没这个群"——而那是对一个从没查过的群下的判断；转发它才是去问住着它的那个
+      // 服务。表里那一行因此不是装饰：它在先，这一句是让它成真的那一步。
+      //
+      // `replayed` 恒为假：无状态方法不进幂等台账（下面那句"没有操作要记"说的就是这个），
+      // 所以这条键上永远不会有记录，也永远不是重放。
       if (spec.targetScope === undefined) {
-        const result = perform(spec, {
-          params: envelope.params,
-          acceptedAt,
-          pending,
-          requestDigest,
-          devices,
-          ...(proofKeyId !== undefined ? { proofKeyId } : {}),
-          ...(proofNonce !== undefined ? { proofNonce } : {}),
-        })
+        const relayed = await relayFor(spec, envelope, false)
+        if (relayed.kind === 'refused') return errorResponse(envelope.id, relayed.rejection)
+        const result =
+          relayed.kind === 'answered'
+            ? relayed.result
+            : perform(spec, {
+                params: envelope.params,
+                acceptedAt,
+                pending,
+                requestDigest,
+                devices,
+                ...(proofKeyId !== undefined ? { proofKeyId } : {}),
+                ...(proofNonce !== undefined ? { proofNonce } : {}),
+              })
         // 无状态方法自己不产生投递，所以这段在 §8.12 之前是空转的；而 `group.get_info` 一旦
         // 顺路补了名册，那次补就产生了通知。它与有状态那条路上的 `publish` 是同一句话。
         publish(pending)
@@ -682,7 +699,7 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
       // 正文校验都已经过了，此刻转发的是**已经认证过的**请求；再往前走一步就是
       // `acceptOperation` 的事务，网络往返进不去。对端拒绝时我们什么都不写，调用方拿
       // 同一个 `operation_id` 重试即是一次干净的再来。
-      const relayed = await relayFor(spec, envelope, key, replayed)
+      const relayed = await relayFor(spec, envelope, replayed)
       if (relayed.kind === 'refused') return errorResponse(envelope.id, relayed.rejection)
       const forwarded = relayed.kind === 'answered' ? relayed.result : undefined
 
@@ -761,7 +778,6 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
   async function relayFor(
     spec: MethodSpec,
     envelope: AnpRequest,
-    key: string,
     replayed: boolean,
   ): Promise<ForwardOutcome> {
     if (relay === undefined || !RELAYED_METHODS.has(spec.name)) return LOCAL

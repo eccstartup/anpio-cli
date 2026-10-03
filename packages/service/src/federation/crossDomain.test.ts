@@ -294,10 +294,9 @@ describe('a group.send whose group lives in another domain (TODO7 §5)', () => {
     // 撞的是 `federation/forward.ts` 里的 `unavailable`（1012 `anp.temporarily_unavailable`），
     // 不是任何 `group.*` 的码。
     //
-    // 用的是 **`group.send`** 而不是 `group.get_info`：后者没有 `targetScope`，在
-    // `dispatch.ts` 里走的是"无状态方法直接跑"那个提前返回，**根本到不了 `relayFor`**
-    // （它的 `group.not_member` 是本地处理器答的，与中继无关）。`RELAYED_METHODS` 里那一条
-    // 因此是死的——见下面那段说明，不是这一条要修的东西。
+    // 用 `group.send` 而不是 `group.get_info`：这一条要的是一趟**有状态的**转发，`group.send`
+    // 正是那一支。`group.get_info` 现在也真的会转发（它以前不会——见下面那段），但它是无状态
+    // 的，一趟够不着的读在那里没有"受理"可言，用它会把这个用例测的东西换掉。
     const request = await envelope({
       method: 'group.send',
       meta: meta({

@@ -1698,7 +1698,7 @@ describe('a group call whose group lives elsewhere (P8 §5.4)', () => {
   })
 
   it('returns the peer refusal unchanged', async () => {
-    const { relay } = recording({
+    const { relay, asked } = recording({
       kind: 'refused',
       rejection: { code: 3000, anpCode: 'group.not_member', retryable: false, message: 'not a member' },
     })
@@ -1711,6 +1711,11 @@ describe('a group call whose group lives elsewhere (P8 §5.4)', () => {
       }),
     )
 
+    // **`asked` 这一条是这个用例的全部价值。** `group.get_info` 是无状态方法，走的是
+    // dispatch 里"直接跑"那一支——如果它**不**转发，本地处理器对同一个不认识的群答的正是
+    // 同一句 `group.not_member`，于是下面两条断言在"中继根本没被叫到"时照样全绿。这一行让
+    // `RELAYED_METHODS` 里那条"读"真的被咬住：它曾被写进表却永远到不了 `relayFor`。
+    expect(asked).toEqual([REMOTE_GROUP])
     expect(outcome.json?.error?.code).toBe(3000)
     expect(outcome.json?.error?.data?.anp_code).toBe('group.not_member')
   })
@@ -1743,6 +1748,27 @@ describe('a group call whose group lives elsewhere (P8 §5.4)', () => {
     // 本地受理而不是转发：`second` 不是成员，所以答案是本地那一关的 3000，而不是对端那份。
     expect(outcome.json?.error?.code).toBe(3000)
     expect(outcome.json?.error?.data?.anp_code).toBe('group.not_member')
+  })
+
+  it('keeps a group.get_info in its own namespace local too, even though it is stateless', async () => {
+    // 同一个短路，另一条路：`group.get_info` 没有 `targetScope`，走的是"无状态方法直接跑"
+    // 那一支。**"无状态"与"本地"是两件事**——一支无状态方法照样可能指着一个对端的群。这一条
+    // 与上面那条成对：上面证明自家的 `group.send` 不出站，这一条证明自家的 `group.get_info`
+    // 也不出站（转发判据是同一个 `relayFor`，所以两处的答案必须一致）。
+    const { relay, asked } = recording({ kind: 'answered', result: { group_did: 'should-not-be-used' } })
+    const h = harness({ relay })
+    const groupDid = await mintGroup(h, { discoverability: 'public' })
+
+    const outcome = await h.call(
+      await signed({
+        method: 'group.get_info',
+        meta: groupMeta({ target: { kind: 'group', did: groupDid } }),
+        body: {},
+      }),
+    )
+
+    expect(asked).toEqual([])
+    expect(outcome.json?.result?.group_did).toBe(groupDid)
   })
 
   it('forwards a group.create whose target is another service (§8.1.2)', async () => {
