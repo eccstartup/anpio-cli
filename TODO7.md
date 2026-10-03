@@ -155,7 +155,16 @@ TODO6 写完了一整轮**写**侧：本机消息库 `messages.db` 的写入侧�
         与 [sqlite.test.ts](packages/service/src/storage/sqlite.test.ts) 的 `drops rows accepted
         before the floor`）。
       - **没做**：窗口不承诺告诉客户端"窗外还有 N 条"，所以 `fetch` 的 "brought in: 0" 仍然
-        分不出"真的没有了"和"有，但在窗外"。这一条挂在 §4 那条换钥诊断旁边。
+        分不出"真的没有了"和"有，但在窗外"。这一条与 §4 那条换钥诊断**不是同一件**——后者
+        随换钥迁移落地已经作废，这一条与换钥无关，任何一次 `fetch` 都可能撞上；单独记在
+        §3 末尾那条 `- [ ]` 里。
+- [ ] **取件面：让 `sync.delta` / `fetch` 说得出"窗外还有 N 条"**。今天 `msg fetch` 只报搬
+      回来几条，"0" 既可能是真的没有了、也可能是窗口外还有一堆——而窗口是**永不裁剪 + 30 天
+      可见**（上面那条裁定），所以"有但看不见"是常态、不是异常。要做就得让 `sync.delta` 多答
+      一个窗口外的计数（我们自己的扩展面 `x_agentx.inbox.v1`，改它不碰规范），客户端再据此
+      分两句打印。**要用户裁定**：是补这个计数，还是维持"只报搬回来的"、把那层分不清交给
+      文档说明。两条路都不影响保留契约。落点见
+      [message-service.md](docs/design/message-service.md) §14 末尾那半句。
 - [x] **P6 设备队列的有界保留要不要为持久客户端放宽。** 今天是 8 次尝试 / 24 小时
       （[config.ts:41-42](packages/service/src/config.ts#L41)，[deviceQueue.ts](packages/service/src/delivery/deviceQueue.ts) 文件头）。
       24 小时对**推**是合理的（推是尽力而为的优化，拉才是事实），但对一个**离线一天以上**的
