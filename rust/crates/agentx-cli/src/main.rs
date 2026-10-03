@@ -15,6 +15,7 @@ use agentx::contacts::{
     ambiguous_name_error, book_from_json, looks_like_a_did, lookup, not_a_did_error,
     unknown_name_error, Contact, Lookup, RosterNames,
 };
+use agentx::AgentxError;
 use agentx::group::{group_target, policy_of, service_target};
 use agentx::group_remarks::{book_from_json as group_remarks_from_json, GroupRemark};
 use agentx::group_receive::GroupReceiver;
@@ -29,7 +30,8 @@ use agentx::identity::{
     parse_ttl_seconds,
     read_current_agent, register_identity, resign_document, resolve_agent_id, resolve_agent_id_with_source,
     resolve_chain, retirement_document, save_session, select_current_agent, session_host, snake_case_name, subject_of,
-    successor_of, update_document, update_profile, without_proof, Accepted, ChainError, ChainResolution,
+    successor_of, superseded_refusal_text, update_document, update_profile, without_proof, Accepted, ChainError,
+    ChainResolution, Supersession,
     CreateIdentityInput, Hop, Identity, IdentityLocation, Issued, SessionWrite, UpdateError,
     DEFAULT_SESSION_TTL_SECONDS,
 };
@@ -67,9 +69,9 @@ use anp::group_e2ee::GROUP_CIPHER_CONTENT_TYPE;
     name = "agentx-cli",
     version,
     about = "An ANP client: identity, messaging, and group E2EE.",
-    long_about = "A client for the Agent Network Protocol. Separate from the TS service and \
-                  from the TS `connectx` CLI: it keeps its own store root and its own \
-                  identity (TODO5 §0.1)."
+    long_about = "A client for the Agent Network Protocol. It keeps its own store root and its \
+                  own identity, separate from the service that hosts mailboxes for it \
+                  (`docs/design/cli.md` §2, §3)."
 )]
 struct Cli {
     /// Treat this host as local: permit a private address and plain `http`.
@@ -2757,19 +2759,70 @@ async fn cmd_msg_send(
             let anp_code = error.data.as_ref().and_then(|data| data.anp_code.as_deref());
             if anp_code == Some(DID_SUPERSEDED) {
                 // P1 §10.3 / P3 §5.5: the peer MUST refuse rather than retarget silently, and
-                // the sender MUST verify the migration from the DID it actually asked about
-                // and rebuild everything bound to that DID before retrying. That walk is
-                // `did/chain`, which this client does not carry yet (TODO5 §6 Phase 3).
-                anyhow::bail!(
-                    "{to} was refused as superseded (anp.did_superseded). Verifying the migration \
-                     and retrying is not implemented in agentx-cli yet: the peer's claim is not \
-                     verified, so re-sending to the same DID would only get the same answer. \
-                     Resolve the successor's DID first and send to that, or use the TS client."
-                )
+                // `details.current_did` is an **unverified hint** — the caller MUST verify the
+                // transition from the DID it actually asked about before acting on it, and MUST
+                // rebuild every DID-bound signature, digest and encrypted context before
+                // retrying. That walk is `identity/chain.rs`, the same one `did resolve --chain`
+                // runs. A retry is a *fresh* `msg send --to <successor>`, which rebuilds and
+                // re-signs from scratch — so this returns the successor plus the command, and
+                // never re-sends on the peer's word.
+                let hint = error
+                    .data
+                    .as_ref()
+                    .and_then(|data| data.details.as_ref())
+                    .and_then(|details| details.get("current_did"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                return Err(
+                    superseded_refusal(&client, &to, hint.as_deref(), allow_private).await.into(),
+                );
             }
             Err(rejection(DIRECT_SEND, &to, error.code, anp_code, &error.message).into())
         }
     }
+}
+
+/// What to say when a peer refuses a send with `anp.did_superseded` (P1 §10.3, P3 §5.5).
+///
+/// The walk is the caller's job because the peer's `details.current_did` is only a hint: it may
+/// name any successor, and a request bound to the wrong DID is a message to the wrong place.
+/// So this walks `to`'s chain itself and hands the verdict to
+/// [`superseded_refusal_text`](agentx::identity::superseded_refusal_text), which owns the wording.
+async fn superseded_refusal(
+    client: &reqwest::Client,
+    to: &str,
+    hint: Option<&str>,
+    allow_private: &[String],
+) -> AgentxError {
+    // The policy is the *requested* DID's host: the walk starts from the document it serves, and
+    // every hop after it is served by that same host.
+    let policy = match did_host(to) {
+        Ok(host) => policy_for(&[host], allow_private),
+        Err(err) => {
+            return AgentxError::MessageSendFailed(superseded_refusal_text(
+                to,
+                hint,
+                &Supersession::Unfetched {
+                    reason: format!("its host cannot even be named to verify that ({err:#})"),
+                },
+            ))
+        }
+    };
+
+    let outcome = match resolve_chain(client, to, &policy).await {
+        Ok(resolution) if resolution.is_superseded() => Supersession::Verified {
+            successor: resolution.result.current_did.clone(),
+        },
+        Ok(_) => Supersession::StillCurrent,
+        Err(ChainError::Broken(err)) => Supersession::Broken {
+            kind: snake_case_name(&err.kind),
+            message: err.message.clone(),
+        },
+        Err(ChainError::Unavailable(err)) => Supersession::Unfetched {
+            reason: format!("{err:#}"),
+        },
+    };
+    AgentxError::MessageSendFailed(superseded_refusal_text(to, hint, &outcome))
 }
 
 /// Write the row for a message this run has just sent (TODO5 §6 Phase 2, client-messages.md §3).
@@ -3964,10 +4017,10 @@ async fn cmd_group_send(
             }
             report_group_sent(&result, json)
         }
-        // No `anp.did_superseded` retry here, unlike `msg send` (cli.md §3.4): DID continuity
-        // inside a group is member-level and host-driven — P4 §8.12 says
+        // No `anp.did_superseded` arm here, unlike `msg send` (`superseded_refusal` above): DID
+        // continuity inside a group is member-level and host-driven — P4 §8.12 says
         // `group.member_did_update` is not even a JSON-RPC method — and P4 defines no client
-        // path for a group DID itself, so there is nothing to verify and retry.
+        // path for a group DID itself, so there is no chain to walk and nothing to verify.
         AnpResponse::Error { error, .. } => Err(rejection(
             GROUP_SEND,
             group_did,

@@ -13,7 +13,8 @@ mod store;
 mod update;
 
 pub use chain::{
-    describe_status, document_is_superseded, resolve_chain, snake_case_name, ChainError, ChainResolution,
+    describe_status, document_is_superseded, resolve_chain, snake_case_name, superseded_refusal_text,
+    ChainError, ChainResolution, Supersession,
 };
 pub use did::{
     create_identity, load_stored_key, resign_document, retirement_document, subject_of, successor_of,

@@ -192,6 +192,73 @@ pub fn describe_status(result: &TransitionResult) -> String {
     }
 }
 
+/// What the walk found when a peer refused a send with `anp.did_superseded` (P1 §10.3, P3 §5.5).
+///
+/// A closed set of four, so that the text below can be tested against every one of them without a
+/// network. It is deliberately *not* `Result<ChainResolution, ChainError>`: the caller has already
+/// flattened that, and the builder must not be able to reach back for the walk it is describing.
+pub enum Supersession {
+    /// The walk reached a DID that is not the one asked about: the refusal was true.
+    Verified { successor: String },
+    /// The walk ended at the DID asked about. The peer's claim is unconfirmed.
+    StillCurrent,
+    /// The walk reached a verdict: the chain does not verify.
+    Broken { kind: String, message: String },
+    /// The walk could not fetch a document — nothing was concluded about the chain.
+    Unfetched { reason: String },
+}
+
+/// What to say when a peer refuses a send with `anp.did_superseded`.
+///
+/// `hint` is the peer's `error.data.details.current_did`, and the spec calls it an **unverified
+/// hint**: the caller MUST verify the transition from the DID it actually asked about, because a
+/// peer can name any successor it likes and a request bound to the wrong DID is a message to the
+/// wrong place. So the hint is mentioned only when it *disagrees* with the walk — printing it
+/// alongside an agreeing verdict would give it a standing it does not have.
+///
+/// Nothing here re-sends. Retrying means rebuilding every DID-bound signature, digest and
+/// encrypted context, which is what a fresh `msg send --to <successor>` does from scratch; doing
+/// it silently is the "retarget without saying so" the peer is forbidden to do and the caller
+/// would then be doing on its behalf.
+pub fn superseded_refusal_text(to: &str, hint: Option<&str>, outcome: &Supersession) -> String {
+    match outcome {
+        Supersession::Verified { successor } => {
+            let mut text = format!(
+                "{to} was refused as superseded (anp.did_superseded), and the chain verifies: it \
+                 walks on to {successor}. A retry has to rebuild and re-sign everything bound to \
+                 {to}, so send again to the successor rather than to the DID that was refused:\n  \
+                 agentx-cli msg send --to {successor} …"
+            );
+            if let Some(hint) = hint {
+                if hint != successor {
+                    text.push_str(&format!(
+                        "\nThe peer's own hint named {hint}, which is not where this walk ends — \
+                         the hint is unverified and this walk is the answer."
+                    ));
+                }
+            }
+            text
+        }
+        Supersession::StillCurrent => format!(
+            "{to} was refused as superseded (anp.did_superseded), but the chain does NOT verify \
+             it: walking it ends at {to} itself, which is current. Nothing was retried — the \
+             peer's claim is unconfirmed, and `agentx-cli did resolve --chain {to}` runs the same \
+             walk."
+        ),
+        Supersession::Broken { kind, message } => format!(
+            "{to} was refused as superseded (anp.did_superseded), and the chain does not verify \
+             ({kind}: {message}). A successor that cannot be verified is not one to send to, so \
+             nothing was retried. `agentx-cli did resolve --chain {to}` runs the same walk."
+        ),
+        Supersession::Unfetched { reason } => format!(
+            "{to} was refused as superseded (anp.did_superseded), but the transition could not be \
+             fetched to verify it ({reason}). Nothing was retried: P1 §10.3 requires verifying \
+             the walk before acting on the peer's claim, rather than trusting the DID it named. \
+             Try again, or run `agentx-cli did resolve --chain {to}`."
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -287,5 +354,96 @@ mod tests {
             describe_status(&superseded),
             "SUPERSEDED — the chain walks on to did:wba:host:b"
         );
+    }
+
+    const OLD: &str = "did:wba:host.example:user:alice:e1_old";
+    const NEW: &str = "did:wba:host.example:user:alice:e1_new";
+
+    #[test]
+    fn a_verified_successor_is_named_and_the_retry_is_spelled_out() {
+        // The point of the walk: the caller does not get the peer's hint, it gets the DID the
+        // chain actually ends at, plus the one command that retries correctly.
+        let text = superseded_refusal_text(
+            OLD,
+            None,
+            &Supersession::Verified {
+                successor: NEW.to_string(),
+            },
+        );
+        assert!(text.contains("the chain verifies"));
+        assert!(text.contains(NEW));
+        assert!(text.contains(&format!("agentx-cli msg send --to {NEW}")));
+        assert!(text.contains("rebuild and re-sign"));
+    }
+
+    #[test]
+    fn a_hint_that_agrees_with_the_walk_is_not_quoted_back() {
+        // Printing an agreeing hint would give an unverified claim the same standing as the
+        // walk. It is only worth a line when it says something else.
+        let text = superseded_refusal_text(
+            OLD,
+            Some(NEW),
+            &Supersession::Verified {
+                successor: NEW.to_string(),
+            },
+        );
+        assert!(!text.contains("hint"));
+    }
+
+    #[test]
+    fn a_hint_that_disagrees_with_the_walk_is_called_out() {
+        // A peer naming a successor the chain does not confirm is exactly the case the spec's
+        // "MUST verify" is about, so the disagreement is the most important thing in the message.
+        let text = superseded_refusal_text(
+            OLD,
+            Some("did:wba:elsewhere.example:user:alice:e1_wrong"),
+            &Supersession::Verified {
+                successor: NEW.to_string(),
+            },
+        );
+        assert!(text.contains("did:wba:elsewhere.example:user:alice:e1_wrong"));
+        assert!(text.contains("is unverified"));
+        assert!(text.contains(NEW));
+    }
+
+    #[test]
+    fn a_claim_the_chain_does_not_confirm_says_nothing_was_retried() {
+        // The peer said "superseded" and the walk says otherwise. Saying so is the whole job:
+        // silently retrying would be acting on the claim this arm just failed to confirm.
+        let text = superseded_refusal_text(OLD, Some(NEW), &Supersession::StillCurrent);
+        assert!(text.contains("does NOT verify"));
+        assert!(text.contains("Nothing was retried"));
+        assert!(text.contains(&format!("did resolve --chain {OLD}")));
+    }
+
+    #[test]
+    fn a_broken_chain_is_reported_as_a_verdict_not_a_failure_to_reach_the_peer() {
+        let text = superseded_refusal_text(
+            OLD,
+            None,
+            &Supersession::Broken {
+                kind: "invalid_proof".to_string(),
+                message: "the hop's proof does not verify".to_string(),
+            },
+        );
+        assert!(text.contains("invalid_proof"));
+        assert!(text.contains("the hop's proof does not verify"));
+        assert!(text.contains("nothing was retried"));
+    }
+
+    #[test]
+    fn an_unfetched_chain_says_the_claim_was_never_confirmed() {
+        // Network failure, not a verdict: the message must not read as "the peer lied", and it
+        // must say the retry is waiting on a verification that has not happened.
+        let text = superseded_refusal_text(
+            OLD,
+            Some(NEW),
+            &Supersession::Unfetched {
+                reason: "connection refused".to_string(),
+            },
+        );
+        assert!(text.contains("connection refused"));
+        assert!(text.contains("could not be fetched to verify"));
+        assert!(text.contains("Nothing was retried"));
     }
 }
