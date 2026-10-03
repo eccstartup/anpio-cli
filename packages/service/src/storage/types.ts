@@ -540,6 +540,15 @@ export interface Storage {
     limit: number,
     notBefore: string | undefined,
   ): DeliveryRecord[]
+  /** How many of this owner's deliveries **for `deviceId`** sit before the floor `before` and
+   *  after `since` — rows the pickup surface can no longer hand out and this device's cursor
+   *  has not passed. The `seq > since` half is not decoration: a row the device already
+   *  fetched is in the local record, so it is not "out of reach", it is filed.
+   *
+   *  Diagnostic only. Nothing is deleted and this number never changes what
+   *  {@link deliveriesSince} answers; it exists so `sync.delta` can say "there is nothing"
+   *  and "everything there is has aged out" apart, which a page length alone cannot. */
+  deliveriesAgedOut(ownerDid: string, deviceId: string, since: number, before: string): number
   /** The highest sequence this owner has, whether or not a device has read it. */
   headSeq(ownerDid: string): number
   /** How far this device has been advanced. 0 when it has never read. */

@@ -163,8 +163,10 @@ cargo run --manifest-path rust/Cargo.toml -- discover http://127.0.0.1:8787
   `records_from` + `MessageStore::record` 是**监听自己那条写入路径**——一份映射，
   两半才不会对"什么算一条投递"各说各话。幂等是双重的：去重键
   `(conversation, sender, message_id)` 管行、单调游标管序。搬不回来的（服务端裁掉的、
-  设备队列过期的、换钥后挂在旧 DID 下的、以及它没有 MLS 接收侧解不开的 P6 密文）
-  **点名说清**，不假装本地就是全部。
+  设备队列过期的、比服务端可读窗口更早因而"不删但看不见"的、换钥后挂在旧 DID 下的、
+  以及它没有 MLS 接收侧解不开的 P6 密文）**点名说清**，不假装本地就是全部——其中窗口外
+  那一类由 `sync.delta` 的 `aged_out` 数出来（`--json` 里是 `aged_out` 字段），
+  `fetch` 于是不把"还有 N 条够不着"打印成一句"brought in: 0"。
 - **`group create | info | members | join | leave | send | update-profile | set-remark`** —— P4 `anp.group.base.v2`。
   `src/group.rs` 放策略逻辑（§7.1 的推荐策略、`--policy` 的浅合并、封闭集合校验）。
   `update-profile --name` 改的是**群自己的名字** `group_profile.display_name`（§7.4），

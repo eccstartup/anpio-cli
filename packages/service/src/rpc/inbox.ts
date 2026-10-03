@@ -106,15 +106,10 @@ export function readDelta(
 ): Record<string, unknown> {
   const since = isCount(body.since) ? body.since : 0
   const limit = isPage(body.limit, MAX_PAGE) ? body.limit : DEFAULT_DELTA_PAGE
+  const floor = readWindowStart(acceptedAt, readWindowMs)
   // 多要一行只为回答 `has_more`，多出来的那一行不进结果。窗口下界与 `limit` 一起进 SQL：
   // 先取页再筛会把页切错——筛掉几行之后"这一页满没满"说的就不是服务端手上的那一段了。
-  const records = storage.deliveriesSince(
-    ownerOf(meta),
-    deviceOf(body),
-    since,
-    limit + 1,
-    readWindowStart(acceptedAt, readWindowMs),
-  )
+  const records = storage.deliveriesSince(ownerOf(meta), deviceOf(body), since, limit + 1, floor)
   const page = records.slice(0, limit)
   const last = page[page.length - 1]
   return {
@@ -134,5 +129,10 @@ export function readDelta(
     // 推到 `headSeq` 才是真的错：那等于替客户端宣告"这一段你看过了"。
     next_since: last === undefined ? since : last.seq,
     has_more: records.length > limit,
+    // 「窗外还有多少」（TODO7 §3）：这一页够不着、游标也还没跨过的行数。少了它，
+    // `brought in: 0` 分不出"真的没有了"与"有，但全在窗口外"——而窗口是**永不裁剪 + 限时
+    // 可见**，所以后者是常态。它是诊断，不参与分页：`messages` / `next_since` / `has_more`
+    // 一个都不因它改。只在第一页可能非零（后一页的 `since` 已经越过那段）。
+    aged_out: storage.deliveriesAgedOut(ownerOf(meta), deviceOf(body), since, floor),
   }
 }

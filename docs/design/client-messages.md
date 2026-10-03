@@ -355,8 +355,9 @@ CREATE TABLE sync_state (
 
 还有一条**同类的窗**：`deliveries` 里比服务端可读窗口（`AGENTX_DELIVERY_READ_WINDOW_MS`，
 默认 30 天）更早的行，服务端也**不答**——它们是"不删但看不见"
-（[message-service.md](message-service.md) §14）。所以 `fetch` 说"brought in: 0"有两种意思：
-真的没有了，或者有的那部分在窗外。客户端今天分不出来，这正是上面那个"要说清"还没做完的一半。
+（[message-service.md](message-service.md) §14）。这条**今天分得出来了**（2026-10-03 用户裁定
+"走甲"）：`sync.delta` 多答一个 `aged_out`，`fetch` 据此在"brought in: 0"之外单独打印一行
+"另有 N 条在窗口外"（`--json` 里是 `aged_out` 字段），于是上面那个句子不再有第二种读法。
 
 ### 8.4 `--json` 的输出不落盘
 

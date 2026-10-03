@@ -788,7 +788,11 @@ Profile"的答案，混进一个 `x_` 值就把它变成另一个问题了。扩
 | 方法 | `body` | 结果 |
 |---|---|---|
 | `direct.get_history` | `{peer_did, since_seq?, limit?}` | `{messages: [...], has_more}` |
-| `sync.delta` | `{since, limit?, device_id?}` | `{messages: [{seq, method, params}], next_since, has_more}` |
+| `sync.delta` | `{since, limit?, device_id?}` | `{messages: [{seq, method, params}], next_since, has_more, aged_out}` |
+
+`aged_out` 是"窗外还有多少"（2026-10-03 用户裁定，TODO7 §3）：这一页够不着、调用方的游标
+也还没跨过的行数。它是诊断，不进分页——`messages` / `next_since` / `has_more` 一个都不因它
+改；它只让"真的没有了"与"有，但全在窗口外"分得开。见 §14 的窗口那一段。
 
 **这张表 2026-10-03 从五行减到两行。** 另外三条（`inbox.get` / `inbox.mark_read` /
 `message.get_batch`）随读侧搬回本地一起退场（用户裁定；落地理由见
@@ -1313,10 +1317,11 @@ AGENTX_DID_REFRESH_BATCH          一轮最多查几个成员，默认 20（A3c-
 所以看不见的行只会排在看得见的行**之前**。由此那条"空页回 `since` 本身"的规则仍然成立：
 整条信箱都过期时游标停在原地，而不是被推到 `headSeq`（那等于替客户端宣告"这一段你看过了"）。
 
-窗口**不承诺**告诉客户端"你还有 N 条在窗外"。今天 `sync.delta` 只说它答得出的那些，所以
-一条都搬不到时看起来就是"brought in: 0"——与换钥那件事
-（[client-messages.md](client-messages.md) §4.3：`deliveries.owner_did` 停在旧 DID 下，而
-客户端问的是新 DID）是同一类失败。要不要加一个"窗外还有多少"的诊断还没定，TODO7 §3 里挂着。
+窗口会告诉客户端"你还有 N 条在窗外"（`aged_out`，2026-10-03 用户裁定"走甲"，见 §9.3）。
+一条都搬不到时，答案因此分得开：`messages` 空、`aged_out` 为 0 是"真的没有了"，`aged_out`
+非零是"有，但全在窗口外，服务端不再往外递"。少了这个数，"brought in: 0" 就是一个有两种
+意思的句子，而读者只会往错的那一种上想。计数只对调用方游标**还没跨过**的那一段负责——
+已经取走的行在本地记录里，那不是"够不着"，那是"归档了"。
 
 ## 15. 实现顺序
 

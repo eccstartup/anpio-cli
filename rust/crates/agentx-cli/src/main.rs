@@ -3237,6 +3237,11 @@ async fn cmd_msg_fetch(
     let mut applied = 0u64;
     let mut replayed = 0u64;
     let mut offline: Vec<String> = Vec::new();
+    // How many rows the service still holds but will not hand out any more, because they are
+    // older than its read window and have not been fetched (`sync.delta` 的 `aged_out`). Taken
+    // as a max: only the first page can be non-zero, since every later page's `since` has
+    // already stepped over that span.
+    let mut aged_out = 0u64;
     loop {
         let mut body = Map::new();
         body.insert("since".to_string(), json!(cursor));
@@ -3252,7 +3257,7 @@ async fn cmd_msg_fetch(
                     channel.endpoint.target.endpoint
                 )
             })?;
-
+        aged_out = aged_out.max(page.get("aged_out").and_then(Value::as_u64).unwrap_or(0));
         for entry in page.get("messages").and_then(Value::as_array).into_iter().flatten() {
             let Some(row) = entry.as_object() else { continue };
             let seq = entry.get("seq").and_then(Value::as_u64).unwrap_or(cursor);
@@ -3306,6 +3311,7 @@ async fn cmd_msg_fetch(
                 "next_since": cursor,
                 "held": held,
                 "unfetchable": offline,
+                "aged_out": aged_out,
             }))?
         );
         return Ok(());
@@ -3323,6 +3329,18 @@ async fn cmd_msg_fetch(
             "  {} not fetched: group-e2ee ciphertext needs `msg listen` to decrypt it, and \
              the device queue may already have dropped it",
             joined(&offline)
+        );
+    }
+    if aged_out > 0 {
+        // §8.3 的第二半：搬不回来的要**说清搬不回来**。这一句说的是另一种搬不回来——
+        // 服务端还留着（保留契约是永不裁剪），但它们已经出了那条「只交出最近这一段」的
+        // 窗口，所以再 fetch 多少次也够不着。少了它，上面那句 `brought in: 0` 在这种情形
+        // 下就是一句会骗人的真话。
+        println!(
+            "  {} not fetched: older than the service's read window, so no fetch can bring \
+             them back — they are not deleted, just past the point where the service hands \
+             them out",
+            aged_out
         );
     }
     Ok(())

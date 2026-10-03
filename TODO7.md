@@ -157,14 +157,26 @@ TODO6 写完了一整轮**写**侧：本机消息库 `messages.db` 的写入侧�
       - **没做**：窗口不承诺告诉客户端"窗外还有 N 条"，所以 `fetch` 的 "brought in: 0" 仍然
         分不出"真的没有了"和"有，但在窗外"。这一条与 §4 那条换钥诊断**不是同一件**——后者
         随换钥迁移落地已经作废，这一条与换钥无关，任何一次 `fetch` 都可能撞上；单独记在
-        §3 末尾那条 `- [ ]` 里。
-- [ ] **取件面：让 `sync.delta` / `fetch` 说得出"窗外还有 N 条"**。今天 `msg fetch` 只报搬
+        §3 末尾那条里（2026-10-03 已裁定"走甲"并落地，见下）。
+- [x] **取件面：让 `sync.delta` / `fetch` 说得出"窗外还有 N 条"**。今天 `msg fetch` 只报搬
       回来几条，"0" 既可能是真的没有了、也可能是窗口外还有一堆——而窗口是**永不裁剪 + 30 天
       可见**（上面那条裁定），所以"有但看不见"是常态、不是异常。要做就得让 `sync.delta` 多答
       一个窗口外的计数（我们自己的扩展面 `x_agentx.inbox.v1`，改它不碰规范），客户端再据此
       分两句打印。**要用户裁定**：是补这个计数，还是维持"只报搬回来的"、把那层分不清交给
       文档说明。两条路都不影响保留契约。落点见
       [message-service.md](docs/design/message-service.md) §14 末尾那半句。
+
+      **2026-10-03 用户裁定"走甲"：补这个计数。** `sync.delta` 的结果多一个 `aged_out`
+      ——这一页够不着、调用方的游标也还没跨过的行数（诊断，不进分页：
+      `messages` / `next_since` / `has_more` 一个都不因它改）。服务端加
+      `Storage.deliveriesAgedOut`（[types.ts](packages/service/src/storage/types.ts) /
+      [sqlite.ts](packages/service/src/storage/sqlite.ts)，`seq > since AND accepted_at < floor`
+      且过同一张 `deviceFilter`），`readDelta` 把 `readWindowStart` 算出的下界喂给它
+      （[inbox.ts](packages/service/src/rpc/inbox.ts)）。客户端 `msg fetch` 把它取成
+      `aged_out`（页间取 max：只有第一页可能非零），`--json` 出 `aged_out` 字段，
+      非 `--json` 多打印一行"另有 N 条在窗口外"（[main.rs](rust/crates/agentx-cli/src/main.rs)
+      的 `cmd_msg_fetch`）。测试：`sqlite.test.ts` 两条（计数与游标的关系、与设备切片同口径），
+      `dispatch.test.ts` 一条（空页 + 非零 `aged_out`，以及把 `since` 推过那段后归零）。
 - [x] **P6 设备队列的有界保留要不要为持久客户端放宽。** 今天是 8 次尝试 / 24 小时
       （[config.ts:41-42](packages/service/src/config.ts#L41)，[deviceQueue.ts](packages/service/src/delivery/deviceQueue.ts) 文件头）。
       24 小时对**推**是合理的（推是尽力而为的优化，拉才是事实），但对一个**离线一天以上**的

@@ -596,6 +596,17 @@ class SqliteStorage implements Storage {
     return rows.map(toDelivery)
   }
 
+  deliveriesAgedOut(ownerDid: string, deviceId: string, since: number, before: string): number {
+    // `seq > ?` here is what keeps the number honest about *this* device: rows at or below the
+    // cursor were already fetched, so they are not out of reach. The floor is the same
+    // lexicographic `<` on `accepted_at` that `deliveriesSince` uses, from the other side.
+    const row = this.stmt(
+      `SELECT COUNT(*) AS n FROM deliveries
+        WHERE owner_did = ? AND seq > ? AND ${deviceFilter('deliveries')} AND accepted_at < ?`,
+    ).get(ownerDid, since, deviceId, before) as Row
+    return int(row.n)
+  }
+
   headSeq(ownerDid: string): number {
     const row = this.stmt(
       'SELECT COALESCE(MAX(seq), 0) AS head FROM deliveries WHERE owner_did = ?',

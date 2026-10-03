@@ -973,6 +973,7 @@ describe('the pick-up extension surface (§9)', () => {
       ],
       next_since: 1,
       has_more: false,
+      aged_out: 0,
     })
   })
 
@@ -1018,7 +1019,7 @@ describe('the pick-up extension surface (§9)', () => {
     const outcome = await asOwner(h, 'sync.delta', { since: 7 })
     // 空页回调用方给的那个 `since`，不是 `headSeq`：窗口是序列的一个**前缀**，把游标推过
     // 客户端没看见的那一段，等于替它宣告"这一段你看过了"——那是服务端在替客户端撒谎。
-    expect(outcome.json?.result).toEqual({ messages: [], next_since: 7, has_more: false })
+    expect(outcome.json?.result).toEqual({ messages: [], next_since: 7, has_more: false, aged_out: 0 })
     expect(h.storage.headSeq(receiver.did)).toBe(1)
   })
 
@@ -1029,7 +1030,24 @@ describe('the pick-up extension surface (§9)', () => {
     seedAt(h, '2026-09-30T00:00:00.000Z', 'recent')
 
     const outcome = await asOwner(h, 'sync.delta', { since: 0 })
-    expect(outcome.json?.result).toEqual({ messages: [], next_since: 0, has_more: false })
+    expect(outcome.json?.result).toEqual({ messages: [], next_since: 0, has_more: false, aged_out: 1 })
+  })
+
+  it('says how much is out of reach, so an empty page is not read as an empty mailbox', async () => {
+    const h = harness()
+    seedAt(h, '2026-08-01T00:00:00.000Z', 'long-ago') // 窗口外
+    seedAt(h, '2026-10-02T00:00:00.000Z', 'recent') // 窗口内
+
+    const outcome = await asOwner(h, 'sync.delta', { since: 0 })
+    const result = outcome.json?.result as { messages: { seq: number }[]; aged_out: number }
+    // 答出来的是窗口内那一条；窗口外那一条以**计数**的形式说出口。
+    expect(result.messages.map((message) => message.seq)).toEqual([2])
+    expect(result.aged_out).toBe(1)
+
+    // 计数只对**这一段游标还没跨过的**负责：调用方把 `since` 推到那条行之后，
+    // 它已经在本地记录里了，就不再是"够不着"。
+    const after = await asOwner(h, 'sync.delta', { since: 1 })
+    expect((after.json?.result as { aged_out: number }).aged_out).toBe(0)
   })
 
   it('refuses a target that is not the signer, with 1014', async () => {

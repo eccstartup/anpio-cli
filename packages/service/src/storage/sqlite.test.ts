@@ -287,6 +287,58 @@ describe('deliveries', () => {
     expect(store.deliveriesSince('did:web:a', '', 0, 10, '2027-01-01T00:00:00.000Z')).toEqual([])
     expect(store.headSeq('did:web:a')).toBe(3)
   })
+
+  it('counts the rows a cursor jumped over and the window no longer covers (aged out)', () => {
+    const store = open()
+    const acceptedAt = ['2026-09-01T00:00:00.000Z', '2026-10-02T00:00:00.000Z', '2026-10-03T00:00:00.000Z']
+    for (const [i, at] of acceptedAt.entries()) {
+      store.appendDelivery({
+        ownerDid: 'did:web:a',
+        messageId: `m${i}`,
+        method: 'direct.incoming',
+        paramsJson: '{}',
+        acceptedAt: at,
+      })
+    }
+    const floor = '2026-10-01T00:00:00.000Z'
+
+    // Only m0 is below the floor, and nothing has been fetched: one row is out of reach.
+    expect(store.deliveriesAgedOut('did:web:a', '', 0, floor)).toBe(1)
+    // A cursor that already passed m0 has it in the local record, so it is filed, not lost.
+    expect(store.deliveriesAgedOut('did:web:a', '', 1, floor)).toBe(0)
+    // A cursor past everything, and a floor below everything, both answer nothing.
+    expect(store.deliveriesAgedOut('did:web:a', '', 3, floor)).toBe(0)
+    expect(store.deliveriesAgedOut('did:web:a', '', 0, '2026-01-01T00:00:00.000Z')).toBe(0)
+    // It is a count of what is still on file: nothing was deleted to make it true.
+    expect(store.headSeq('did:web:a')).toBe(3)
+  })
+
+  it('counts aged-out rows for the same device slice `deliveriesSince` answers', () => {
+    const store = open()
+    const at = '2026-09-01T00:00:00.000Z'
+    store.appendDelivery({
+      ownerDid: 'did:web:a',
+      messageId: 'm-account',
+      method: 'direct.incoming',
+      paramsJson: '{}',
+      acceptedAt: at,
+    })
+    store.appendDelivery({
+      ownerDid: 'did:web:a',
+      messageId: 'm-dev1',
+      method: 'direct.incoming',
+      paramsJson: '{}',
+      acceptedAt: at,
+      recipientDeviceId: 'dev-1',
+    })
+
+    const floor = '2026-10-01T00:00:00.000Z'
+    // The account-addressed row reaches every device; the dev-1 row reaches only dev-1.
+    expect(store.deliveriesAgedOut('did:web:a', '', 0, floor)).toBe(1)
+    expect(store.deliveriesAgedOut('did:web:a', 'dev-1', 0, floor)).toBe(2)
+    expect(store.deliveriesAgedOut('did:web:a', 'dev-2', 0, floor)).toBe(1)
+  })
+
   it('advances a cursor per device and never backwards', () => {
     const store = open()
     expect(store.cursor('did:web:a', 'dev-1')).toBe(0)
