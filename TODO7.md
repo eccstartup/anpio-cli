@@ -299,10 +299,27 @@ TODO6 写完了一整轮**写**侧：本机消息库 `messages.db` 的写入侧�
       （[TODO6](TODO6.md) §5.3，用户 2026-10-03："五以后再说"）。
 - [ ] **覆盖：`did update` / `--resume`、`anp login` 的 401 挑战**这两条路仍在脚本之外
       （[TODO6](TODO6.md) §5.3）。各自要一台愿意配合的主机或第二个设备，不是能顺手塞进去的。
-- [ ] **`packages/e2e` 的跨域中继覆盖**：`groupFederation` 是两台真服务 + 真中继跨域
+- [x] **`packages/e2e` 的跨域中继覆盖**：`groupFederation` 是两台真服务 + 真中继跨域
       `group.send`，本仓别处没有；`msg listen` 那两条是**真 WebSocket**（脚本只补上了回填那半）。
       迁移判据：等中继那半有了别处的覆盖（或 Rust 侧也起两台服务）再谈搬
       （[TODO6](TODO6.md) §7）。**`directSend` 那两条不要照搬**——脚本跑得更真。
+
+      **2026-10-03 补：判据的前提被 §4 那条退役裁掉了一半，所以搬了。** `packages/e2e` 随 TS
+      客户端整包删除（§4 第 1 条），而这一条原本说"等别处有了覆盖再谈搬"——**删的那一刻别处
+      还没有**。搬的是**服务端那半边**（驱动原本是 TS 客户端命令 `call` / `senderFor` /
+      `runGroup`，那半边已经不在了）：
+      - 落点 [crossDomain.test.ts](packages/service/src/federation/crossDomain.test.ts)：
+        两台真 `createServer`（各自 `AGENTX_SERVICE_DID` / 真 HTTP / 真的群文档路由），一次
+        **真**的跨域 `group.send`——A 的 `relay` 真的去取 `http://127.0.0.1:<portB>/g/<id>/did.json`、
+        真的 POST 到 B，回执由 **B** 的群钥签发再带回来；另有一条钉住"A 不替对端记一行群"、
+        一条钉住够不着时是 1012 而不是任何 `group.*` 码。
+      - 驱动改用 core 的 `buildMessageRequest`；**外层签名故意没走**（同原注释：P8 §2.3 按本地
+        调用处理，`origin_proof` 才是授权依据）。
+      - **`directSend` 那两条仍然不搬**（脚本跑得更真）。
+      - **顺带发现的一件，不改，另记**：`group.get_info` 在 `RELAYED_METHODS` 里但**永远中继
+        不到**（它没有 `targetScope`，`dispatch.ts` 在 `relayFor` 之前就从无状态分支返回了），
+        于是 `dispatch.test.ts` 那条"returns the peer refusal unchanged"是**空过**的——本地处理器
+        对未知群答的正是同一句 `group.not_member`。已单开一条待办，不在这一轮改。
 - [ ] **覆盖率**：132 个单测长在库侧，命令面一层几乎没有测试；脚本 + CI 是第三档的载体
       （已裁定，[TODO6](TODO6.md) §5.3）。这一条 2026-10-03 用户原话"以后再说"。
 - [ ] **§2、§3、§4 每一条命令，落地时同时写文档**——命令面和文档在同一次改动里。
