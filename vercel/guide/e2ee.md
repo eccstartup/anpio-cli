@@ -47,7 +47,7 @@ MLS 的 create / add / remove 全在 owner 客户端。成员变更时，**历�
 `group.e2ee.add` 只给 `commit_b64u` / `welcome_b64u` / `ratchet_tree_b64u`，服务端原样转发。
 
 **Device Delivery Queue** 是 push-based 的设备队列，按 `(recipient_did, recipient_device_id)`
-分片、队头有序。到达次数上限（默认 8 次）或入队时限（默认 24 小时）时丢弃，**丢弃不得阻塞**
+分片、队头有序。到达次数上限（默认 8 次）或入队时限（默认 30 天）时丢弃，**丢弃不得阻塞**
 后续 epoch 或新的 `group.e2ee.send`。
 
 ## 设备寻址是一等公民

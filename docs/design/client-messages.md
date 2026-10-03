@@ -346,8 +346,13 @@ CREATE TABLE sync_state (
 落地后"`msg listen --once` = `fetch` 再加打印"这个关系要写下来，别让两条路各写各的。
 
 **它搬不回来的东西要说清。** `deliveries` 之外还有一条 **P6 设备队列**（§12 的帧），那批帧有
-自己的有界保留（8 次尝试 / 24 小时）。`sync.delta` 答的是 `deliveries`，所以设备队列里过期的
+自己的有界保留（8 次尝试 / 30 天）。`sync.delta` 答的是 `deliveries`，所以设备队列里过期的
 那些 `fetch` **补不回来**——这是服务端那一半要给的答案（TODO7 §3），不是客户端补得了的。
+
+还有一条**同类的窗**：`deliveries` 里比服务端可读窗口（`AGENTX_DELIVERY_READ_WINDOW_MS`，
+默认 30 天）更早的行，服务端也**不答**——它们是"不删但看不见"
+（[message-service.md](message-service.md) §14）。所以 `fetch` 说"brought in: 0"有两种意思：
+真的没有了，或者有的那部分在窗外。客户端今天分不出来，这正是上面那个"要说清"还没做完的一半。
 
 ### 8.4 `--json` 的输出不落盘
 

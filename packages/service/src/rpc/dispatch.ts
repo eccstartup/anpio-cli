@@ -319,7 +319,7 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
       case MESSAGE_GET_BATCH:
         return readBatch(deps.storage, meta, body)
       case SYNC_DELTA:
-        return readDelta(deps.storage, meta, body)
+        return readDelta(deps.storage, meta, body, deps.config.deliveryReadWindowMs, input.acceptedAt)
       case INBOX_MARK_READ:
         return markRead(deps.storage, meta, body, input.acceptedAt)
       // TODO6 §3 的通讯录。三条与取件面同形——`self-addressed` 那层绑定保证 `owner_did`

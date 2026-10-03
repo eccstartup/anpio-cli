@@ -36,10 +36,27 @@ const DEFAULT_DB = './agentx.db'
 const DEFAULT_PREKEY_BURST = 60
 const DEFAULT_PREKEY_PER_MINUTE = 60
 
-/** P6 §12.6 的两条有界保留闸门的缺省：与 `deviceQueue.ts` 原先内联的值一致——8 次尝试、
- *  24 小时在队时长。§12.6 只要求上限是"显式、由部署声明"的，数值是本实现声明的。 */
+/** P6 §12.6 的两条有界保留闸门的缺省：8 次尝试、**30 天**在队时长。§12.6 只要求上限是
+ *  "显式、由部署声明"的，数值是本实现声明的。
+ *
+ *  30 天是 2026-10-03 用户裁定的（TODO7 §3）：它要**与取件面的可读窗口同宽**
+ *  （{@link DEFAULT_DELIVERY_READ_WINDOW_MS}），否则会出现"`sync.delta` 说没有、设备队列里
+ *  其实还有一条"这种两个窗口各说各话的缝。24 小时对**推**本来是对的——推是尽力而为的优化，
+ *  拉才是事实——但设备队列是**拉**也拿不到的那一半，所以它的宽度就是消息能活多久。 */
 const DEFAULT_DEVICE_QUEUE_MAX_ATTEMPTS = 8
-const DEFAULT_DEVICE_QUEUE_MAX_AGE_MS = 24 * 60 * 60_000
+const DEFAULT_DEVICE_QUEUE_MAX_AGE_MS = 30 * 24 * 60 * 60_000
+
+/** 取件面能看多旧的东西：**30 天**（2026-10-03 用户裁定，TODO7 §3）。
+ *
+ *  裁定原话是"可以设置成不删除，但是只能访问 30 天内的数据"——**不删**与**看不见**是两件事，
+ *  这一条只管后者：`deliveries` 里的行一条都不动（§3 的保留契约因此是"永不裁剪"），读的人
+ *  只被允许往回看这么远。好处是"删数据"这件不可逆的事不发生在这个服务里，代价是磁盘随收件箱
+ *  长——那是运维的事，写进了 `message-service.md` §14。
+ *
+ *  与 {@link DEFAULT_DEVICE_QUEUE_MAX_AGE_MS} **取同一个数**不是巧合：两个窗口说的是同一句
+ *  "一条消息在这里活多久"，一个管 `deliveries`（拉得到的那半），一个管设备队列（只有推能到
+ *  的那半）。两边不一样就会出现一条缝：`sync.delta` 说没有，而队列里其实还有。 */
+const DEFAULT_DELIVERY_READ_WINDOW_MS = 30 * 24 * 60 * 60_000
 
 /** §8.12 定时刷新的缺省（A3c-4）：**6 小时一轮、一轮最多看 20 行**。
  *
@@ -175,6 +192,15 @@ export interface Config {
   prekeyRate: { burst: number; perMinute: number }
   /** P6 §12.6 的两条有界保留闸门，做成部署档位。 */
   deviceQueue: DeviceQueue
+  /**
+   * 取件面（`sync.delta`）能往回看多远，毫秒。**这是能见度，不是保留**——`deliveries` 里的行
+   * 一条都不删（§3 的契约是"永不裁剪"），这个数只决定 `sync.delta` 还答不答它。
+   *
+   * 两个方向的取舍都落在它身上：调大 = 客户端离线更久也补得回来、磁盘与一次查询的扫描面更大；
+   * 调小 = 服务端手上那份"还能搬给客户端的东西"更短，`msg fetch` 搬不回来的历史更多。
+   * 见 {@link DEFAULT_DELIVERY_READ_WINDOW_MS}。
+   */
+  deliveryReadWindowMs: number
   /** P4 §8.12 定时刷新的节奏，做成部署档位（A3c-4）。 */
   memberDidRefresh: MemberDidRefresh
 }
@@ -362,6 +388,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
         DEFAULT_DEVICE_QUEUE_MAX_AGE_MS,
       ),
     },
+    // 取件面的可读窗口。与上面那两个**不同**：它不裁剪任何东西，只回答"还说不说"。
+    deliveryReadWindowMs: parsePositive(
+      env.AGENTX_DELIVERY_READ_WINDOW_MS,
+      'AGENTX_DELIVERY_READ_WINDOW_MS',
+      DEFAULT_DELIVERY_READ_WINDOW_MS,
+    ),
     memberDidRefresh: {
       intervalMs: parsePositive(
         env.AGENTX_DID_REFRESH_INTERVAL_MS,

@@ -25,7 +25,8 @@ TODO6 写完了一整轮**写**侧：本机消息库 `messages.db` 的写入侧�
 | `msg inbox` / `msg show` / `msg read` 仍然**只问服务端** | [cli.md](docs/design/cli.md) §8："读侧还没动——`msg inbox` 仍然只问服务端" |
 | 服务端**从不裁剪** `deliveries` | `grep -rn -i 'delete.*from deliveries' packages/service/src` → **0 行** |
 | `delivery_cursor` 的**唯一**写入者是 `stream.ack` | [sqlite.ts:653](packages/service/src/storage/sqlite.ts#L653) `advanceCursor` |
-| P6 设备队列有界保留：**8 次 / 24 小时** | [config.ts:41-42](packages/service/src/config.ts#L41) |
+| P6 设备队列有界保留：**8 次 / 30 天** | [config.ts:46-47](packages/service/src/config.ts#L46) |
+| 取件面可读窗口：**30 天**（不删，只是看不见） | [config.ts:59](packages/service/src/config.ts#L59) |
 | 取件面 `x_agentx.inbox.v1` 是**本服务的扩展**，规范里没有 | [inbox.ts](packages/service/src/rpc/inbox.ts) 抬头；规范 P3 §1 / P5 §10.7 / P6 / P8 §35 都排除 |
 | `direct.get_history` 有形状、**v1 不实现** | [message-service.md:785](docs/design/message-service.md#L785)（`since_seq` 没有定义） |
 | 换钥后 `deliveries.owner_did` **不跟着迁** | [message-service.md:914](docs/design/message-service.md#L914)——「这一条是已知的、还没解的问题」 |
@@ -116,7 +117,7 @@ TODO6 写完了一整轮**写**侧：本机消息库 `messages.db` 的写入侧�
 读 = 本地之后，"服务端还把消息留多久、什么时候能删"从一件无所谓的事变成读侧的**上界**：
 服务端删掉的东西，`fetch` 再也搬不回来。四条都落在 `packages/service`。
 
-- [ ] **补一条明确的 ack / 保留契约。** 现状是**永不裁剪**（§1 量出来的：没有任何
+- [x] **补一条明确的 ack / 保留契约。** 现状是**永不裁剪**（§1 量出来的：没有任何
       `DELETE FROM deliveries`）。要么把"不删"写成**契约**（那 `deliveries` 会随收件箱无限长，
       要为它设一个上限或一条运维说明），要么定**什么时候能删**——而 ack（`stream.ack` 推进
       `delivery_cursor`）正是那个"客户端说读到了"的信号。这里的问题是：**ack 到哪一档才允许删？**
@@ -136,7 +137,26 @@ TODO6 写完了一整轮**写**侧：本机消息库 `messages.db` 的写入侧�
       **建议先走 (乙)**：它今天就是真的，写下来不改一行代码；而 (甲) 要的设备名册本身是一条新的
       真相（账号里有哪些设备），属于换钥 / 设备撤销那条线，不该在这一轮顺手造。
       **这条要用户裁定。**
-- [ ] **P6 设备队列的有界保留要不要为持久客户端放宽。** 今天是 8 次尝试 / 24 小时
+
+      **2026-10-03 用户裁定：「可以设置成不删除，但是只能访问 30 天内的数据。」** 于是这一条
+      分成两半，而且是两个不同的东西：
+      - **保留 = 永不裁剪**，写成了契约。`message-service.md` §7 的 `deliveries` 建表处逐字写着
+        没有任何 DELETE 会到这张表，以及为什么 ack **不是**能删的信号（就是上面那个算不出来的
+        下界：本服务没有设备名册）。纸面上它可逆——想删随时能加。
+      - **能见度 = 30 天**，这一半是新的：`AGENTX_DELIVERY_READ_WINDOW_MS`（缺省 30 天，
+        [config.ts](packages/service/src/config.ts)），`sync.delta` 只答窗口内的行。
+        `Storage::deliveriesSince` 多了个 `notBefore`（`string | undefined`，`undefined` = 无界，
+        storage 层的测试与非取件面的读者用这个值）；下界按**这次请求自己的** `acceptedAt` 算，
+        不是 `Date.now()`，所以同一批里两次读不会因为跨了一个毫秒而不同。
+      - 窗口对 `seq` 是**前缀**（序号按追加分配、`accepted_at` 就是那次请求的时刻），所以
+        "空页回 `since` 本身"那条规则仍然成立：整条信箱都过期时游标停在原地，而不是被推到
+        `headSeq`——那等于替客户端宣告"这一段你看过了"。三条断言钉住了它
+        （[dispatch.test.ts](packages/service/src/rpc/dispatch.test.ts) 的"取件面的可读窗口"那一组
+        与 [sqlite.test.ts](packages/service/src/storage/sqlite.test.ts) 的 `drops rows accepted
+        before the floor`）。
+      - **没做**：窗口不承诺告诉客户端"窗外还有 N 条"，所以 `fetch` 的 "brought in: 0" 仍然
+        分不出"真的没有了"和"有，但在窗外"。这一条挂在 §4 那条换钥诊断旁边。
+- [x] **P6 设备队列的有界保留要不要为持久客户端放宽。** 今天是 8 次尝试 / 24 小时
       （[config.ts:41-42](packages/service/src/config.ts#L41)，[deviceQueue.ts](packages/service/src/delivery/deviceQueue.ts) 文件头）。
       24 小时对**推**是合理的（推是尽力而为的优化，拉才是事实），但对一个**离线一天以上**的
       客户端，那批 P6 帧就过期了。要定的不是"调大数字"，是**这批帧过期后 `fetch` 能不能把它们补回来**
@@ -151,6 +171,17 @@ TODO6 写完了一整轮**写**侧：本机消息库 `messages.db` 的写入侧�
       要改的话是两条，都要裁定：**放宽保留**（数字是部署档位，改 `AGENTX_DEVICE_QUEUE_MAX_AGE_MS`
       即可，但那只是把窗口推远），或者**给 P6 帧也写一条可补拉的记录**（那是让设备队列与
       `deliveries` 共享一条持久路径，等于改 §12.6 的发射面）。**这条要用户裁定。**
+
+      **2026-10-03 用户裁定：「你要么把它写成 30 天吧。」** 走了"放宽"那一支，没走"给 P6 帧
+      写可补拉记录"（那会动 §12.6 的发射面，而 §12.6 明说不给它写行）。落法：
+      `DEFAULT_DEVICE_QUEUE_MAX_AGE_MS` 从 24 小时改成 **30 天**
+      （[config.ts](packages/service/src/config.ts)），`config.test.ts` 的缺省断言跟上，
+      三处散文（[deviceQueue.ts](packages/service/src/delivery/deviceQueue.ts) 文件头、
+      [e2ee-group.md](docs/design/e2ee-group.md) §6.2、[client-messages.md](docs/design/client-messages.md)
+      §8.3）与新变量的文档（`message-service.md` §14、[e2ee.md](vercel/guide/e2ee.md)）同步。
+      **取 30 天而不是别的数，是为了与取件面可读窗口对齐**：两个窗口说的是同一句"一条消息在
+      这里活多久"，一个管 `deliveries`（拉得到的那半），一个管设备队列（只有推能到的那半）；
+      不一样就会出现"`sync.delta` 说没有、队列里其实还有一条"这条缝。
 - [x] **补拉历史的接口**（现在**没有规范位**）。两个候选，要先选：
       - `direct.get_history {peer_did, since_seq?, limit?}`——§9.3 表里有形状，
         **v1 不实现**，因为 `since_seq` 没有定义：序号是**收件箱级**的交付计数器，而 `peer_did`

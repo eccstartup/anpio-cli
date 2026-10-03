@@ -555,8 +555,27 @@ export interface Storage {
   appendDelivery(delivery: Omit<DeliveryRecord, 'seq'>): DeliveryRecord
   /** The owner's deliveries after `since`, in order, **for `deviceId`** — `''` means no
    *  device was declared, so only the account-addressed rows come back (see
-   *  {@link deviceFilter}). `limit` bounds one page. */
-  deliveriesSince(ownerDid: string, deviceId: string, since: number, limit: number): DeliveryRecord[]
+   *  {@link deviceFilter}). `limit` bounds one page.
+   *
+   *  `notBefore` is the read window's floor: rows accepted strictly before it are not
+   *  answered. `undefined` means no floor at all, which is what the storage layer's own
+   *  tests and the mailbox readers that are not the pickup surface want — the floor is a
+   *  **policy of the caller** (`config.deliveryReadWindowMs`, applied by
+   *  `rpc/inbox.ts`), not a property of what this table holds. Nothing is ever deleted
+   *  from `deliveries`; a row outside the window is still there, it is just not handed
+   *  out.
+   *
+   *  The window is a **prefix** of the sequence, not a scatter: `seq` is assigned by
+   *  appending and `accepted_at` is that same request's instant, so a row the caller may
+   *  not see is followed only by rows it may. That is what lets a client's cursor walk
+   *  into the window and stay there — see {@link next_since} in `readDelta`. */
+  deliveriesSince(
+    ownerDid: string,
+    deviceId: string,
+    since: number,
+    limit: number,
+    notBefore: string | undefined,
+  ): DeliveryRecord[]
   /** The highest sequence this owner has, whether or not a device has read it. */
   headSeq(ownerDid: string): number
   /** How far this device has been advanced. 0 when it has never read. */

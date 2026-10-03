@@ -361,10 +361,17 @@ WebSocket 订阅（`registry.publishDevice`）。推不到（设备没连着）*
 
 - **尝试次数**（默认 8，`AGENTX_DEVICE_QUEUE_MAX_ATTEMPTS`）：管 HTTP 那头。与 C9 的 outbox
   同形、同一条理由（P3 §8.4 L477 交给本地策略），到顶丢弃并记一笔。
-- **在队时长**（默认 24 小时，`AGENTX_DEVICE_QUEUE_MAX_AGE_MS`）：第二条闸门，也是**唯一**
+- **在队时长**（默认 30 天，`AGENTX_DEVICE_QUEUE_MAX_AGE_MS`）：第二条闸门，也是**唯一**
   能收掉本地那条路的（它不记尝试）。超龄的行在**投递前**扫掉，所以一台长期卡住的设备不会
   把自己的队列永久冻住，MUST NOT 阻塞该群后续 epoch、保留 leaf 的投递、或新
   `group.e2ee.send` 的接受（§12.3 L1456–1458）。
+
+  这个 30 天是 2026-10-03 裁定的，理由与 §12.6 那条上限无关，是**窗口对齐**：P6 的信封在
+  `deliveries` 里没有行（§6），所以设备队列是 `sync.delta` **够不着**的那一半，而它的宽度
+  就是"这条群消息还能不能到"。取与取件面可读窗口同一个值
+  （`AGENTX_DELIVERY_READ_WINDOW_MS`，[message-service.md](message-service.md) §14），
+  两个窗口才不会各说各话。24 小时对**推**本来是对的（推是尽力而为的优化，拉才是事实），
+  错在它同时是**拉**也拿不到的那一半的存活期。
 
 两个数值都是**部署档位**（A5）：§12.6 只要求上限是"显式、由部署声明"的，没给数字，所以落在
 `Config` 上（`config.ts` 的 `deviceQueue`，见 [message-service.md](message-service.md) §14）——

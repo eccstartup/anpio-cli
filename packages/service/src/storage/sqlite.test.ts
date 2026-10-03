@@ -235,15 +235,15 @@ describe('deliveries', () => {
     })
 
     // The device that owns the ciphertext sees both rows: its own, and the account's.
-    const asDev1 = store.deliveriesSince('did:web:a', 'dev-1', 0, 10)
+    const asDev1 = store.deliveriesSince('did:web:a', 'dev-1', 0, 10, undefined)
     expect(asDev1.map((record) => record.messageId)).toEqual(['m1', 'm2'])
     expect(asDev1[0]?.recipientDeviceId).toBe('dev-1')
     expect(asDev1[1]?.recipientDeviceId).toBeUndefined()
 
     // A caller that declared no device — and a sibling that declared a different one —
     // get the account's row only. That second case is the one §10.7.1 L1407 is about.
-    expect(store.deliveriesSince('did:web:a', '', 0, 10).map((r) => r.messageId)).toEqual(['m2'])
-    expect(store.deliveriesSince('did:web:a', 'dev-2', 0, 10).map((r) => r.messageId)).toEqual(['m2'])
+    expect(store.deliveriesSince('did:web:a', '', 0, 10, undefined).map((r) => r.messageId)).toEqual(['m2'])
+    expect(store.deliveriesSince('did:web:a', 'dev-2', 0, 10, undefined).map((r) => r.messageId)).toEqual(['m2'])
   })
 
   it('pages after a sequence, in order', () => {
@@ -258,10 +258,34 @@ describe('deliveries', () => {
       })
     }
 
-    const page = store.deliveriesSince('did:web:a', '', 2, 2)
+    const page = store.deliveriesSince('did:web:a', '', 2, 2, undefined)
     expect(page.map((record) => record.seq)).toEqual([3, 4])
     expect(page.map((record) => record.messageId)).toEqual(['m2', 'm3'])
-    expect(store.deliveriesSince('did:web:a', '', 5, 10)).toEqual([])
+    expect(store.deliveriesSince('did:web:a', '', 5, 10, undefined)).toEqual([])
+  })
+
+  it('drops rows accepted before the floor, and keeps the rows it does not answer', () => {
+    const store = open()
+    const acceptedAt = ['2026-09-01T00:00:00.000Z', '2026-10-02T00:00:00.000Z', '2026-10-03T00:00:00.000Z']
+    for (const [i, at] of acceptedAt.entries()) {
+      store.appendDelivery({
+        ownerDid: 'did:web:a',
+        messageId: `m${i}`,
+        method: 'direct.incoming',
+        paramsJson: '{}',
+        acceptedAt: at,
+      })
+    }
+
+    // The floor is inclusive and lexicographic on the stored form, so the row accepted
+    // exactly at it is answered.
+    expect(store.deliveriesSince('did:web:a', '', 0, 10, '2026-10-02T00:00:00.000Z').map((r) => r.messageId)).toEqual(
+      ['m1', 'm2'],
+    )
+    // A floor past every row answers nothing — and the rows are still on file, which is
+    // the whole contract: this is visibility, not retention.
+    expect(store.deliveriesSince('did:web:a', '', 0, 10, '2027-01-01T00:00:00.000Z')).toEqual([])
+    expect(store.headSeq('did:web:a')).toBe(3)
   })
   it('advances a cursor per device and never backwards', () => {
     const store = open()
@@ -543,7 +567,7 @@ describe('the v6 → v7 migration', () => {
     // The row written before the column existed is a P3 delivery, so it must read back
     // with no device rather than with an empty one — that difference is what decides who
     // the frame is pushed to (registry.ts `reaches`).
-    const [record] = store.deliveriesSince('did:web:a', '', 0, 10)
+    const [record] = store.deliveriesSince('did:web:a', '', 0, 10, undefined)
     expect(record?.messageId).toBe('m1')
     expect(record?.recipientDeviceId).toBeUndefined()
 

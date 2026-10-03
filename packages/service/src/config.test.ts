@@ -118,8 +118,8 @@ describe('AGENTX_MAX_BODY', () => {
 })
 
 describe('AGENTX_DEVICE_QUEUE_*', () => {
-  it('defaults the two retention gates to 8 attempts and 24h', () => {
-    expect(loadConfig({}).deviceQueue).toEqual({ maxAttempts: 8, maxAgeMs: 24 * 60 * 60_000 })
+  it('defaults the two retention gates to 8 attempts and 30 days', () => {
+    expect(loadConfig({}).deviceQueue).toEqual({ maxAttempts: 8, maxAgeMs: 30 * 24 * 60 * 60_000 })
   })
 
   it('takes deployment values', () => {
@@ -131,6 +131,18 @@ describe('AGENTX_DEVICE_QUEUE_*', () => {
     expect(loadConfig({ AGENTX_DEVICE_QUEUE_MAX_ATTEMPTS: '' }).deviceQueue.maxAttempts).toBe(8)
     expect(() => loadConfig({ AGENTX_DEVICE_QUEUE_MAX_ATTEMPTS: '0' })).toThrow(/positive integer/)
     expect(() => loadConfig({ AGENTX_DEVICE_QUEUE_MAX_AGE_MS: '-1' })).toThrow(/positive integer/)
+  })
+})
+
+describe('AGENTX_DELIVERY_READ_WINDOW_MS', () => {
+  it('defaults the pickup surface to 30 days', () => {
+    expect(loadConfig({}).deliveryReadWindowMs).toBe(30 * 24 * 60 * 60_000)
+  })
+
+  it('takes a deployment value, treats empty as unset, rejects a non-positive integer', () => {
+    expect(loadConfig({ AGENTX_DELIVERY_READ_WINDOW_MS: '3600000' }).deliveryReadWindowMs).toBe(3_600_000)
+    expect(loadConfig({ AGENTX_DELIVERY_READ_WINDOW_MS: '' }).deliveryReadWindowMs).toBe(30 * 24 * 60 * 60_000)
+    expect(() => loadConfig({ AGENTX_DELIVERY_READ_WINDOW_MS: '0' })).toThrow(/positive integer/)
   })
 })
 

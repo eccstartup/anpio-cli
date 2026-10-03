@@ -622,12 +622,29 @@ class SqliteStorage implements Storage {
     })
   }
 
-  deliveriesSince(ownerDid: string, deviceId: string, since: number, limit: number): DeliveryRecord[] {
+  deliveriesSince(
+    ownerDid: string,
+    deviceId: string,
+    since: number,
+    limit: number,
+    notBefore: string | undefined,
+  ): DeliveryRecord[] {
+    // The floor is spelled as a predicate that is simply absent when there is no floor,
+    // rather than `(? IS NULL OR accepted_at >= ?)`: the latter needs `notBefore` bound
+    // twice, and it sits right where `deviceFilter` also binds a `?` — an off-by-one in
+    // positional arguments there is silent, since a timestamp bound into the device
+    // column just matches nothing and answers an empty page. Lexicographic `>=` is exact
+    // because every `accepted_at` this service writes is
+    // `Date.prototype.toISOString()`: one format, UTC, three fractional digits
+    // (`dispatch.ts` 的 `acceptedAt`).
+    const floor = notBefore === undefined ? '' : ' AND accepted_at >= ?'
+    const args: (string | number)[] = [ownerDid, since, deviceId]
+    if (notBefore !== undefined) args.push(notBefore)
     const rows = this.stmt(
       `SELECT * FROM deliveries
-        WHERE owner_did = ? AND seq > ? AND ${deviceFilter('deliveries')}
+        WHERE owner_did = ? AND seq > ? AND ${deviceFilter('deliveries')}${floor}
         ORDER BY seq LIMIT ?`,
-    ).all(ownerDid, since, deviceId, limit) as Row[]
+    ).all(...args, limit) as Row[]
     return rows.map(toDelivery)
   }
 

@@ -193,11 +193,37 @@ export function readBatch(storage: Storage, meta: AnpMeta, body: Record<string, 
   }
 }
 
-export function readDelta(storage: Storage, meta: AnpMeta, body: Record<string, unknown>): Record<string, unknown> {
+/**
+ * 取件面的**可读窗口**（2026-10-03 用户裁定，TODO7 §3）：`deliveries` 一条都不删，但
+ * `sync.delta` 只答最近这么久的行。窗口下界由**这次请求自己的**时刻算，不是 `Date.now()`——
+ * 同一批 assert 里两次调用必须落在同一个瞬间，否则一条投递会不会被答出来取决于两次之间
+ * 服务端有没有跨过那个毫秒（`acceptedAt` 本来就是这么一路传下来的：`dispatch` 一次请求一个）。
+ *
+ * `windowMs` 是正数（配置层 `parsePositive` 保证），但真到了 `<= 0` 也只是把窗口收成
+ * "只能看见未来"，不会算出 `Invalid Date`——`parsePositive` 之外没有人能给出这个值。
+ */
+function readWindowStart(acceptedAt: string, windowMs: number): string {
+  return new Date(Date.parse(acceptedAt) - windowMs).toISOString()
+}
+
+export function readDelta(
+  storage: Storage,
+  meta: AnpMeta,
+  body: Record<string, unknown>,
+  readWindowMs: number,
+  acceptedAt: string,
+): Record<string, unknown> {
   const since = isCount(body.since) ? body.since : 0
   const limit = isPage(body.limit, MAX_PAGE) ? body.limit : DEFAULT_DELTA_PAGE
-  // 多要一行只为回答 `has_more`，多出来的那一行不进结果。
-  const records = storage.deliveriesSince(ownerOf(meta), deviceOf(body), since, limit + 1)
+  // 多要一行只为回答 `has_more`，多出来的那一行不进结果。窗口下界与 `limit` 一起进 SQL：
+  // 先取页再筛会把页切错——筛掉几行之后"这一页满没满"说的就不是服务端手上的那一段了。
+  const records = storage.deliveriesSince(
+    ownerOf(meta),
+    deviceOf(body),
+    since,
+    limit + 1,
+    readWindowStart(acceptedAt, readWindowMs),
+  )
   const page = records.slice(0, limit)
   const last = page[page.length - 1]
   return {
@@ -209,6 +235,12 @@ export function readDelta(storage: Storage, meta: AnpMeta, body: Record<string, 
       params: JSON.parse(record.paramsJson) as unknown,
     })),
     // 空页回 `since` 本身：一个"没有新东西"的答案是"你还在原位"，不是"回到 0"。
+    //
+    // 窗口**不会**让这一条把游标推过看不见的那一段：窗口是序列的一个前缀（见
+    // `types.ts` 的 {@link Storage.deliveriesSince}），所以看不见的行只在**比看见的行更早**
+    // 的位置上。整条信箱都过期时这一页是空的、`next_since` 停在 `since`，客户端于是每次
+    // 都重问一遍——那是对的答案("我这儿没有你能拿的")，只是问得有点勤；反过来把 `next_since`
+    // 推到 `headSeq` 才是真的错：那等于替客户端宣告"这一段你看过了"。
     next_since: last === undefined ? since : last.seq,
     has_more: records.length > limit,
   }

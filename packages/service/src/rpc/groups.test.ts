@@ -124,7 +124,7 @@ function mintGroup(policy: Record<string, unknown> = OPEN_POLICY, extra: Record<
 }
 
 function deliveriesFor(did: string): DeliveryRecord[] {
-  return storage.deliveriesSince(did, '', 0, 100)
+  return storage.deliveriesSince(did, '', 0, 100, undefined)
 }
 
 /** 某个收件人收到的 `group.state_changed` 事件对象。 */

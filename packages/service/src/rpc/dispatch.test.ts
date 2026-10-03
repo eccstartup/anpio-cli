@@ -34,7 +34,7 @@ import {
   signatureBaseBytes,
   utf8,
 } from '@agentx/core/advanced'
-import { loadConfig } from '../config'
+import { loadConfig, type Config } from '../config'
 import type { ForwardOutcome, Relay } from '../federation/forward'
 import { createHttpNonceStore } from '../federation/nonces'
 import { openObjectStore } from '../objects'
@@ -313,6 +313,7 @@ interface Harness {
 function harness(
   overrides: {
     storage?: Storage
+    config?: Config
     locator?: ServiceLocator
     nonceStore?: NonceStore
     relay?: Relay
@@ -323,7 +324,7 @@ function harness(
   const storage = overrides.storage ?? openStorage({ path: ':memory:' })
   const logs: string[] = []
   const handle = createDispatch({
-    config: loadConfig({}),
+    config: overrides.config ?? loadConfig({}),
     storage,
     // 这个文件里的方法没有一条会碰对象字节，但 `DispatchDeps` 要求它：一个广告了
     // `anp.attachment.v1` 的服务必须真的能存下字节（`dispatch.ts` 里有说明）。路径必须是
@@ -472,7 +473,7 @@ describe('accepting a direct message', () => {
 
     expect(h.storage.dueOutbox(NOW.toISOString(), 10)).toEqual([])
 
-    const delivered = h.storage.deliveriesSince(receiver.did, '', 0, 10)
+    const delivered = h.storage.deliveriesSince(receiver.did, '', 0, 10, undefined)
     expect(delivered).toHaveLength(1)
     expect(delivered[0]?.method).toBe('direct.incoming')
 
@@ -500,7 +501,7 @@ describe('accepting a direct message', () => {
     const h = harness()
     const request = await signed()
     await h.call(request)
-    const delivered = h.storage.deliveriesSince(receiver.did, '', 0, 1)[0]
+    const delivered = h.storage.deliveriesSince(receiver.did, '', 0, 1, undefined)[0]
     const params = JSON.parse(delivered?.paramsJson ?? '{}') as { auth?: unknown }
     expect(params.auth).toEqual(request.params.auth)
   })
@@ -511,7 +512,7 @@ describe('accepting a direct message', () => {
     const retry = await h.call({ ...(await signed()), id: 'req-2' })
     expect(retry.json?.result?.accepted).toBe(true)
     // 两行意味着收件人会读两遍同一条消息，而这正是 §8.2 L444–450 要避免的。
-    expect(h.storage.deliveriesSince(receiver.did, '', 0, 10)).toHaveLength(1)
+    expect(h.storage.deliveriesSince(receiver.did, '', 0, 10, undefined)).toHaveLength(1)
   })
 
   it('carries conversation_id through to the result when the body has one', async () => {
@@ -756,7 +757,7 @@ describe('a device-addressed direct message (P5 anp.direct.e2ee.v2)', () => {
     // L1407 禁止 fan-out。推送那一步按这一列筛连接（C12 的前一块），所以这里验的是它的来源。
     const h = harness()
     await h.call(e2eeRequest())
-    const [delivered] = h.storage.deliveriesSince(receiver.did, RECEIVER_DEVICE, 0, 10)
+    const [delivered] = h.storage.deliveriesSince(receiver.did, RECEIVER_DEVICE, 0, 10, undefined)
     expect(delivered?.recipientDeviceId).toBe(RECEIVER_DEVICE)
   })
 
@@ -824,7 +825,7 @@ describe('a device-addressed direct message (P5 anp.direct.e2ee.v2)', () => {
 
     expect(retry.json?.error).toBeUndefined()
     expect(retry.json?.result).toEqual(first.json?.result)
-    expect(h.storage.deliveriesSince(receiver.did, RECEIVER_DEVICE, 0, 10)).toHaveLength(1)
+    expect(h.storage.deliveriesSince(receiver.did, RECEIVER_DEVICE, 0, 10, undefined)).toHaveLength(1)
   })
 
   it('does not verify the peer devices when the recipient lives elsewhere', async () => {
@@ -865,7 +866,7 @@ describe('a device-addressed direct message (P5 anp.direct.e2ee.v2)', () => {
     const h = harness()
     const outcome = await h.call(e2eeRequest({ body: { session_id: 's', recipient_bundle_id: 'b' } }))
     expect(outcome.json?.error).toBeUndefined()
-    expect(h.storage.deliveriesSince(receiver.did, RECEIVER_DEVICE, 0, 10)[0]?.paramsJson).toContain('"session_id":"s"')
+    expect(h.storage.deliveriesSince(receiver.did, RECEIVER_DEVICE, 0, 10, undefined)[0]?.paramsJson).toContain('"session_id":"s"')
   })
 })
 
@@ -1066,6 +1067,62 @@ describe('the pick-up extension surface (§9)', () => {
       next_since: 1,
       has_more: false,
     })
+  })
+
+  // ---- 取件面的可读窗口（2026-10-03 裁定：不删，但只答 30 天内的）-------------------
+  //
+  // 这一族验的是"**看得见**"与"**还在**"是两件事：窗口把行挡在答案之外，而它一条都没少。
+  // 窗口下界按**这次请求自己的** `acceptedAt` 算，所以一个固定的 `NOW` 就够把两侧都钉住。
+
+  /** 一条落在 `receiver` 信箱里、受理时间由调用方指定的行。
+   *
+   *  绕过受理路直接写：受理路给每一条行盖的都是**这次请求的**时刻（`NOW`），也就是读的
+   *  时候会用的那一个，所以"一条过期的行"根本没法从受理路造出来——而"过期的行还在表上"
+   *  恰恰是这几条要说的状态。 */
+  function seedAt(h: Harness, acceptedAt: string, messageId: string): void {
+    h.storage.appendDelivery({
+      ownerDid: receiver.did,
+      messageId,
+      method: 'direct.incoming',
+      paramsJson: '{}',
+      acceptedAt,
+    })
+  }
+
+  it('answers only the deliveries the read window still covers', async () => {
+    const h = harness()
+    seedAt(h, '2026-08-01T00:00:00.000Z', 'long-ago') // NOW 之前 61 天，缺省窗口 30 天
+    seedAt(h, '2026-09-30T00:00:00.000Z', 'recent') // NOW 之前 1 天
+
+    const outcome = await asOwner(h, 'sync.delta', { since: 0 })
+    const result = outcome.json?.result as { messages: { seq: number }[]; next_since: number }
+
+    // `seq` 1 被挡在外面，而且**不被重新编号**：窗口是"不说"，不是"当作那一条没发生过"。
+    expect(result.messages.map((message) => message.seq)).toEqual([2])
+    expect(result.next_since).toBe(2)
+    // 窗口没删任何东西——表的头还是 2，两条行都在。
+    expect(h.storage.headSeq(receiver.did)).toBe(2)
+  })
+
+  it('leaves the cursor where the caller put it when the whole log is past the window', async () => {
+    const h = harness()
+    seedAt(h, '2026-08-01T00:00:00.000Z', 'long-ago')
+
+    const outcome = await asOwner(h, 'sync.delta', { since: 7 })
+    // 空页回调用方给的那个 `since`，不是 `headSeq`：窗口是序列的一个**前缀**，把游标推过
+    // 客户端没看见的那一段，等于替它宣告"这一段你看过了"——那是服务端在替客户端撒谎。
+    expect(outcome.json?.result).toEqual({ messages: [], next_since: 7, has_more: false })
+    expect(h.storage.headSeq(receiver.did)).toBe(1)
+  })
+
+  it('takes the window from the deployment rather than a built-in number', async () => {
+    // 一分钟的窗口：`NOW` 之前 1 天的那一条也落在外面了。数值来自 config，验的是
+    // `dispatch` 把它交给了 `readDelta`，而不是那里写死了一个 30 天。
+    const h = harness({ config: loadConfig({ AGENTX_DELIVERY_READ_WINDOW_MS: '60000' }) })
+    seedAt(h, '2026-09-30T00:00:00.000Z', 'recent')
+
+    const outcome = await asOwner(h, 'sync.delta', { since: 0 })
+    expect(outcome.json?.result).toEqual({ messages: [], next_since: 0, has_more: false })
   })
 
   it('refuses a target that is not the signer, with 1014', async () => {
@@ -1935,7 +1992,7 @@ describe('adopting a member DID change on the request path (§8.12)', () => {
   /** 一个成员收到的 `member-did-updated` 事件正文（§8.11 的通知里那一份）。 */
   function didUpdateEvents(h: Harness, recipient: string): Record<string, unknown>[] {
     return h.storage
-      .deliveriesSince(recipient, '', 0, 100)
+      .deliveriesSince(recipient, '', 0, 100, undefined)
       .filter((row) => row.method === 'group.state_changed')
       .map((row) => (JSON.parse(row.paramsJson) as { body: Record<string, unknown> }).body)
       .filter((body) => body.event_type === 'member-did-updated')

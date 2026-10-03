@@ -428,6 +428,14 @@ CREATE INDEX messages_target ON messages (target_did, accepted_at);
 -- `delivery_cursor` 的游标是每 (owner, device) 单调递增的，而 `messages` 上没有任何
 -- 序号列——一条群消息是一个 `message_id` 投给 N 个成员，序号放不到消息行上。
 -- `sync.delta` 重放的是这张表，`inbox.get` 翻的也是它。
+--
+-- **保留契约（2026-10-03 裁定）：这张表永不裁剪。** 没有任何 DELETE 会到这里，一行进来就
+-- 一直留着。取件面只被允许往回看一个窗口（`AGENTX_DELIVERY_READ_WINDOW_MS`，默认 30 天），
+-- 那是**能见度**不是保留——看不见的行仍然在表上。纸面上它是可逆的（想删随时能加），而
+-- "客户端说读到了"（`stream.ack` 推进 `delivery_cursor`）今天**不是**可以删的信号：
+-- 游标一行一个 `(owner_did, device_id)`，本服务没有一张"这个账号有哪些设备"的名册，所以
+-- "所有设备都 ack 过"这个下界算不出来——把没连过的设备算成已读，删掉的正是它还没读的东西。
+-- 代价是磁盘随收件箱长，那是运维的事。
 CREATE TABLE deliveries (
   owner_did TEXT NOT NULL, seq INTEGER NOT NULL, message_id TEXT NOT NULL,
   method TEXT NOT NULL, params_json TEXT NOT NULL, accepted_at TEXT NOT NULL,
@@ -1150,7 +1158,8 @@ AGENTX_DID_CACHE_TTL_MS   一份解析出来的 DID 文档最多沿用多久，�
 AGENTX_PREKEY_BURST       两条 Key 方法每个调用方的突发额度，默认 60
 AGENTX_PREKEY_PER_MINUTE  同上，每分钟补充的令牌数（持续速率），默认 60
 AGENTX_DEVICE_QUEUE_MAX_ATTEMPTS  一条 P6 设备信封最多尝试几次，默认 8（§12.6 有界保留）
-AGENTX_DEVICE_QUEUE_MAX_AGE_MS    一条 P6 设备信封最多在队里待多久，默认 24h（§12.6 有界保留）
+AGENTX_DEVICE_QUEUE_MAX_AGE_MS    一条 P6 设备信封最多在队里待多久，默认 30d（§12.6 有界保留）
+AGENTX_DELIVERY_READ_WINDOW_MS    取件面（sync.delta）能往回看多远，默认 30d（见下）
 AGENTX_DID_REFRESH_INTERVAL_MS    定时刷新成员 DID 的间隔，默认 6h（A3c-4，见下）
 AGENTX_DID_REFRESH_BATCH          一轮最多查几个成员，默认 20（A3c-4，见下）
 ```
@@ -1201,6 +1210,29 @@ AGENTX_DID_REFRESH_BATCH          一轮最多查几个成员，默认 20（A3c-
 `AGENTX_DID_REFRESH_BATCH`。`group_members.last_did_checked_at` 是它的游标，记的是"看过"而不是
 "没问题"——一次解析失败也盖章，否则一个暂时不可达的对端会卡住整个队列。它与两条队列 worker 分开
 也是因为这个节奏差着四个数量级。
+
+**取件面的可读窗口**（`AGENTX_DELIVERY_READ_WINDOW_MS`，默认 30 天，2026-10-03 裁定）。
+读搬到客户端本地之后（[client-messages.md](client-messages.md) §8），服务端这半边的作用
+收窄成一句话：**它手上还留着多少能补给客户端的东西**。这个数就是那个上界的宽度，而它的
+另一侧不是"删"——`deliveries` **一条都不删**（§7 建表处的保留契约）。所以这个窗口调小只让
+`sync.delta` 少答，不让服务端少存：想反悔，把数调回去，行还在。
+
+两个窗口取同一个缺省值（30 天）不是巧合，是与 **P6 设备队列的在队时长**
+（`AGENTX_DEVICE_QUEUE_MAX_AGE_MS`，[e2ee-group.md](e2ee-group.md) §6.2）对齐：设备队列是
+`sync.delta` **够不着**的那一半（P6 的信封不往 `deliveries` 写行，见那个文件头），所以
+两边不一样宽就会露出一条缝——`sync.delta` 说没有，而队列里其实还有一条。取齐之后，
+"一条消息在这个服务上还能被谁拿到"只有一个答案。
+
+判据是**这次请求自己的** `acceptedAt`（一次请求一个瞬间，与 `accepted_at` 落库用的是同一个），
+不是 `Date.now()`：同一个客户端紧接着的两次 `sync.delta` 不该因为服务端跨过了一个毫秒而给出
+不同答案。窗口下界对 `seq` 是**前缀**——序号按追加分配、`accepted_at` 就是那次请求的时刻，
+所以看不见的行只会排在看得见的行**之前**。由此那条"空页回 `since` 本身"的规则仍然成立：
+整条信箱都过期时游标停在原地，而不是被推到 `headSeq`（那等于替客户端宣告"这一段你看过了"）。
+
+窗口**不承诺**告诉客户端"你还有 N 条在窗外"。今天 `sync.delta` 只说它答得出的那些，所以
+一条都搬不到时看起来就是"brought in: 0"——与换钥那件事
+（[client-messages.md](client-messages.md) §4.3：`deliveries.owner_did` 停在旧 DID 下，而
+客户端问的是新 DID）是同一类失败。要不要加一个"窗外还有多少"的诊断还没定，TODO7 §3 里挂着。
 
 ## 15. 实现顺序
 
