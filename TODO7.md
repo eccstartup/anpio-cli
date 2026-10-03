@@ -59,8 +59,9 @@ TODO6 写完了一整轮**写**侧：本机消息库 `messages.db` 的写入侧�
       - **`msg show <message_id>` 读本地那一行**，不联网。
       - **只有 `fetch` 联网**，它是一次写（走 `sync.delta`，复用 `msg listen` 的
         `records_from` + `MessageStore::record`，靠去重键与游标单调双重重幂等）。
-      - **`msg read` 的归属仍待裁定**（§4），所以这一条只画到"它在那张表里"，没定。详见
-        [client-messages.md](docs/design/client-messages.md) §8 与其 8.1/8.2/8.3/8.4/8.5。
+      - **`msg read` 的归属 2026-10-03 已裁定**（§4）：**只放本地**，所以它是这一族里的
+        一次**本地写**。详见 [client-messages.md](docs/design/client-messages.md) §8 与其
+        8.1/8.2/8.3/8.4/**8.5（已读归本地）**/8.6。
 - [x] **`fetch` 是一次显式的写，不是一次读。** 语义是"把服务端**还有的**搬进本地库"。
       要定死：
       - 它落到哪张表、是不是**与 `msg listen` 同一条写入路径**（`MessageStore::record` + 去重键
