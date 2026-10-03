@@ -299,13 +299,14 @@ TODO6 写完了一整轮**写**侧：本机消息库 `messages.db` 的写入侧�
         ——少了它就没有一个"换过钥之后的世界"可跑。断言包括旧的发送被接受、`did resolve`
         退出 2 说"superseded: yes"、`--chain` 走出后继与 `assurance: verified`、以及那
         两条信最终回到对端自己的信箱里（并且服务日志里记着它挪了什么）。
-      - **发现不再等缓存**（2026-10-03 用户裁定"走乙"）。上面那句"上界就是 TTL"描述的是
-        **当时**的实现，现在不成立了：迁移这一步改走 `chainResolverFor(config, { fresh: true })`
-        ——`fresh` 不传 `documentStore`，core 那边"ABSENT 就是完全不缓存"，于是这条链每一跳
-        实时抓取，换钥在他**下一次自址请求**上就被看见。代价只落在"水位线对不上"这一种状态，
-        而它一次真换钥之后只出现一次（迁移成功水位线就跟上）。群名册那三条触发路仍走缓存档。
-        `scripts/e2e.sh` 那一节里的 1 毫秒 TTL 重启随之删掉，跑的是出厂值；两条单测
-        （`ownerDidUpdate.test.ts`）把"缓存档不联网 / `fresh` 档绕过缓存去抓"咬住。设计回写在
+      - **发现不再等缓存**（2026-10-03 用户裁定"走乙"）。这一条原先写的是"发现时延的上界
+        就是 DID 文档缓存的 TTL"，现在不成立了：迁移这一步改走
+        `chainResolverFor(config, { fresh: true })`——`fresh` 不传 `documentStore`，core 那边
+        "ABSENT 就是完全不缓存"，于是这条链每一跳实时抓取，换钥在他**下一次自址请求**上就被
+        看见。代价只落在"水位线对不上"这一种状态，而它一次真换钥之后只出现一次（迁移成功水位
+        线就跟上）。群名册那三条触发路仍走缓存档。`scripts/e2e.sh` 那一节里的 1 毫秒 TTL 重启
+        随之删掉，跑的是出厂值；两条单测（`ownerDidUpdate.test.ts`）咬住"缓存档带
+        `documentStore` / `fresh` 档不带而仍带 `trustedDocuments`"。设计回写在
         [message-service.md](docs/design/message-service.md) §9.6 与 §14、`config.ts` 的 TTL
         注释。
 - [ ] **"我在群里的昵称"**：本地表存，还是提一个 Profile 扩展？协议里今天没有这一层，
