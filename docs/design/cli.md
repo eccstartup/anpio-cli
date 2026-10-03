@@ -152,10 +152,24 @@ connectx anp sign  --target <uri> [--method <verb>]
 connectx msg send --to <did> (--text <s> | --body <json>) [--content-type <type>]
 connectx msg caps <did>
 connectx msg listen [--device <id>] [--since <seq>] [--ack] [--once]
-connectx msg inbox [--limit <n>] [--include-read]        # 扩展面
-connectx msg show <message_id>                           # 扩展面
-connectx msg read <message_id>... | --all                # 扩展面
+connectx msg inbox [--limit <n>] [--unread]     # 扩展面，读本地
+connectx msg history <peer_did> [--limit <n>]   # 读本地
+connectx msg show <message_id>                  # 读本地
+connectx msg read <message_id>... | --all       # 标已读（归属待裁定，见 client-messages.md §4）
+connectx msg fetch [--since <seq>] [--limit <n>]  # 唯一联网的那一条
 ```
+
+**读这一族（`inbox` / `history` / `show`）读的是本地 `messages.db`，不是服务端**——2026-10-03
+用户裁定"**读聊天记录就是读本地，远程是 `fetch`**"。所以：
+
+- 它们**不开连接**，服务端关着也能答；
+- `msg inbox` 的名字没变，**变的是它回答的问题**（从"服务端有什么"到"我有什么"）；
+- `msg history` 是**新加**的（读一个会话，与读一个收件箱是两个问题）；
+- `msg fetch` 是**唯一联网**的一条，而且它是一次**写**（把服务端**还有的**搬进本地库），
+  所以它不伪装成"读"。
+
+完整的重画、每条命令为什么长这样、以及"什么搬不回来"，在
+[client-messages.md](client-messages.md) §8。
 
 **`msg send` 是本仓库最重要的一条命令。** 它一条命令走完规范要求的全部步骤：
 
@@ -409,9 +423,10 @@ CLI 不替调用方决定。
 各落一行（形状在 [client-messages.md](client-messages.md)，含"为什么是两个文件而不是一个
 sqlite"）。它是 `mls/` 的**兄弟**而不是它的一部分：两者丢了的后果不同
 （`mls/` 丢了以后解不开，`messages.db` 丢了以后只是没历史），所以必须能分别备份。
-**读侧还没动**——`msg inbox` 仍然只问服务端。但**方向已定**（2026-10-03 用户裁定：
-**读聊天记录就是读本地，远程是 `fetch`**），所以真动时是**重画交互**、不是在现有命令上加个
-旗标，形状在 [client-messages.md](client-messages.md) §8。
+**读侧也只读它**——2026-10-03 用户裁定"**读聊天记录就是读本地，远程是 `fetch`**"，
+重画后的命令面在 [client-messages.md](client-messages.md) §8（`msg inbox` 改语义、
+新增 `msg history`、`msg fetch` 是唯一联网的那条）。**`--json` 的输出不落盘**：要留痕是调用方
+自己重定向，CLI 不替它决定（TODO4 §E：这张库按密钥对待，读侧的输出管道是另一条口子）。
 
 ## 9. 与 core 的边界
 
