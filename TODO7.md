@@ -22,7 +22,7 @@ TODO6 写完了一整轮**写**侧：本机消息库 `messages.db` 的写入侧�
 | `messages.db` **写入**侧已落地，**读**侧一行没动 | `MessageStore` 的公开面只有 `open` / `record` / `applied_seq` / `message_count` |
 | 后两个**谁也没在用** | `grep -rn 'message_count\|applied_seq' rust/crates/agentx-cli/src` → 除 `messages.rs` 自己与单测外 **0 行** |
 | 全仓只有两处打开本地库，**都是写** | `MessageStore::open` → `cmd_msg_listen`（[main.rs:3247](rust/crates/agentx-cli/src/main.rs#L3247)）与 `record_outgoing`（[main.rs:2727](rust/crates/agentx-cli/src/main.rs#L2727)） |
-| `msg inbox` / `msg show` / `msg read` 仍然**只问服务端** | [cli.md](docs/design/cli.md) §8："读侧还没动——`msg inbox` 仍然只问服务端" |
+| `msg inbox` / `msg show` / `msg read` 仍然**只问服务端** | 读这一族的语义写在 [client-messages.md](docs/design/client-messages.md) §8；当时是"读侧还没动——`msg inbox` 仍然只问服务端" |
 | 服务端**从不裁剪** `deliveries` | `grep -rn -i 'delete.*from deliveries' packages/service/src` → **0 行** |
 | `delivery_cursor` 的**唯一**写入者是 `stream.ack` | [sqlite.ts:653](packages/service/src/storage/sqlite.ts#L653) `advanceCursor` |
 | P6 设备队列有界保留：**8 次 / 30 天** | [config.ts:46-47](packages/service/src/config.ts#L46) |
@@ -49,8 +49,8 @@ TODO6 写完了一整轮**写**侧：本机消息库 `messages.db` 的写入侧�
 / `--local`）**不是可以挑的菜单**——它们都是在旧的命令面上打补丁。真动时按新方向**重画命令面**。
 
 - [x] **先把交互画完，再动一丁点代码。** 画的产物是一份"读这一族命令长什么样"的说明，
-      落回 `docs/design/client-messages.md` §8 与 `docs/design/cli.md` §8。
-      **2026-10-03 画完了**，形状是：
+      落回 `docs/design/client-messages.md` §8（**唯一**的落点——`cli.md` 2026-10-03 随 TS 客户端
+      退役缩成 101 行 6 节，读这一族不再在那里）。**2026-10-03 画完了**，形状是：
       - **`msg inbox` 名字不变、语义变**（服务端有什么 → 我有什么）。不改名是因为它说的
         本来就是"我的收件箱"，而改名是破坏性动作；变的是**它回答的问题**。
       - **新增 `msg history <peer_did>`**：读一个会话（一条线，正序），与读一个收件箱
@@ -197,7 +197,7 @@ TODO6 写完了一整轮**写**侧：本机消息库 `messages.db` 的写入侧�
       **继续挂着**（服务端仍然不实现，[message-service.md](docs/design/message-service.md)
       §9.3 那条注不用改）。"会话级历史"落成了 `msg history <peer_did>`——**本地查询**
       （`MessageStore::conversation_with`，按 peer DID 取一条线、正序），正如这一条预测的那样。
-- [ ] **换钥之后 `deliveries.owner_did` 不被挪到新 DID 名下**（[message-service.md:914](docs/design/message-service.md#L914)）。
+- [x] **换钥之后 `deliveries.owner_did` 不被挪到新 DID 名下**（[message-service.md:914](docs/design/message-service.md#L914)）。
       这不是"还没做"，是一条**已知的没解的问题**：对端一直不再写信时，本地的 `did` 停在新钥之前，
       按 DID 发信失败、按名字解析出的还是旧 DID。读 = 本地之后它更刺眼——本地库按**槽位**组织
       （所以历史还在），而服务端那批投递仍挂在旧 DID 下，`fetch` 于是搬不到。要一个裁定。
@@ -209,6 +209,31 @@ TODO6 写完了一整轮**写**侧：本机消息库 `messages.db` 的写入侧�
       那一种。要不要在这里补一个"旧 DID 名下还有多少条没搬"的诊断，或者等 §3 那条换钥迁移一起
       解决，**要用户裁定**。
 
+      **2026-10-03 用户裁定：「服务端换钥时把投递挪到新 DID 名下」。** 做了，形状与 §8.12 那三条
+      触发路同一个（没有客户端能"上报换钥"，只能在别的事的路上顺手做完）：
+      - **新表 `account_dids`（schema v14）**，键取 `subjectOf(did)`（换钥不动的那个），值是这个主体
+        最后一次被认下的 DID。它就是 §8.12 从**群名册**拿到、而账号没有的那个"记下来的旧 DID"。
+      - **触发面**：这次调用是账号**以自己的身份对自己的信箱**发起的（`meta.target.did` 等于验过签的
+        调用方 DID）——`sync.delta` 正是那一类，也正是发现不了旧投递的那条路
+        （[dispatch.ts](packages/service/src/rpc/dispatch.ts) 的钩子，实现在
+        [ownerDidUpdate.ts](packages/service/src/rpc/ownerDidUpdate.ts)）。
+      - **采信**：从水位线上那个 DID 出发、用 P2 验到调用方，档位**逐字复用**
+        `memberDidUpdate.ts` 的 `ACCEPTED_ASSURANCES`（同一个问题不能有两套答案）。链断了、后继
+        不是它、档位不够，三种都不采纳，而且**不动水位线**——动了下一次就没得对照了。
+        于是发现是**按需的**，一次换钥最多解析一次转移链。
+      - **动作**：`deliveries` / `delivery_cursor` / `device_envelopes` / `message_reads` 挪到新
+        DID 名下，一个事务里做完，然后才写水位线。**序号规则是要紧的一处**：`deliveries` 序号按
+        owner 各自从 1 起，所以先把**新 DID 自己那批**抬到旧 DID 的最高号之上——旧的那批**一个号
+        都不动**，客户端本地游标（`app_state.applied_seq`）指的仍是同一行。游标合并取 `MAX`。
+        **一行都没删**，保留契约（§3 第 1 条）不受影响。
+      - **没覆盖的**：`did:web` / CAIP-10 不换 DID；`did:webvh` 的 SCID 语义还是本仓库的本地约定，
+        保守处理（链解析不出来就不搬）。设计在
+        [message-service.md](docs/design/message-service.md) §9.6，客户端那半的结论回写在
+        [client-messages.md](docs/design/client-messages.md) §4.3。
+      - 测试：`sqlite.test.ts` 五条（水位线、序号不动、游标合并、队列顺序、空操作）+
+        `dispatch.test.ts` 六条（同一次调用里搬完并作答、只记水位线不解析、链不通不搬、解析不出不搬、
+        拒 `provider_asserted`、非自寻址不碰）。
+
 ---
 
 ## 4. 两份真相要对账（TODO5 §8 C）
@@ -216,7 +241,7 @@ TODO6 写完了一整轮**写**侧：本机消息库 `messages.db` 的写入侧�
 本地库成为记录之源之后，"服务端的收件箱"和"我本地的库"是**两份记录同一件事的真相**。
 它们会分叉（离线读过、服务端重装、设备换了），所以要定**谁说了算**。
 
-- [ ] **`x_agentx.inbox.v1` 这套扩展面的去留。** `inbox.get` / `inbox.mark_read` /
+- [x] **`x_agentx.inbox.v1` 这套扩展面的去留。** `inbox.get` / `inbox.mark_read` /
       `message.get_batch` 是本服务自己的扩展（规范里不存在）。读 = 本地之后它们还有没有存在的理由？
       至少要区分：**`fetch` 需要的那几个**留下（如果 `fetch` 走 `sync.delta`，那连 `inbox.get`
       都不必留），**其余**是历史包袱。别让"读 = 本地"和"服务端还在答 `inbox.get`"同时为真。
@@ -233,6 +258,14 @@ TODO6 写完了一整轮**写**侧：本机消息库 `messages.db` 的写入侧�
         而那半已经不调了。真要退场，问题就变成"**TS 客户端还活着吗**"，那是另一条线
         （[TODO6](TODO6.md) 已经把文档站与二进制名从它那儿挪走了）。**这一条要用户裁定**：
         是把 TS 客户端也搬过来/退役，还是把 `inbox.get` 一族当成"给别的客户端的扩展"长期留着。
+
+      **2026-10-03 用户裁定：「把 TS 客户端退役，服务端摘掉这三个方法」。** 两句都做了：
+      - **客户端退役**：`packages/cli/`（`connectx`）与 `packages/e2e/` 整包删除。仓库从此是
+        **core + service**，唯一的客户端是 Rust 的 `anp`。
+      - **服务端摘掉三个方法**：`INBOX_GET` / `INBOX_MARK_READ` / `MESSAGE_GET_BATCH` 从
+        `METHODS` 移除（[methods.ts](packages/service/src/rpc/methods.ts) 驱动分发表与广告出的能力面，
+        所以摘一处两边同时变），`x_agentx.inbox.v1` 只剩 `sync.delta`。
+      - 现在"读 = 本地"与"服务端还答 `inbox.get`"**不可能同时为真**了——那个方法不存在了。
 - [x] **read 状态归谁。** 今天已读是**服务端按 (owner, device) 记的**（`inbox.mark_read` /
       `read_state`）。本地库有 `messages` 表，加一列 `read_at` 是最省事的做法，但那就有了
       **两个已读状态**——正是 realtime.md §5.4 那条"存了就变成两处状态，而它们一定会不一致"

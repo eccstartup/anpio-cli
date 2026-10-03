@@ -750,6 +750,24 @@ Phase 1 到此收口：`msg listen` 与 `group` 一族都已落地（见 §6）�
 `did list`、`anp` 一族（离线一半 `show` / `sign` 与在线的 `login`）与 `version` 都已落
 （2026-10-02，见 §6）——**六族 24 条至此全部有实现**，Phase 3 只剩身份工作那一项。
 
+> **2026-10-03 后记：上面几条里的若干条已被后来取代，读本节时以这几行为准**（细节在
+> [TODO6](TODO6.md) / [TODO7](TODO7.md)，那里是后来的账）：
+>
+> - **第 4 条（`anp` pin 1.0.5）** —— pin 未变（[rust/Cargo.toml](rust/Cargo.toml) 仍是
+>   `anp = "1.0.5"`），**但"本机检出更新到最新"这半到今天仍未做**：本机检出还停在 0.9.0
+>   那条支持线，常落后 origin/master。要动 SDK 之前先 fetch，别假设上游没改。
+> - **第 5 条 / §8-I（TS CLI 冻结）** —— **由"冻结"升级为"退役"**（[TODO7](TODO7.md) §4
+>   第 1 条，2026-10-03 裁定）：`packages/cli`（`connectx`）与只为驱动它而存在的
+>   `packages/e2e` 整包删除，服务端随之摘掉 `inbox.get` / `inbox.mark_read` /
+>   `message.get_batch`。于是 §1 表里那行"TS 客户端 `packages/cli`（保留）7336 行"、
+>   §7 第 5 条、§8-H 末句（"`packages/e2e` 一行不用改"）、§8-C（`inbox.get` 一族"去留要
+>   重新定"）**都已成为历史**。仓库从此是 core + service + Rust 客户端。
+> - **§8-D（服务端可能得跟着改）** —— 三条都有了结论（[TODO7](TODO7.md) §3）：保留契约 =
+>   永不裁剪但只答 30 天内（`AGENTX_DELIVERY_READ_WINDOW_MS`）；P6 设备队列保留改为
+>   **30 天**（原写 24h）；补拉落下 `msg fetch` 走 `sync.delta`；换钥后的投递归属由服务端
+>   迁移解决（[message-service.md](docs/design/message-service.md) §9.6）。**那句"这不是
+>   客户端单方面能解决的"现在有答案了**——服务端那一半做完了。
+
 ---
 
 ## 8. 你没提到、但绕不开的问题
