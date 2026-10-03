@@ -563,6 +563,41 @@ PY
   fi
 fi
 
+# ---- anp login：401 挑战 ------------------------------------------------------
+#
+# ANP-02 的登录是**两次往返**：第一次不带 nonce，主机答 401 并给出**它自己的** nonce；客户端
+# 拿这个 nonce 重签一次再来，主机才发 token。这个重试是 `post_signed` 里唯一的循环
+# （`MAX_ATTEMPTS = 2`），也是唯一"签名覆盖了服务器给的东西"的地方——所以它值得一条真跑过
+# 的断言，而不是只测那句 `nonce_from_challenge` 的解析。
+#
+# 主机那半由玩具主机演（`did_host.py` 的 `LOGIN_PATH`，就是根路径——`main.rs::host_and_token`
+# 让用户跑的就是这个 URL）。它每发一个挑战、每认下一个挑战都往 stdout 打一行，所以下面那条
+# 断言读的是**服务端看见了什么**：客户端说自己登录成功，与主机真的收到了那个 nonce，是两件事。
+section "anp login — the 401 challenge is answered, and answered with the server's nonce"
+
+export AGENTXCLI_HOME="$WORK/home"
+run "$CLI" anp login --agent alice --target "http://localhost:${HOST_PORT}"
+expect_status "a login the host challenges once succeeds" 0
+expect "  and says where it signed in" "signed in to"
+expect "  and prints the token the host issued" "token:"
+expect "  and keeps it for the commands that come after" "saved:"
+
+if grep -qF "login: challenged ${ALICE_DID} with" "$WORK/host.log" &&
+  grep -qF "login: accepted the challenge for ${ALICE_DID}" "$WORK/host.log"; then
+  printf '    \033[32mok\033[0m   the host issued a challenge, and saw exactly that nonce come back\n'
+else
+  printf '    \033[31mFAIL\033[0m the host never saw its own challenge answered\n'
+  FAILED=$((FAILED + 1))
+fi
+
+# 带着一个主机**从没发过**的 nonce 进来。一个"再挑战一次"的服务器不是在要 nonce，是在拒绝
+# （`request.rs` 的注释逐字写着这句），所以玩具主机在这里**不给第二个 nonce**——没有可答的
+# 挑战，客户端就不该第三次重签，该把这个 401 当成拒绝报出来。
+run "$CLI" anp login --agent alice --target "http://localhost:${HOST_PORT}" --nonce "not-a-nonce-this-host-issued"
+expect_status "a nonce the host never issued is refused, not retried" 1
+expect "  and the refusal is a login failure, not a crash" "login_failed"
+expect "  and it quotes the status it got" "HTTP 401"
+
 # ---- 换钥：信箱跟着人走 --------------------------------------------------------
 #
 # TODO7 §5 那条"对端换钥后一直不来信的那一半"。量的是一整条链上的四件事：换钥这件事本身

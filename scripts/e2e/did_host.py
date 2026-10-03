@@ -18,7 +18,8 @@
   * `POST /user-service/v1/did/update`       一次 `did update` 的两个文档（ANP-03 §2.5.3）
   * `POST …/did/update-lost-answer`          同上，收下之后**不回应**就断（回程丢了）
   * `POST …/did/update-lost-request`         什么也不做、也不回应就断（请求丢了）
-  * `POST …/did/update-refused`              同上，收下之后**明确说不**（HTTP 403）
+  * `POST /user-service/v1/did/update-refused` 同上，收下之后**明确说不**（HTTP 403）
+  * `POST /`                                 ANP-02 的登录：先 401 给一个 nonce，答对了才发 token
 
 路径没有第二个约定：`didToUrl`（`packages/core/src/crypto/resolveDid.ts:498`）说
 `did:wba:<authority>[:<seg>…]` 住在 `/<seg…>/did.json`，所以 DID 自己说了它挂在哪。
@@ -66,6 +67,13 @@ DID_UPDATE_LOST_REQUEST_PATH = "/user-service/v1/did/update-lost-request"
 # 一个没有——而这条线把它们分得很开：没有任何回应 = 收没收不可知（那把钥要留着），一个非 2xx
 # 的回应 = **确定**没落地（那把钥可以丢）。少一条，"确定"那一档就只能靠猜。
 DID_UPDATE_REFUSED_PATH = "/user-service/v1/did/update-refused"
+# ANP-02 的登录端点。路径是**根**：`main.rs::host_and_token` 告诉用户的 `--target` 就是存下来的
+# `did_host`（`http://localhost:<port>`），所以 `anp login --target <did_host>` 打的是这个根。
+#
+# 它要演的是**401 挑战**那一次往返：第一次不带 nonce，主机答 401 并给出**自己**的 nonce；客户端
+# 拿这个 nonce 重签一次再来，才对。这不是可有可无的一步——`post_signed` 的整个重试逻辑
+# （`MAX_ATTEMPTS = 2`）只在这条路上跑得到，而它是唯一"签名覆盖了服务器给的东西"的地方。
+LOGIN_PATH = "/"
 
 
 def jcs(value) -> bytes:
@@ -113,6 +121,11 @@ class State:
         # bearer token → 它属于哪个 DID。真主机是这么回事，`update_document` / `me` 都靠它。
         self.tokens: dict[str, str] = {}
         self.profiles: dict[str, dict] = {}
+        # 登录那次挑战发出去的 nonce（还没被用掉的那个）。**一次只有一个**，因为一次挑战只
+        # 该被答一次——服务端留着它，是为了让"客户端到底有没有拿这个 nonce 回来"成为一个
+        # 可断言的事实，而不是一句相信。
+        self.login_nonce: str | None = None
+        self.login_challenges = 0
 
     def well_known(self) -> dict:
         """主机自己的文档。`fetch_host_service` 从这里读 `serviceDid` 与消息端点，
@@ -235,11 +248,13 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # 默认会往 stderr 刷每一行访问日志，太吵
         pass
 
-    def send_json(self, status: int, payload) -> None:
+    def send_json(self, status: int, payload, headers: dict[str, str] | None = None) -> None:
         body = json.dumps(payload).encode()
         self.send_response(status)
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(body)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
 
@@ -330,6 +345,59 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def handle_login(self, body) -> None:
+        """ANP-02 的登录：**先挑战，再发 token**（ANP-02 §3.2）。
+
+        三次判断，一次往返一步：
+
+          1. 请求没带 nonce → 主机答 **401**，并在 `WWW-Authenticate` 里给一个**它自己的**
+             nonce。这就是挑战。
+          2. 请求带着那个 nonce 回来 → 答 **200** 与 token。走到这里就说明客户端**重签过**
+             一次，且签名覆盖的是服务器给的值。
+          3. 请求带着一个主机从没发过的 nonce 进来 → 答 **401 且不再给挑战**。一个"再挑战一次"
+             的服务器不是在要 nonce，是在拒绝（`request.rs` 的注释里就是这么写的），所以这里
+             不给第二个 nonce——那条路也正是客户端把 401 当成失败上报的那条。
+
+        这三条都往 stdout 打一行。日志不是调试残渣：`scripts/e2e.sh` 靠它断言**服务端看见了
+        哪一次往返**——客户端说自己登录成功了，与"主机真的收到了那个 nonce"，是两件事。
+        """
+        did = body.get("did")
+        if not isinstance(did, str) or self.state.documents.get(path_for(did)) is None:
+            # 不认识的 DID 不发 token——这台主机只肯为它存过文档的身份背书。
+            self.send_json(404, {"error": "no document for this DID"})
+            return
+
+        nonce = body.get("nonce")
+        nonce = nonce if isinstance(nonce, str) else ""
+
+        if nonce == "":
+            self.state.login_challenges += 1
+            self.state.login_nonce = f"e2e-challenge-{self.state.login_challenges}"
+            print(f"login: challenged {did} with {self.state.login_nonce}", flush=True)
+            self.send_json(
+                401,
+                {"error": "a nonce is required"},
+                {"WWW-Authenticate": f'ANP realm="did", nonce="{self.state.login_nonce}"'},
+            )
+            return
+
+        if nonce == self.state.login_nonce:
+            self.state.login_nonce = None
+            print(f"login: accepted the challenge for {did}", flush=True)
+            self.send_json(
+                200,
+                {
+                    "token": f"e2e-token-{did}",
+                    "token_type": "Bearer",
+                    "did": did,
+                    "docUrl": f"http://{self.headers.get('Host', 'localhost')}{path_for(did)}",
+                },
+            )
+            return
+
+        print(f"login: refused a nonce it never issued ({nonce})", flush=True)
+        self.send_json(401, {"error": "this nonce is not one this host issued"})
+
     def do_POST(self):  # noqa: N802
         path = self.path.split("?", 1)[0]
         length = int(self.headers.get("content-length", "0"))
@@ -344,6 +412,11 @@ class Handler(BaseHTTPRequestHandler):
         authorization = self.headers.get("authorization", "")
         token = authorization[7:] if authorization.lower().startswith("bearer ") else None
 
+        if path == LOGIN_PATH:
+            # 根路径是 ANP-02 的登录端点，不是 JSON-RPC——所以它读的是**平铺的**那一份体
+            # （`{nonce, did, didDocument}`），而不是下面那些 `{method, params}` 信封。
+            self.handle_login(envelope)
+            return
         if path == DID_UPDATE_PATH:
             self.handle_update(envelope)
             return
