@@ -87,7 +87,7 @@ import {
 } from './attachments'
 import type { ObjectStore } from '../objects'
 import { AnpRefusal, refusal } from './refusal'
-import { INBOX_GET, INBOX_MARK_READ, MESSAGE_GET_BATCH, SYNC_DELTA, markRead, readBatch, readDelta, readInbox } from './inbox'
+import { SYNC_DELTA, readDelta } from './inbox'
 import {
   CONTACTS_LIST,
   CONTACTS_PUT,
@@ -314,14 +314,10 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
         return removeE2eeMember(controlContext(spec, input))
       case GROUP_E2EE_SEND:
         return sendE2eeMessage(controlContext(spec, input))
-      case INBOX_GET:
-        return readInbox(deps.storage, meta, body)
-      case MESSAGE_GET_BATCH:
-        return readBatch(deps.storage, meta, body)
+      // 取件扩展面只剩这一条（`inbox.ts` 抬头记了另外三条为什么退场）：补齐是唯一一件
+      // 服务端才做得了的事，所以它不走"本地读"那条路，也**不**改状态。
       case SYNC_DELTA:
         return readDelta(deps.storage, meta, body, deps.config.deliveryReadWindowMs, input.acceptedAt)
-      case INBOX_MARK_READ:
-        return markRead(deps.storage, meta, body, input.acceptedAt)
       // TODO6 §3 的通讯录。三条与取件面同形——`self-addressed` 那层绑定保证 `owner_did`
       // 是验过签的 sender，所以这里不需要（也拿不到）第二个身份。
       case CONTACTS_LIST:

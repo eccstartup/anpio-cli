@@ -88,17 +88,7 @@ import {
   validateUpdatePolicyBody,
   validateUpdateProfileBody,
 } from './groups'
-import {
-  EXTENSION_PROFILE,
-  INBOX_GET,
-  INBOX_MARK_READ,
-  MESSAGE_GET_BATCH,
-  SYNC_DELTA,
-  validateDeltaBody,
-  validateGetBatchBody,
-  validateInboxGetBody,
-  validateMarkReadBody,
-} from './inbox'
+import { EXTENSION_PROFILE, SYNC_DELTA, validateDeltaBody } from './inbox'
 import {
   CONTACTS_LIST,
   CONTACTS_PROFILE,
@@ -313,14 +303,9 @@ function selfScope(method: string): (meta: AnpMeta) => string {
   }
 }
 
-const INBOX_GET_SPEC = extensionSpec(INBOX_GET, EXTENSION_PROFILE, validateInboxGetBody)
-const INBOX_MARK_READ_SPEC = extensionSpec(
-  INBOX_MARK_READ,
-  EXTENSION_PROFILE,
-  validateMarkReadBody,
-  selfScope(INBOX_MARK_READ),
-)
-const MESSAGE_GET_BATCH_SPEC = extensionSpec(MESSAGE_GET_BATCH, EXTENSION_PROFILE, validateGetBatchBody)
+/** §9.3 那张表里**还在**的那一条。另外三条（`inbox.get` / `inbox.mark_read` /
+ *  `message.get_batch`）2026-10-03 随读侧搬回本地一起退场了，理由见 `inbox.ts` 抬头：
+ *  它们没有调用者了，而 `sync.delta` 是这一族里唯一一件服务端做得了的事（补齐）。 */
 const SYNC_DELTA_SPEC = extensionSpec(SYNC_DELTA, EXTENSION_PROFILE, validateDeltaBody)
 
 /**
@@ -953,9 +938,6 @@ const METHODS: readonly MethodSpec[] = [
   ATTACHMENT_COMMIT_OBJECT_SPEC,
   ATTACHMENT_ABORT_OBJECT_SPEC,
   ATTACHMENT_GET_DOWNLOAD_TICKET_SPEC,
-  INBOX_GET_SPEC,
-  INBOX_MARK_READ_SPEC,
-  MESSAGE_GET_BATCH_SPEC,
   SYNC_DELTA_SPEC,
   CONTACTS_LIST_SPEC,
   CONTACTS_PUT_SPEC,

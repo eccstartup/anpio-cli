@@ -942,103 +942,6 @@ describe('the pick-up extension surface (§9)', () => {
     await h.call(await signed())
   }
 
-  it('returns a delivered message as an incoming row with the §9.3 fields', async () => {
-    const h = harness()
-    await seed(h)
-
-    const outcome = await asOwner(h, 'inbox.get', { limit: 20 })
-
-    expect(outcome.json?.result?.total).toBe(1)
-    expect(outcome.json?.result?.has_more).toBe(false)
-    expect(outcome.json?.result?.messages).toEqual([
-      {
-        message_id: 'msg-1',
-        sender_did: sender.did,
-        recipient_did: receiver.did,
-        content_type: 'text/plain',
-        direction: 'incoming',
-        created_at: NOW.toISOString(),
-        read_at: null,
-        body: { text: 'hello' },
-      },
-    ])
-  })
-
-  it('shows the same message in the sender own mailbox as outgoing', async () => {
-    const h = harness()
-    await seed(h)
-
-    const outcome = await h.call(
-      await signed({ method: 'inbox.get', meta: inboxMeta(), body: { limit: 20 } }),
-    )
-    const [row] = (outcome.json?.result?.messages ?? []) as { direction: string; recipient_did: string }[]
-    expect(row?.direction).toBe('outgoing')
-    expect(row?.recipient_did).toBe(receiver.did)
-  })
-
-  it('drops what has been read only when include_read is not asked for', async () => {
-    const h = harness()
-    await seed(h)
-
-    await asOwner(h, 'inbox.mark_read', { message_ids: ['msg-1'] }, { operation_id: 'op-read' })
-    expect((await asOwner(h, 'inbox.get', { limit: 20 })).json?.result?.total).toBe(0)
-
-    const all = await asOwner(h, 'inbox.get', { limit: 20, include_read: true })
-    const [row] = (all.json?.result?.messages ?? []) as { read_at: string | null }[]
-    expect(row?.read_at).toBe(NOW.toISOString())
-  })
-
-  it('reports only the ids it actually marked, with the instant it marked them', async () => {
-    const h = harness()
-    await seed(h)
-
-    const outcome = await asOwner(h, 'inbox.mark_read', { message_ids: ['msg-1', 'not-mine'] })
-    expect(outcome.json?.result).toEqual({
-      updated_count: 1,
-      message_ids: ['msg-1'],
-      read_at: NOW.toISOString(),
-    })
-  })
-
-  it('cannot mark a message in somebody else mailbox', async () => {
-    const h = harness()
-    // `msg-1` exists, but it belongs to `sender` + `receiver`; `second` is neither, so
-    // there is no row in its mailbox and nothing to mark.
-    await seed(h)
-    const outcome = await h.call(
-      await signed({
-        method: 'inbox.mark_read',
-        meta: inboxMeta({
-          sender_did: second.did,
-          target: { kind: 'agent', did: second.did },
-          operation_id: 'op-read',
-        }),
-        body: { message_ids: ['msg-1'] },
-        signer: second,
-      }),
-    )
-    expect(outcome.json?.result).toEqual({ updated_count: 0, message_ids: [], read_at: null })
-  })
-
-  it('answers message.get_batch with items and the ids it could not resolve', async () => {
-    const h = harness()
-    await seed(h)
-
-    const outcome = await asOwner(h, 'message.get_batch', { message_ids: ['msg-1', 'nowhere'] })
-    const result = outcome.json?.result as { items: { message_id: string }[]; unavailable: string[] }
-    expect(result.items.map((item) => item.message_id)).toEqual(['msg-1'])
-    // The id is the one `msg show` takes, and it is `inbox.get` that printed it.
-    expect(result.unavailable).toEqual(['nowhere'])
-  })
-
-  it('refuses a batch larger than the cap', async () => {
-    const h = harness()
-    const ids = Array.from({ length: 101 }, (_, i) => `m-${i}`)
-    const outcome = await asOwner(h, 'message.get_batch', { message_ids: ids })
-    expect(outcome.json?.error?.code).toBe(1003)
-    expect(outcome.json?.error?.data?.anp_code).toBe('anp.invalid_params_shape')
-  })
-
   it('replays the delivery log with the seq the sender of the frame never sees', async () => {
     const h = harness()
     await seed(h)
@@ -1129,20 +1032,20 @@ describe('the pick-up extension surface (§9)', () => {
     const h = harness()
     // Reading somebody else's mailbox is not an operation this surface has, so it is a
     // target-binding failure rather than a "you would have seen nothing anyway".
-    const outcome = await asOwner(h, 'inbox.get', { limit: 20 }, { target: { kind: 'agent', did: second.did } })
+    const outcome = await asOwner(h, 'sync.delta', { since: 0 }, { target: { kind: 'agent', did: second.did } })
     expect(outcome.json?.error?.code).toBe(1014)
     expect(outcome.json?.error?.data?.anp_code).toBe('anp.invalid_target_binding')
   })
 
   it('refuses a group target rather than treating it as one of the four modes', async () => {
     const h = harness()
-    const outcome = await asOwner(h, 'inbox.get', { limit: 20 }, { target: { kind: 'group', did: receiver.did } })
+    const outcome = await asOwner(h, 'sync.delta', { since: 0 }, { target: { kind: 'group', did: receiver.did } })
     expect(outcome.json?.error?.code).toBe(1014)
   })
 
   it('refuses the direct profile on an extension method, with 1001', async () => {
     const h = harness()
-    const outcome = await asOwner(h, 'inbox.get', { limit: 20 }, { profile: 'anp.direct.base.v1' })
+    const outcome = await asOwner(h, 'sync.delta', { since: 0 }, { profile: 'anp.direct.base.v1' })
     expect(outcome.json?.error?.code).toBe(1001)
     expect(outcome.json?.error?.data?.anp_code).toBe('anp.unsupported_profile')
   })
@@ -1150,9 +1053,9 @@ describe('the pick-up extension surface (§9)', () => {
   it('requires an origin proof, with the P1 public code', async () => {
     const h = harness()
     const envelope = await signed({
-      method: 'inbox.get',
+      method: 'sync.delta',
       meta: inboxMeta({ sender_did: receiver.did, target: { kind: 'agent', did: receiver.did } }),
-      body: { limit: 20 },
+      body: { since: 0 },
       signer: receiver,
     })
     const { auth, ...bare } = envelope.params
@@ -1165,21 +1068,22 @@ describe('the pick-up extension surface (§9)', () => {
 
   it('refuses a body field it does not know instead of ignoring it', async () => {
     const h = harness()
-    const outcome = await asOwner(h, 'inbox.get', { 'include-read': true })
+    const outcome = await asOwner(h, 'sync.delta', { since: 0, 'include-read': true })
     expect(outcome.json?.error?.code).toBe(1003)
   })
 
   it('refuses a device_id that is not a usable device name', async () => {
     const h = harness()
-    const outcome = await asOwner(h, 'inbox.get', { limit: 20, device_id: '' })
+    const outcome = await asOwner(h, 'sync.delta', { since: 0, device_id: '' })
     expect(outcome.json?.error?.data?.anp_code).toBe('anp.invalid_params_shape')
   })
 
   // ---- 设备维度（P5 §10.7.1 L1407 的读侧）---------------------------------------
   //
-  // 订阅路早就按设备筛连接了（`stream/registry.ts` 的 `reaches`）。这三条验的是同一条信箱
+  // 订阅路早就按设备筛连接了（`stream/registry.ts` 的 `reaches`）。这两条验的是同一条信箱
   // 的**另一半**：拉取。不筛就是"密文进了正确的设备、又从这一侧泄给整台账号"——比推送那侧
-  // 更糟，因为读者把它收下了。
+  // 更糟，因为读者把它收下了。筛的只是**投给某台设备的那一条**：账号级的行两台都该看见，
+  // 否则这条 MUST 就变成了"多设备账号看不到自己收到的明信片"。
 
   /** 一条投给 `RECEIVER_DEVICE` 的 v2 密文，落在 `receiver` 的信箱里。 */
   async function seedCipher(h: Harness): Promise<void> {
@@ -1204,39 +1108,21 @@ describe('the pick-up extension surface (§9)', () => {
     expect(undeclared.json?.result?.messages).toEqual([])
   })
 
-  it('keeps a device-addressed message out of a sibling device inbox page', async () => {
+  it('keeps a device-addressed message out of a sibling device, without hiding account-level ones', async () => {
     const h = harness()
     // 一条账号级的 P3 消息打底：两种调用方都该看见它，差别只在密文那一条。
     await seed(h)
     await seedCipher(h)
 
     const ids = async (body: Record<string, unknown>): Promise<string[]> => {
-      const outcome = await asOwner(h, 'inbox.get', body)
-      const rows = (outcome.json?.result?.messages ?? []) as { message_id: string }[]
-      return rows.map((row) => row.message_id).sort()
+      const outcome = await asOwner(h, 'sync.delta', body)
+      const rows = (outcome.json?.result?.messages ?? []) as { params: { meta: { message_id: string } } }[]
+      return rows.map((row) => row.params.meta.message_id).sort()
     }
 
-    expect(await ids({ limit: 20, device_id: RECEIVER_DEVICE })).toEqual(['msg-1', 'op-e2ee-1'])
-    expect(await ids({ limit: 20, device_id: 'dev-some-other' })).toEqual(['msg-1'])
-    expect((await asOwner(h, 'inbox.get', { limit: 20, device_id: 'dev-some-other' })).json?.result?.total).toBe(1)
-  })
-
-  it('will not hand a sibling device the ciphertext by id either', async () => {
-    const h = harness()
-    await seedCipher(h)
-
-    // 设备知道 `message_id`（它就在 `direct.send` 的应答里）也不该能按 id 取回别人的密文。
-    const mine = await asOwner(h, 'message.get_batch', {
-      message_ids: ['op-e2ee-1'],
-      device_id: RECEIVER_DEVICE,
-    })
-    expect(((mine.json?.result?.items ?? []) as unknown[]).length).toBe(1)
-
-    const sibling = await asOwner(h, 'message.get_batch', {
-      message_ids: ['op-e2ee-1'],
-      device_id: 'dev-some-other',
-    })
-    expect(sibling.json?.result).toEqual({ items: [], unavailable: ['op-e2ee-1'] })
+    expect(await ids({ since: 0, device_id: RECEIVER_DEVICE })).toEqual(['msg-1', 'op-e2ee-1'])
+    expect(await ids({ since: 0, device_id: 'dev-some-other' })).toEqual(['msg-1'])
+    expect(await ids({ since: 0 })).toEqual(['msg-1'])
   })
 })
 

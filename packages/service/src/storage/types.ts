@@ -466,42 +466,6 @@ export interface OutboxEntry {
 }
 
 /**
- * One message as the mailbox owner sees it — the row shape of the pick-up surface
- * (message-service.md §9.3), assembled from the delivery row (incoming) or the message
- * row (outgoing).
- *
- * The two directions are one list because that is what a conversation is: `inbox.get`
- * orders them together by time, and `direction` alone tells them apart. `recipientDid` is
- * therefore the counterpart of the row, not always the owner.
- */
-export interface InboxRow {
-  messageId: string
-  senderDid: string
-  recipientDid: string
-  contentType: string
-  direction: 'incoming' | 'outgoing'
-  /** The `body` object as it arrived, serialized. Opaque for P5/P6. */
-  bodyJson: string
-  createdAt: string
-  /** When the OWNER marked it read, or `null`. Only incoming rows have a meaningful
-   *  value: a message the owner sent is not something the owner reads. */
-  readAt: string | null
-}
-
-/** One page request against {@link Storage.inboxPage}. */
-export interface InboxQuery {
-  limit: number
-  /** How many rows to step over. Offset rather than a sequence number because the list
-   *  is a merge of two tables and has no single cursor of its own. */
-  skip: number
-  /** `false` drops incoming messages the owner has already read. Outgoing rows are
-   *  never dropped: `read_at` has no meaning for them, so it cannot be the filter. */
-  includeRead: boolean
-  /** Which device is asking, or `''` for "none declared". See {@link deviceFilter}. */
-  deviceId: string
-}
-
-/**
  * Who sees which delivery: `recipient_device_id IS NULL OR recipient_device_id = ?`.
  *
  * This is P5 §10.7.1 L1407 read as a **read-side** rule as well as a push-side one. A
@@ -582,21 +546,6 @@ export interface Storage {
   cursor(ownerDid: string, deviceId: string): number
   /** Advance a device's cursor. Never backwards: a stale replay must not un-read mail. */
   advanceCursor(ownerDid: string, deviceId: string, seq: number): void
-
-  /** The owner's messages, newest first, both directions merged (取件面 §9.3).
-   *  `limit + skip` rows are read from each side and merged, which is enough to answer
-   *  the page: the global k-th row lies within the first k of one of the two. */
-  inboxPage(ownerDid: string, query: InboxQuery): InboxRow[]
-  /** How many rows `inboxPage` would return in total for the same filter. */
-  inboxSize(ownerDid: string, query: Omit<InboxQuery, 'limit' | 'skip'>): number
-  /** Those of `messageIds` that belong in THIS owner's mailbox **as `deviceId`**, in the
-   *  order asked. The mailbox is the scope, not a lookup helper: an id the owner never sent
-   *  or received must not be readable, and must not be markable either — and an id that
-   *  belongs to another of the owner's devices is, for this caller, not readable. */
-  inboxRows(ownerDid: string, deviceId: string, messageIds: readonly string[]): InboxRow[]
-  /** Mark messages read. Returns the ids that were not read before — an id the owner
-   *  does not hold is skipped rather than recorded. */
-  markRead(ownerDid: string, messageIds: readonly string[], readAt: string): string[]
 
   /** The group row, or `undefined` if this service hosts no such group. */
   group(groupDid: string): StoredGroup | undefined
@@ -754,8 +703,8 @@ export interface Storage {
    *
    *  A list rather than a count because the caller has to look inside the objects to answer
    *  §8.2.4 L763's "SHOULD return an unexpired one": `expires_at` is a field of the
-   *  KeyPackage, and reading it here would mean `json_extract` on an opaque blob
-   *  (sqlite.ts's `inboxPage` note says why that door stays shut). */
+   *  KeyPackage, and a payload column is opaque bytes to this store — whoever needs a field
+   *  inside one parses it, rather than the store reaching in with `json_extract`. */
   availableGroupKeyPackages(ownerDid: string, ownerDeviceId: string): StoredGroupKeyPackage[]
   /** Take one named `available` package and mark it `reserved` in the same call, returning
    *  whether THIS call took it.

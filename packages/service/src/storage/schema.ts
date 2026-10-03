@@ -17,7 +17,8 @@
  *  v3: `message_reads` is new. It needs no migration step of its own — an
  *  `IF NOT EXISTS` table is exactly what the top-up pass in `applySchema` is for — but
  *  the version still has to move: without it a file written by v2 would return early
- *  from `applySchema` and never get the table.
+ *  from `applySchema` and never get the table. (The read surface that used it retired on
+ *  2026-10-03 and the table is now unused; see its definition below for why it stays.)
  *
  *  v4: `group_members` gains `joined_at` / `added_by` (P4 §7.2 L379–380 — they are part of
  *  the `group_member` object `group.get_info` returns), and `messages` gains the two
@@ -124,8 +125,12 @@ export const SCHEMA: readonly string[] = [
      group_state_version INTEGER,
      PRIMARY KEY (sender_did, target_did, message_id)
    )`,
+  // 这两条索引原本给取件面按"我收到的" / "我发出去的"两侧翻页用。2026-10-03 读侧搬回本地
+  // 之后（见下面 `message_reads` 那条注），`messages` 只剩写入与按主键的点查，两条索引都
+  // 没有读者了。留着不是"以后可能用得上"：删索引是一次动到已部署数据的 schema 变更，而
+  // `SCHEMA` 是 `IF NOT EXISTS` 的幂等建表集——从里面删掉一行，只让**新装**的库少一条索引，
+  // 老库那条还在，于是同一份代码在两个部署上跑出不同的查询计划。留着这一行两边才一致。
   `CREATE INDEX IF NOT EXISTS messages_target ON messages (target_did, accepted_at)`,
-  // 取件面按"我发出去的"这一侧翻页用的就是这一条。
   `CREATE INDEX IF NOT EXISTS messages_sender ON messages (sender_did, accepted_at)`,
 
   // ---- deliveries ------------------------------------------------------------
@@ -133,7 +138,7 @@ export const SCHEMA: readonly string[] = [
   // (owner, device), and §7's `messages` has no sequence column at all. A group message
   // is one `message_id` delivered to N members, so the sequence cannot live on the
   // message row — one row per recipient delivery is the only shape that can carry it.
-  // This is also what `sync.delta` replays (realtime.md §6) and what `inbox.get` pages.
+  // This is also what `sync.delta` replays (realtime.md §6) — 取件面现在只剩这一条读者。
   //
   // `recipient_device_id` is P5's mailbox half (e2ee-direct.md §4): NULL for a P3 message,
   // which every device of the account receives; set for a P5 one, which is pushed to that
@@ -169,10 +174,16 @@ export const SCHEMA: readonly string[] = [
   // 两者混成一处就会出现"客户端断了没 ack，消息显示成未读"这类永远说不清的状态。
   //
   // 键是 (owner_did, message_id) 而不是交付序号：发件人自己那一侧没有交付行
-  // （`deliveries` 只收件人一份），而 `inbox.get` 两个方向都返回，得有一个两边都有的
+  // （`deliveries` 只收件人一份），而它服务的那两条读方法两个方向都返回，得有一个两边都有的
   // 标识符。`message_id` 由发送方起（P1 §6.2.7 L402），两个发送方可能撞名——所以键里
   // 必须有 `owner_did`，它把撞名限定在一个信箱内部，而同一信箱里同名的两条消息本来就
   // 是同一条（§8.2 L444–450 认的就是这个）。
+  //
+  // **2026-10-03 起这张表没有任何读者和写者了**（用户裁定"已读只放本地"）：它的三条路
+  // （`inbox.mark_read` 写、`inbox.get` / `message.get_batch` 读）随读侧搬回本地一起退场。
+  // 表**留着**，不留代码：删表是一次版本化迁移，而它要动的是**部署方磁盘上的数据**——
+  // 已经写进去的行是别人的状态，本服务没有理由替他们扔。所以这里只把"它已经空了"这件事
+  // 写下来，真要删是另一次带版本号的迁移（见上面 v3 那段的口径）。
   `CREATE TABLE IF NOT EXISTS message_reads (
      owner_did   TEXT NOT NULL,
      message_id  TEXT NOT NULL,

@@ -50,21 +50,7 @@ export type { IncomingParamsInput, StoreDirectInput } from './rpc/direct'
 
 export { validatePayloadBody, ACCEPTED_CONTENT_TYPES, PAYLOAD_FIELDS } from './rpc/payload'
 
-export {
-  EXTENSION_PROFILE,
-  INBOX_GET,
-  INBOX_MARK_READ,
-  MESSAGE_GET_BATCH,
-  SYNC_DELTA,
-  markRead,
-  readBatch,
-  readDelta,
-  readInbox,
-  validateDeltaBody,
-  validateGetBatchBody,
-  validateInboxGetBody,
-  validateMarkReadBody,
-} from './rpc/inbox'
+export { EXTENSION_PROFILE, SYNC_DELTA, readDelta, validateDeltaBody } from './rpc/inbox'
 
 export {
   GROUP_ADD,
@@ -125,8 +111,6 @@ export { SCHEMA, SCHEMA_VERSION } from './storage/schema'
 export type {
   DeliveryRecord,
   IdempotencyRow,
-  InboxQuery,
-  InboxRow,
   OutboxEntry,
   Storage,
   StoredAttachmentGrant,
