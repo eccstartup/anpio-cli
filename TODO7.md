@@ -154,9 +154,10 @@ TODO6 写完了一整轮**写**侧：本机消息库 `messages.db` 的写入侧�
         （[dispatch.test.ts](packages/service/src/rpc/dispatch.test.ts) 的"取件面的可读窗口"那一组
         与 [sqlite.test.ts](packages/service/src/storage/sqlite.test.ts) 的 `drops rows accepted
         before the floor`）。
-      - **没做**：窗口不承诺告诉客户端"窗外还有 N 条"，所以 `fetch` 的 "brought in: 0" 仍然
-        分不出"真的没有了"和"有，但在窗外"。这一条与 §4 那条换钥诊断**不是同一件**——后者
-        随换钥迁移落地已经作废，这一条与换钥无关，任何一次 `fetch` 都可能撞上；单独记在
+      - **一开始没做、现已补上**：窗口原本不告诉客户端"窗外还有 N 条"，所以 `fetch` 的
+        "brought in: 0" 分不出"真的没有了"和"有，但在窗外"。这一条与 §4 那条换钥诊断**不是
+        同一件**——后者随换钥迁移落地已经作废，这一条与换钥无关，任何一次 `fetch` 都可能
+        撞上；单独记在
         §3 末尾那条里（2026-10-03 已裁定"走甲"并落地，见下）。
 - [x] **取件面：让 `sync.delta` / `fetch` 说得出"窗外还有 N 条"**。今天 `msg fetch` 只报搬
       回来几条，"0" 既可能是真的没有了、也可能是窗口外还有一堆——而窗口是**永不裁剪 + 30 天
