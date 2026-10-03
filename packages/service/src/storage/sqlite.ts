@@ -620,6 +620,85 @@ class SqliteStorage implements Storage {
     ).run(ownerDid, deviceId, seq)
   }
 
+  accountDid(subject: string): string | undefined {
+    const row = this.stmt('SELECT owner_did FROM account_dids WHERE subject = ?').get(subject) as
+      | Row
+      | undefined
+    return row === undefined ? undefined : text(row.owner_did)
+  }
+
+  rememberAccountDid(subject: string, did: string, at: string): void {
+    // `DO UPDATE SET owner_did = excluded.owner_did` rather than `DO NOTHING`: the caller
+    // has already decided this DID is the current one (the rotation check in
+    // `rpc/ownerDidUpdate.ts` runs it after — and only after — the transfer chain
+    // verified), so the row is a watermark that has to move. `updated_at` moves with it so
+    // an operator can see how far behind the DID server this service is.
+    this.stmt(
+      `INSERT INTO account_dids (subject, owner_did, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT (subject) DO UPDATE SET owner_did = excluded.owner_did, updated_at = excluded.updated_at`,
+    ).run(subject, did, at)
+  }
+
+  migrateOwner(fromDid: string, toDid: string): number {
+    return this.transaction(() => {
+      // Step 1 — lift `toDid`'s own deliveries above everything `fromDid` has. See the
+      // interface comment for why this direction: `fromDid`'s numbers are the ones a
+      // client's cursor may point at, and they must survive the move unchanged.
+      const head = this.headSeq(fromDid)
+      if (head > 0) {
+        this.stmt('UPDATE deliveries SET seq = seq + ? WHERE owner_did = ?').run(head, toDid)
+        // A device of the account that had already read under the new DID has to move with
+        // its rows, or its next read would rewind. `fromDid`'s cursors are all <= head and
+        // stay where they are.
+        this.stmt('UPDATE delivery_cursor SET last_seq = last_seq + ? WHERE owner_did = ?').run(
+          head,
+          toDid,
+        )
+      }
+      this.stmt('UPDATE deliveries SET owner_did = ? WHERE owner_did = ?').run(toDid, fromDid)
+      // `delivery_cursor`'s key is `(owner_did, device_id)`, so a device that has read under
+      // both DIDs collides. Merge by `MAX`: the further position is the one that must not be
+      // un-read (same rule `advanceCursor` uses).
+      this.stmt(
+        `INSERT INTO delivery_cursor (owner_did, device_id, last_seq)
+           SELECT ?, device_id, last_seq FROM delivery_cursor WHERE owner_did = ?
+         ON CONFLICT (owner_did, device_id) DO UPDATE SET last_seq = MAX(last_seq, excluded.last_seq)`,
+      ).run(toDid, fromDid)
+      this.stmt('DELETE FROM delivery_cursor WHERE owner_did = ?').run(fromDid)
+      // `device_envelopes` orders by `seq` **per `(recipient_did, recipient_device_id)`**, so
+      // the shift has to clear the head of every queue `fromDid` has, not one number. A
+      // single offset over that maximum does it: `toDid`'s queue for a device lands entirely
+      // above `fromDid`'s for the same device, so the two never interleave and the
+      // head-of-line order inside each is preserved.
+      const queueRow = this.stmt(
+        'SELECT COALESCE(MAX(seq), 0) AS max FROM device_envelopes WHERE recipient_did = ?',
+      ).get(fromDid) as Row
+      const offset = int(queueRow.max)
+      if (offset > 0) {
+        this.stmt('UPDATE device_envelopes SET seq = seq + ? WHERE recipient_did = ?').run(
+          offset,
+          toDid,
+        )
+      }
+      this.stmt('UPDATE device_envelopes SET recipient_did = ? WHERE recipient_did = ?').run(
+        toDid,
+        fromDid,
+      )
+      // `message_reads` is a dead table (no readers or writers since 2026-10-03 — see the
+      // annotation in `schema.ts`), but it is keyed by `(owner_did, message_id)` and a
+      // same-`message_id` collision is possible, so the merge is the same shape as the
+      // cursor's rather than a plain `UPDATE`.
+      this.stmt(
+        `INSERT OR IGNORE INTO message_reads (owner_did, message_id, read_at)
+           SELECT ?, message_id, read_at FROM message_reads WHERE owner_did = ?`,
+      ).run(toDid, fromDid)
+      this.stmt('DELETE FROM message_reads WHERE owner_did = ?').run(fromDid)
+      // `fromDid`'s deliveries are numbered 1..head with no gaps (`appendDelivery` takes
+      // `MAX(seq) + 1` under the write lock), so `head` is exactly how many changed hands.
+      return head
+    })
+  }
+
   group(groupDid: string): StoredGroup | undefined {
     const row = this.stmt('SELECT * FROM groups WHERE group_did = ?').get(groupDid) as Row | undefined
     if (row === undefined) return undefined

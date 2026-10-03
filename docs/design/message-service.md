@@ -427,7 +427,7 @@ CREATE INDEX messages_target ON messages (target_did, accepted_at);
 -- 每个收件人一份的投递记录，带它在那个人自己序号里的位置。
 -- `delivery_cursor` 的游标是每 (owner, device) 单调递增的，而 `messages` 上没有任何
 -- 序号列——一条群消息是一个 `message_id` 投给 N 个成员，序号放不到消息行上。
--- `sync.delta` 重放的是这张表，`inbox.get` 翻的也是它。
+-- `sync.delta` 重放的是这张表（2026-10-03 起这是它唯一的读者）。
 --
 -- **保留契约（2026-10-03 裁定）：这张表永不裁剪。** 没有任何 DELETE 会到这里，一行进来就
 -- 一直留着。取件面只被允许往回看一个窗口（`AGENTX_DELIVERY_READ_WINDOW_MS`，默认 30 天），
@@ -436,6 +436,11 @@ CREATE INDEX messages_target ON messages (target_did, accepted_at);
 -- 游标一行一个 `(owner_did, device_id)`，本服务没有一张"这个账号有哪些设备"的名册，所以
 -- "所有设备都 ack 过"这个下界算不出来——把没连过的设备算成已读，删掉的正是它还没读的东西。
 -- 代价是磁盘随收件箱长，那是运维的事。
+--
+-- **`owner_did` 会换名字。** `did:wba` 的身份把钥指纹嵌在 DID 里，换钥换的就是 DID 本身，
+-- 于是同一个人的信箱会被劈成两半（旧的那批在旧 DID 下，客户端只认自己**当前**那个 DID，
+-- 一条都取不到）。`account_dids` 那张表记的"这个主体今天挂在哪个 DID 上"就是补这一点用的，
+-- 迁移本身在 §9.6。
 CREATE TABLE deliveries (
   owner_did TEXT NOT NULL, seq INTEGER NOT NULL, message_id TEXT NOT NULL,
   method TEXT NOT NULL, params_json TEXT NOT NULL, accepted_at TEXT NOT NULL,
@@ -448,6 +453,12 @@ CREATE TABLE delivery_cursor (
   owner_did TEXT NOT NULL, device_id TEXT NOT NULL DEFAULT '',
   last_seq INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (owner_did, device_id)
+);
+
+-- 信箱自己的"名册"：这个稳定主体路径下的信箱今天在哪个 DID 上（§9.6）。
+-- 键取 `subjectOf(did)` 而不是 DID 自己，因为键要**不随换钥变**。
+CREATE TABLE account_dids (
+  subject TEXT PRIMARY KEY, owner_did TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 
 -- 群：Host 维护线性顺序，两个单调量都在这（谁推进谁见 groups.md §1）
@@ -979,6 +990,47 @@ subjectOf(did)     // did:wba → 去掉变化的那一段（钥指纹），其�
 **服务端不校验这个群住不住在本服务**（同 §9.4 末尾那条）。存的是**我的**名字，不是群的
 事实；群在联邦另一侧时（本服务不是它的 Host），一本本地名册照样该能记下它。要"先问群在
 不在"就得往它的 Host 发一次 `group.get_info`，而那是 `group info` 的事，不是起名的事。
+
+### 9.6 换钥之后：信箱跟着人走（2026-10-03 裁定）
+
+这一节没有方法，是**受理路上的一步**——与 §8.12 那三条触发路同一个形状，理由也一样：
+没有任何客户端能"上报换钥"，它只能是别的事的路上顺手做完。
+
+**问题。** `did:wba` 的身份把钥指纹嵌在 DID 里，换钥换的就是 DID 本身
+（`did:wba:host:user:alice:e1_<fp>` → `…:e1_<fp2>`）。`deliveries.owner_did` 存的是收件人
+**当时**那个 DID，于是同一个人的信箱被劈成两半：对端换钥后重新解析、把信投到新 DID 上，
+新旧两批分居两个 `owner_did`，而客户端只认自己**当前**那个 DID。它读新的一半，旧的那批
+**一条都取不到**，失败方式还是最难发现的一种：一次**退出 0 的空搬**
+（`msg fetch` 答 `brought in: 0`，而"真的没有"与"有，但挂在旧 DID 下"分不出来）。
+
+**做法。** 与 §8.12 逐条对应，缺的只是"记下来的那个旧 DID"——群有名册，账号没有，
+`account_dids` 那张表（§7）补上这一点：
+
+- **触发面**：这次调用是账号**以自己的身份、对自己的信箱**发起的（`meta.target.did` 等于
+  验过签的调用方 DID）。`sync.delta` 正是那一类，也正是发现不了旧投递的那条路。
+- **起点**：`account_dids` 上那个 DID。与调用方一致就结束——所以发现是**按需的**，一次
+  换钥最多解析一次转移链，之后水位线跟上，不再解析。
+- **采信**：从水位线上那个 DID 出发、用 P2 验到调用方的完整转移，档位**逐字复用 §8.12
+  的 `ACCEPTED_ASSURANCES`**（同一个问题不能有两套答案）。链断了、后继不是它、档位不够，
+  三种都不采纳，而且**不动水位线**——动了下一次就没得对照了。
+- **动作**：把 `deliveries` / `delivery_cursor` / `device_envelopes` / `message_reads`
+  从旧 DID 挪到新 DID 名下，一个事务里做完，然后才写水位线。
+
+**`deliveries` 的序号是这一步最要紧的细节。** 序号按 `(owner_did)` 各自从 1 起，所以把一边
+倒进另一边一定撞主键。做法是先把**新 DID 自己那批**抬到旧 DID 的最高号之上：旧的那批
+**一个号都不动**，于是客户端本地游标（`app_state.applied_seq`）指的仍然是同一行——换钥之后
+的第一次 `fetch` 既不跳过也不倒回；而换钥之后才到的那批本来就更晚，落在后面正是时间顺序。
+`device_envelopes` 同规，只是它的序号是**按设备**的，所以抬升用一个能清过旧名下所有队列的数。
+游标合并取 `MAX`：取了小的那个等于把已经 ack 过的信又变回未读（§6 那条"游标只说收到哪儿"）。
+
+**这不是删除。** `deliveries` 一行都没少，变的只是 `owner_did`——§7 的保留契约不受影响。
+迁移也**不承诺**它一定发生：对端 DID 服务器不可达时判不了，那批投递就再等一次调用。
+按 DID 而不是按主体取信这条规矩**没有**放宽：`sync.delta` 仍然只答调用方那个 DID 名下的行，
+`owner_did` 仍然是验过签的那一个——§9.1.1 那条 `target.did == sender_did` 的校验一个字没动。
+
+**没做的一件**：`did:webvh` 的 SCID 语义在 core 里还是本仓库的本地约定
+（`subjectOf` 的注释写着），所以那条路上判出来的"同一个主体"未必对得上上游将来的定义；
+真给它上链验证之前，这个迁移对 `did:webvh` 是保守的（链解析不出来就不搬）。
 
 ## 10. 联邦（P8）
 

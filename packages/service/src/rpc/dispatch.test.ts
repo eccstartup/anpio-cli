@@ -51,6 +51,9 @@ const second = createAnpIdentity('second.example')
  *  §8.12 要的正是从名册里那个旧的 DID 走到这一个。 */
 const successor = createAnpIdentity('second.example')
 const receiver = createAnpIdentity('receiver.example')
+/** `receiver` **换过钥之后**的那个 DID：主体路径一样，指纹不一样。TODO7 §3 第 4 条问的就是
+ *  旧投递在新名字下还取不取得到。 */
+const receiverRotated = createAnpIdentity('receiver.example')
 /** 发送方域里那个对外入口的服务身份。外层请求由它签，与业务发送者是两个人——
  *  §3.6 L90–98 说的两层身份，这里就是这个区别。 */
 const service = createAnpIdentity('service.example')
@@ -78,6 +81,7 @@ const DOCUMENTS: Record<string, unknown> = {
   [second.did]: second.didDocument,
   [successor.did]: successor.didDocument,
   [receiver.did]: receiver.didDocument,
+  [receiverRotated.did]: receiverRotated.didDocument,
   [service.did]: service.didDocument,
 }
 
@@ -2150,5 +2154,165 @@ describe('the outer identity on the request path', () => {
     const outcome = await h.post(text, await outerHeaders(text, { signer: impostor }))
     expect(outcome.status).toBe(401)
     expect(outcome.headers['www-authenticate']).toContain('error="forbidden_did"')
+  })
+})
+
+// TODO7 §3 第 4 条 —— 换钥之后那批投递的归属（用户 2026-10-03 裁定：
+// 「服务端换钥时把投递挪到新 DID 名下」）。
+//
+// 这里测的是**触发与采信**：一次自址的 `sync.delta` 会不会把旧 DID 名下的信箱搬到调用方
+// 这个新 DID 上、什么时候**不**搬，以及水位线怎么维护。搬家本身（序号、游标、设备队列）
+// 在 `storage/sqlite.test.ts` 里量；转移链的判别在 core 的用例里，所以解析器交给这里的
+// 是一份**已经判好的**结果。
+describe('moving an account mailbox to its new DID on the request path (TODO7 §3)', () => {
+  type Resolution = { currentDid: string; assurance?: DidChainAssurance } | 'throws'
+
+  /** 一份"已经判好的"链，外加它被问过几次——水位线跟上之后就不该再解析。 */
+  function chainRecorder(
+    answers: Record<string, Resolution>,
+    calls: string[],
+  ): DidChainResolver {
+    return async (did: string): Promise<DidChain> => {
+      calls.push(did)
+      const answer = answers[did]
+      if (answer === undefined || answer === 'throws') throw new Error(`no chain for ${did}`)
+      return {
+        did,
+        subject: subjectOf(answer.currentDid),
+        stableSubjectId: stableSubjectId(answer.currentDid),
+        currentDid: answer.currentDid,
+        superseded: answer.currentDid !== did,
+        assurance: answer.assurance ?? 'verified',
+        document: {},
+        docUrl: `https://peer.example/${answer.currentDid}`,
+        hops: [],
+      }
+    }
+  }
+
+  /** 一次以 `did` 自己身份、对自己信箱发起的读。 */
+  async function readAs(
+    h: Harness,
+    did: AnpSigningIdentity,
+    body: Record<string, unknown> = { since: 0 },
+  ): Promise<Outcome> {
+    return h.call(
+      await signed({
+        method: 'sync.delta',
+        meta: inboxMeta({ sender_did: did.did, target: { kind: 'agent', did: did.did } }),
+        body,
+        signer: did,
+      }),
+    )
+  }
+
+  /** `receiver` 名下的投递，绕开受理路直接写（不需要第二台服务就有一条"旧信"）。 */
+  function seedFor(h: Harness, ownerDid: string, messageId: string): void {
+    h.storage.appendDelivery({
+      ownerDid,
+      messageId,
+      method: 'direct.incoming',
+      paramsJson: JSON.stringify({ body: { message_id: messageId } }),
+      acceptedAt: NOW.toISOString(),
+    })
+  }
+
+  function messageIds(outcome: Outcome): unknown[] {
+    const messages = outcome.json?.result?.messages as { params: { body: { message_id?: string } } }[] | undefined
+    return (messages ?? []).map((frame) => frame.params.body.message_id)
+  }
+
+  it('moves the old DID\'s mail onto the new DID and answers it in the same call', async () => {
+    // 这条就是那个"退出 0 的空搬"的反面：搬之前 `sync.delta` 在新 DID 下一行都答不出，
+    // 搬之后同一次调用就把它交出来了。
+    const calls: string[] = []
+    const h = harness({ chainResolver: chainRecorder({ [receiver.did]: { currentDid: receiverRotated.did } }, calls) })
+    // 水位线先落在旧 DID 上——它是上一次这个账号出面时记下的。没有这一步就没有"前身"可谈。
+    h.storage.rememberAccountDid(subjectOf(receiverRotated.did), receiver.did, NOW.toISOString())
+    seedFor(h, receiver.did, 'old-mail')
+
+    const outcome = await readAs(h, receiverRotated)
+
+    expect(messageIds(outcome)).toEqual(['old-mail'])
+    // 行没有删，只是换了名字；而且水位线跟上了，所以第二次读不再解析。
+    expect(h.storage.headSeq(receiver.did)).toBe(0)
+    expect(h.storage.headSeq(receiverRotated.did)).toBe(1)
+    expect(h.storage.accountDid(subjectOf(receiverRotated.did))).toBe(receiverRotated.did)
+    await readAs(h, receiverRotated)
+    expect(calls).toEqual([receiver.did])
+  })
+
+  it('records the watermark on a subject it has never seen, and does not resolve', async () => {
+    const calls: string[] = []
+    const h = harness({ chainResolver: chainRecorder({}, calls) })
+    seedFor(h, receiver.did, 'old-mail')
+
+    // 第一次见这个主体：没有前身可谈，只记下水印，也不解析（那行信本来就在它名下）。
+    const outcome = await readAs(h, receiver)
+    expect(messageIds(outcome)).toEqual(['old-mail'])
+    expect(h.storage.accountDid(subjectOf(receiver.did))).toBe(receiver.did)
+    expect(calls).toEqual([])
+  })
+
+  it('leaves the mail where it is when the chain does not reach the caller', async () => {
+    // 链上那个旧 DID 有后继，但**不是**眼前这个 DID——两个人在用同一个主体路径，本服务
+    // 无从判断谁是谁。不猜：一行不搬，水位线也不动。
+    const h = harness({
+      chainResolver: chainRecorder({ [receiver.did]: { currentDid: second.did } }, []),
+    })
+    h.storage.rememberAccountDid(subjectOf(receiverRotated.did), receiver.did, NOW.toISOString())
+    seedFor(h, receiver.did, 'old-mail')
+
+    const outcome = await readAs(h, receiverRotated)
+    expect(outcome.json?.result?.messages).toEqual([])
+    expect(h.storage.headSeq(receiver.did)).toBe(1)
+    expect(h.storage.accountDid(subjectOf(receiverRotated.did))).toBe(receiver.did)
+  })
+
+  it('leaves the mail where it is when the chain cannot be resolved at all', async () => {
+    // 对端 DID 服务器不可达：判不了就不采纳，而且**水位线不动**——动了下一次就没得对照了。
+    const h = harness({ chainResolver: chainRecorder({}, []) })
+    h.storage.rememberAccountDid(subjectOf(receiverRotated.did), receiver.did, NOW.toISOString())
+    seedFor(h, receiver.did, 'old-mail')
+
+    await readAs(h, receiverRotated)
+    expect(h.storage.headSeq(receiver.did)).toBe(1)
+    expect(h.storage.accountDid(subjectOf(receiverRotated.did))).toBe(receiver.did)
+  })
+
+  it('refuses a chain whose assurance is below policy, the same way §8.12 does', async () => {
+    const h = harness({
+      chainResolver: chainRecorder(
+        { [receiver.did]: { currentDid: receiverRotated.did, assurance: 'provider_asserted' } },
+        [],
+      ),
+    })
+    h.storage.rememberAccountDid(subjectOf(receiverRotated.did), receiver.did, NOW.toISOString())
+    seedFor(h, receiver.did, 'old-mail')
+
+    await readAs(h, receiverRotated)
+    expect(h.storage.headSeq(receiver.did)).toBe(1)
+    expect(h.storage.accountDid(subjectOf(receiverRotated.did))).toBe(receiver.did)
+  })
+
+  it('does not touch an account when the call is not addressed to itself', async () => {
+    // 自址是触发条件：一次投给**对端**的调用（`direct.send` 那条路）不该在这里动账号的归属，
+    // 否则一个同主体路径的 DID 只要给别人发封信就能把别人的信箱搬走。
+    const calls: string[] = []
+    const h = harness({ chainResolver: chainRecorder({ [receiver.did]: { currentDid: receiverRotated.did } }, calls) })
+    h.storage.rememberAccountDid(subjectOf(receiverRotated.did), receiver.did, NOW.toISOString())
+    seedFor(h, receiver.did, 'old-mail')
+
+    await h.call(
+      await signed({
+        method: 'direct.send',
+        meta: meta({ sender_did: receiverRotated.did, target: { kind: 'agent', did: second.did } }),
+        body: { text: 'hi' },
+        signer: receiverRotated,
+      }),
+    )
+
+    expect(calls).toEqual([])
+    expect(h.storage.headSeq(receiver.did)).toBe(1)
   })
 })

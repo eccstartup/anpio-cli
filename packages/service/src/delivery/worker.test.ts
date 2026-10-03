@@ -400,6 +400,9 @@ describe('the schema the worker reads', () => {
     // read only on the RPC path, so a retired outbox row never meets it. Checked, no action.
     // v13 added `group_remarks`, the address book's other half (TODO6 §4.2) — same reasoning
     // as v12 and the same table shape, one more Profile on the RPC path. Checked, no action.
-    expect(SCHEMA_VERSION).toBe(13)
+    // v14 added `account_dids`, the mailbox's own roster (TODO7 §3 第 4 条) — written and
+    // read on the RPC path by `rpc/ownerDidUpdate.ts`, and the migration it drives moves
+    // `deliveries`, which this worker does not read either. Checked, no action.
+    expect(SCHEMA_VERSION).toBe(14)
   })
 })

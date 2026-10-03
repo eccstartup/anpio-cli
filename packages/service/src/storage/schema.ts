@@ -73,8 +73,15 @@
  *  v13: `group_remarks` is new — the other half of the address book (TODO6 §4.2): the name
  *  an owner gives a *group*, as opposed to the name it gives a peer. Keyed by
  *  `(owner_did, group_did)`. Like v3/v6/v8/v9/v11/v12 it arrives through the `IF NOT EXISTS`
- *  pass and needs no migration step of its own; the version moves for the usual reason. */
-export const SCHEMA_VERSION = 13
+ *  pass and needs no migration step of its own; the version moves for the usual reason.
+ *
+ *  v14: `account_dids` is new — the roster the delivery migration of TODO7 §3 needs. It is
+ *  the one place that answers "which DID is this account's mailbox filed under right now",
+ *  keyed by the stable subject path rather than by the DID, because a `did:wba` identity
+ *  changes its DID when it rotates keys and the mailbox has to follow. See the table's own
+ *  comment. Like v3/v6/v8/v9/v11/v12/v13 it arrives through the `IF NOT EXISTS` pass and
+ *  needs no migration step of its own; the version moves for the usual reason. */
+export const SCHEMA_VERSION = 14
 
 export const SCHEMA: readonly string[] = [
   // ---- idempotency -----------------------------------------------------------
@@ -166,6 +173,30 @@ export const SCHEMA: readonly string[] = [
      device_id  TEXT NOT NULL DEFAULT '',
      last_seq   INTEGER NOT NULL DEFAULT 0,
      PRIMARY KEY (owner_did, device_id)
+   )`,
+
+  // ---- account DIDs (the mailbox's own roster) --------------------------------
+  // 这张表只回答一个问题：**这个稳定主体路径下的信箱，今天挂在哪个 DID 上**。
+  //
+  // 为什么需要它：`did:wba` 的身份**内嵌钥指纹**，换钥换的就是 DID 本身
+  // （`did:wba:host:user:alice:e1_<fp>` → `…:e1_<fp2>`），而 `deliveries.owner_did` 存的是
+  // 收件人当时那个 DID。对端换钥后重新解析、把信投到新 DID 上，于是同一个人的信箱被劈成
+  // 两半：旧的挂在旧 DID 下，新的挂在新 DID 下，而客户端只认得自己**当前**那个 DID——
+  // 它读新的一半，旧的那批**一条都取不到**（TODO7 §3 第 4 条量出来的那个"退出 0 的空搬"）。
+  //
+  // 所以本服务需要一个"前身是谁"的起点，这正是群名册（`group_members`）在 §8.12 里承担的
+  // 角色，只是这里没有群可挂。键取 `subjectOf(did)` 而不是 DID 自己：那个函数是 core 里
+  // "哪一段是主体、哪一段是指纹"的权威判断（`identity.ts` 的 `subjectOf`），与通讯录的键
+  // 用的是同一个（`contacts` 那张表上写了为什么不另写一份）。
+  //
+  // **它不是一份名册，是一条水位线。** 每行记的是"这个主体**最近一次**以哪个 DID 出面"，
+  // 由 `rpc/ownerDidUpdate.ts` 在自址请求上维护；判出来的换钥只有在转移链验过之后才写回，
+  // 所以一行落后于 DID 服务器是常态（"还没发现"），而不是错误。`deliveries` 一条都不删，
+  // 迁移只改 `owner_did`（§7 的保留契约不受影响）。
+  `CREATE TABLE IF NOT EXISTS account_dids (
+     subject    TEXT PRIMARY KEY,
+     owner_did  TEXT NOT NULL,
+     updated_at TEXT NOT NULL
    )`,
 
   // ---- read state ------------------------------------------------------------

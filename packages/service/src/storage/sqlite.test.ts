@@ -304,6 +304,121 @@ describe('deliveries', () => {
   })
 })
 
+// TODO7 §3 第 4 条：换钥之后那批投递的归属。这里量的是**搬家本身**（序号怎么重排、
+// 游标与设备队列跟不跟着走），采信与否那条判定在 `rpc/ownerDidUpdate.test.ts`。
+describe('moving a mailbox to a new DID (key rotation)', () => {
+  const OLD = 'did:wba:host.example:user:alice:e1_old'
+  const NEW = 'did:wba:host.example:user:alice:e1_new'
+
+  function deliver(store: Storage, ownerDid: string, messageId: string, acceptedAt: string): number {
+    return store.appendDelivery({
+      ownerDid,
+      messageId,
+      method: 'direct.incoming',
+      paramsJson: JSON.stringify({ message_id: messageId }),
+      acceptedAt,
+    }).seq
+  }
+
+  it('keeps the watermark per stable subject, not per DID', () => {
+    const store = open()
+    expect(store.accountDid('did:wba:host.example:user:alice')).toBeUndefined()
+
+    store.rememberAccountDid('did:wba:host.example:user:alice', OLD, '2026-10-01T00:00:00Z')
+    expect(store.accountDid('did:wba:host.example:user:alice')).toBe(OLD)
+
+    store.rememberAccountDid('did:wba:host.example:user:alice', NEW, '2026-10-02T00:00:00Z')
+    expect(store.accountDid('did:wba:host.example:user:alice')).toBe(NEW)
+  })
+
+  it('re-files the deliveries and leaves the numbers a cursor points at alone', () => {
+    // 这条是那个顺序规矩的全部理由：`from` 的号**一个都不动**。客户端本地游标停在旧号上，
+    // 而 `to` 那边已经有几行时，只有把 `to` 抬到 `from` 上面才不会撞主键、也才不会让
+    // 一次补齐跳过或倒回。
+    const store = open()
+    deliver(store, OLD, 'old-1', '2026-10-01T00:00:00Z')
+    deliver(store, OLD, 'old-2', '2026-10-01T00:00:01Z')
+    deliver(store, NEW, 'new-1', '2026-10-02T00:00:00Z')
+    store.advanceCursor(OLD, 'dev-1', 2)
+    store.advanceCursor(NEW, 'dev-1', 1)
+    // 换钥**之前**这台设备读到哪儿——搬完家之后旧名字下已经没有游标行了，所以这个值要
+    // 先记下来，它才是"客户端手里那个数"。
+    const readSoFar = store.cursor(OLD, 'dev-1')
+
+    expect(store.migrateOwner(OLD, NEW)).toBe(2)
+
+    // 旧的两条还在新号上（1、2），换钥后才到的那条被抬到它们后面（3）。
+    expect(store.deliveriesSince(NEW, '', 0, 10, undefined).map((d) => `${String(d.seq)}:${d.messageId}`)).toEqual([
+      '1:old-1',
+      '2:old-2',
+      '3:new-1',
+    ])
+    // 旧名字下一条不剩，但**没有任何一行被删**：数得出来的还是三条。
+    expect(store.headSeq(OLD)).toBe(0)
+    expect(store.deliveriesSince(NEW, '', 0, 10, undefined)).toHaveLength(3)
+    // 一台在旧 DID 名下读到 2 的设备，接着读拿到的是它还没读的那条——游标仍然指着同一行。
+    expect(store.cursor(NEW, 'dev-1')).toBe(3)
+    expect(
+      store.deliveriesSince(NEW, 'dev-1', readSoFar, 10, undefined).map((d) => d.messageId),
+    ).toEqual(['new-1'])
+  })
+
+  it('merges the cursors of devices that read under both DIDs, taking the further one', () => {
+    const store = open()
+    deliver(store, OLD, 'old-1', '2026-10-01T00:00:00Z')
+    deliver(store, NEW, 'new-1', '2026-10-02T00:00:00Z')
+    // 同一台设备在两边都读过：这条合起来时 `(owner_did, device_id)` 会撞，而取哪个值是有
+    // 对错的——取了小的那个，等于把它已经 ack 过的信又变回未读。
+    store.advanceCursor(OLD, 'dev-1', 1)
+    store.advanceCursor(NEW, 'dev-1', 1)
+
+    store.migrateOwner(OLD, NEW)
+
+    expect(store.cursor(NEW, 'dev-1')).toBe(2)
+  })
+
+  it('moves the device queue with the account, keeping each queue in its own order', () => {
+    // P6 的信封不在 `deliveries` 里（`deviceQueue.ts` 文件头第 3 条），所以它得自己跟着走，
+    // 否则换钥之后那批只有推能到的帧就永远到不了了。序号是**按设备**的，所以抬升用一个能清过
+    // 旧名下所有队列的数，两条队列都不会交错。
+    const store = open()
+    function enqueue(recipientDid: string, recipientDeviceId: string, kind: string): number {
+      return store.enqueueDeviceEnvelope({
+        recipientDid,
+        recipientDeviceId,
+        groupDid: 'did:web:host.example:group:g1',
+        kind,
+        envelopeJson: '{}',
+        attempts: 0,
+        nextAttemptAt: '2026-10-01T00:00:00Z',
+        enqueuedAt: '2026-10-01T00:00:00Z',
+      })
+    }
+    enqueue(OLD, 'dev-a', 'incoming')
+    enqueue(OLD, 'dev-a', 'commit')
+    enqueue(OLD, 'dev-b', 'incoming')
+    enqueue(NEW, 'dev-a', 'welcome')
+
+    store.migrateOwner(OLD, NEW)
+
+    const due = store.dueDeviceEnvelopes('2026-10-01T00:00:00Z', 10)
+    expect(due.map((e) => `${e.recipientDeviceId}:${e.kind}#${String(e.seq)}`)).toEqual([
+      // 设备 a：旧名下那两条（1、2）在前，换钥后入队的那条抬到 2 之上（3）。
+      'dev-a:incoming#1',
+      'dev-a:commit#2',
+      'dev-a:welcome#3',
+      'dev-b:incoming#1',
+    ])
+  })
+
+  it('is a no-op when there is nothing under the old name', () => {
+    const store = open()
+    deliver(store, NEW, 'new-1', '2026-10-02T00:00:00Z')
+    expect(store.migrateOwner(OLD, NEW)).toBe(0)
+    expect(store.deliveriesSince(NEW, '', 0, 10, undefined).map((d) => d.seq)).toEqual([1])
+  })
+})
+
 describe('idempotency', () => {
   // The key is core's `idempotencyKey()` output. Its shape does not matter here — only
   // that a row is found by the exact key and by nothing else.

@@ -547,6 +547,36 @@ export interface Storage {
   /** Advance a device's cursor. Never backwards: a stale replay must not un-read mail. */
   advanceCursor(ownerDid: string, deviceId: string, seq: number): void
 
+  /** The DID this account's mailbox was last seen filed under, keyed by the stable
+   *  subject path (`subjectOf`). `undefined` means this service has never seen the
+   *  subject act as itself — which is what every account starts at, and also what a
+   *  non-`did:wba` identity that never rotates into a new DID stays at forever.
+   *  See `account_dids` in `schema.ts` and `rpc/ownerDidUpdate.ts`. */
+  accountDid(subject: string): string | undefined
+  /** Record that this subject just acted as `did`. Called for every self-addressed
+   *  authenticated request, so the row is the service's memory of "who this account is
+   *  now" — the starting point the rotation check needs. `at` is the request's instant. */
+  rememberAccountDid(subject: string, did: string, at: string): void
+
+  /**
+   * Re-file an owner's mailbox under a new DID (TODO7 §3 第 4 条, 用户 2026-10-03 裁定).
+   *
+   * Moves `deliveries` / `delivery_cursor` / `device_envelopes` / `message_reads` from
+   * `fromDid` to `toDid` in one transaction. **Nothing is deleted** — the §7 retention
+   * contract is about rows, and a row that changes hands is still the same row.
+   *
+   * Sequence numbers are the delicate part. `deliveries.seq` is per `(owner_did)`, so the
+   * two namespaces each start at 1 and moving one into the other would collide on the
+   * primary key. `toDid`'s rows are therefore shifted **above** everything `fromDid` has
+   * first: the older mail keeps the numbers a client's cursor may already point at (so a
+   * catch-up after rotation neither skips nor rewinds), and the mail that arrived after the
+   * rotation lands after it. `device_envelopes` gets the same treatment with its own
+   * per-`(did, device)` head; `delivery_cursor` merges by `MAX` on a per-device conflict.
+   *
+   * Returns how many deliveries changed hands, which is the number worth logging.
+   */
+  migrateOwner(fromDid: string, toDid: string): number
+
   /** The group row, or `undefined` if this service hosts no such group. */
   group(groupDid: string): StoredGroup | undefined
   /** Write a new group. The counters are given rather than derived: `group.create` starts

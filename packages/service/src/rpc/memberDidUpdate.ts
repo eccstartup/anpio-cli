@@ -54,8 +54,11 @@ import {
 export type DidChainResolver = (did: string) => Promise<DidChain>
 
 /** §8.12 L942：这两档才建立连续性。第三档 `provider_asserted` 由业务策略定，本服务不收；
- *  第四档 `unverified` 是规范硬性禁止的（"MUST NOT establish continuity"）。 */
-const ACCEPTED_ASSURANCES: readonly DidChainAssurance[] = ['verified', 'recovery_verified']
+ *  第四档 `unverified` 是规范硬性禁止的（"MUST NOT establish continuity"）。
+ *
+ *  **导出去**是因为它不只回答 §8.12 的问题：`ownerDidUpdate.ts` 判"这个新 DID 是不是那个
+ *  旧 DID 的后继"时问的是同一件事，而"哪几档算连续"只能有一个答案。 */
+export const ACCEPTED_ASSURANCES: readonly DidChainAssurance[] = ['verified', 'recovery_verified']
 
 /**
  * §8.12 L946 点名的五个方法里，无条件触发的那四个。
@@ -81,7 +84,7 @@ const UNCONDITIONAL_TRIGGERS: ReadonlySet<string> = new Set([
  *  授权过的恢复钥，而"停用之前的那份文档"正是这个缓存在上一次解析时留下的那一份。所以
  *  `recovery_verified` 的可达范围就是缓存的 TTL 窗口——这个界记在
  *  [message-service.md](../docs/design/message-service.md) §14，不假装它更宽。 */
-function chainResolverFor(config: Config): DidChainResolver {
+export function chainResolverFor(config: Config): DidChainResolver {
   return (did) =>
     resolveDidChain(did, {
       ...config.didResolution,

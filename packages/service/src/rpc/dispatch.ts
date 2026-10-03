@@ -78,6 +78,7 @@ import {
   isOwnGroupDid,
 } from './groups'
 import { adoptMemberDidForRequest, requestTriggersDidUpdate, type DidChainResolver } from './memberDidUpdate'
+import { adoptOwnerDidForRequest, isSelfAddressed } from './ownerDidUpdate'
 import {
   ATTACHMENT_ABORT_OBJECT,
   ATTACHMENT_COMMIT_OBJECT,
@@ -527,6 +528,10 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
     // A.2 L1018 那个 nonce，同样只有验签过了才有值。P6 §13.6 L1693 要的一次性检查在
     // `consumeProofNonce()` 里兑，**位置在 `perform` 之内**（那个函数上写了理由）。
     let proofNonce: string | undefined
+    // 认证**通过**的锚点。与 `proofKeyId` 分开记：那个是 proof 里声明的 `keyid`（可能缺），
+    // 这个是"这次调用是**谁**发起的"，由 `authenticate` 连钥带身份一起验过。账号换钥那条路
+    // （`ownerDidUpdate.ts`）要的正是后者。
+    let authenticatedAs: string | undefined
 
     // 通知不答（§5.3 L162、§5.6 L201）。用 `'id' in` 而不是 core 的 `isNotification`：
     // 理由写在 `envelope.ts` 里（联合会被守卫收成 `never`）。
@@ -557,9 +562,10 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
     // 认证在正文之前：正文校验会读 `content_type` 并据此判断，那个字段是请求方写的，
     // 先让它通过签名再据它判，才不至于拿一个未认证的字段做决定。
     if (spec.requiresOriginProof(meta)) {
+      const anchor = callerAnchor(spec.name, envelope.params)
       const outcome = await authenticate({
         envelope,
-        expectedAnchor: callerAnchor(spec.name, envelope.params),
+        expectedAnchor: anchor,
         resolver,
         resolverOptions,
         codes: spec.authCodes,
@@ -573,6 +579,7 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
       }
       proofKeyId = outcome.keyid
       proofNonce = outcome.nonce
+      authenticatedAs = anchor
     }
 
     try {
@@ -612,6 +619,25 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
       // 而它落下的那次改名自己也占一个事务，两件事都进不去 `acceptOperation` 的事务。
       // 绝大多数调用在这里一次查表就过去了（方法名不在触发面上）。
       await adoptDidSuccessor(spec, meta, acceptedAt, pending)
+
+      // TODO7 §3 第 4 条：账号自己的换钥。与上面那一步是同一件事的另一个面——群名册那边
+      // 补的是"成员换 DID"，这一步补的是"**这个账号自己的**信箱挂在哪个 DID 下"。触发面比
+      // 那一处窄得多：只有这次调用是**账号以自己身份、对自己的信箱**发起的才算数
+      // （`isSelfAddressed`），而 `sync.delta` 正是那一类——它也正是取不到旧投递的那条路。
+      //
+      // 位置在这里、与 `adoptDidSuccessor` 并列：都是**受理前**要补完的事实，也都要网络
+      // 往返（走一次转移链），所以都不进 `acceptOperation` 的事务。绝大多数调用在这里一次
+      // 索引读就过去了（水位线与调用方一致），只有真的换过钥才解析一次。
+      if (authenticatedAs !== undefined && isSelfAddressed(authenticatedAs, meta.target?.did)) {
+        await adoptOwnerDidForRequest({
+          storage: deps.storage,
+          config: deps.config,
+          actorDid: authenticatedAs,
+          acceptedAt,
+          ...(deps.chainResolver !== undefined ? { resolveChain: deps.chainResolver } : {}),
+          log,
+        })
+      }
 
       // 这个方法不改状态：没有幂等作用域，也就没有要记的操作，直接跑（P1 §9.1 L628 的
       // 四段键里 operation_id 的语义是"重试同一次操作"，无状态调用没有这个东西）。
