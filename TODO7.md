@@ -121,12 +121,36 @@ TODO6 写完了一整轮**写**侧：本机消息库 `messages.db` 的写入侧�
       `delivery_cursor`）正是那个"客户端说读到了"的信号。这里的问题是：**ack 到哪一档才允许删？**
       账号级只被一台设备 ack，另一台还没读，就不能删。所以这多半不是"ack 后删"，而是
       "**所有设备都 ack 过**才删"，那需要一个跨设备的**下界**。
+
+      **2026-10-03 查清了做不到的地方，需要裁定。** 事实（都在
+      [sqlite.ts](packages/service/src/storage/sqlite.ts)）：
+      - `delivery_cursor` 是**按 `(owner_did, device_id)` 一行**的（`cursor` / `advanceCursor`，
+        约 641/653 行），没有任何地方记"这个账号一共有几台设备"。
+      - 所以"所有设备都 ack 过"这个下界**今天算不出来**：`MIN(last_seq) OVER (owner_did)` 会把
+        **从没连过的设备**算成 0（它没有行），下界立刻塌到 0，一条也删不掉；而"只对出现过的设备
+        取 MIN"则会把一台**生来没出现过**的设备当成"已 ack"，删掉它还没读的东西。
+      - 两条出路各自要一个新事实：**(甲) 有一张设备名册**（谁属于这个账号），下界 = 名册上每台
+        设备的 `cursor` 的 MIN；**(乙) 不删**，把"永不裁剪"写成契约并配一条运维说明
+        （`deliveries` 随收件箱无限长，磁盘是部署的事）。
+      **建议先走 (乙)**：它今天就是真的，写下来不改一行代码；而 (甲) 要的设备名册本身是一条新的
+      真相（账号里有哪些设备），属于换钥 / 设备撤销那条线，不该在这一轮顺手造。
+      **这条要用户裁定。**
 - [ ] **P6 设备队列的有界保留要不要为持久客户端放宽。** 今天是 8 次尝试 / 24 小时
       （[config.ts:41-42](packages/service/src/config.ts#L41)，[deviceQueue.ts](packages/service/src/delivery/deviceQueue.ts) 文件头）。
       24 小时对**推**是合理的（推是尽力而为的优化，拉才是事实），但对一个**离线一天以上**的
       客户端，那批 P6 帧就过期了。要定的不是"调大数字"，是**这批帧过期后 `fetch` 能不能把它们补回来**
       ——能，则 24 小时无妨；不能，则要么放宽，要么让 `fetch` 覆盖这一段。
-- [ ] **补拉历史的接口**（现在**没有规范位**）。两个候选，要先选：
+
+      **2026-10-03 答案是"不能"，而且理由在服务端自己写着。** `sync.delta` 读的是
+      `storage.deliveriesSince(...)`（[inbox.ts:200](packages/service/src/rpc/inbox.ts#L200)），
+      也就是 `deliveries` 表；而 P6 的信封**根本不往那张表写行**——[deviceQueue.ts](packages/service/src/delivery/deviceQueue.ts)
+      文件头第 3 条逐字写着「P6 的信封在 `deliveries` 里没有行，所以这里没有第二条路可走」。
+      于是过期的设备队列帧是**真的没了**：`fetch` 搬不到，本地也没有过，客户端只能把"这条群消息
+      我没收到"如实说成没收到（`unfetchable` 那条打印的是**还在队里**的帧；过期的连名字都没有）。
+      要改的话是两条，都要裁定：**放宽保留**（数字是部署档位，改 `AGENTX_DEVICE_QUEUE_MAX_AGE_MS`
+      即可，但那只是把窗口推远），或者**给 P6 帧也写一条可补拉的记录**（那是让设备队列与
+      `deliveries` 共享一条持久路径，等于改 §12.6 的发射面）。**这条要用户裁定。**
+- [x] **补拉历史的接口**（现在**没有规范位**）。两个候选，要先选：
       - `direct.get_history {peer_did, since_seq?, limit?}`——§9.3 表里有形状，
         **v1 不实现**，因为 `since_seq` 没有定义：序号是**收件箱级**的交付计数器，而 `peer_did`
         问的是**一个会话里**的历史，"会话内第 N 条"本服务手上没有（[message-service.md:785](docs/design/message-service.md#L785)）。
@@ -136,10 +160,22 @@ TODO6 写完了一整轮**写**侧：本机消息库 `messages.db` 的写入侧�
       **建议先按第二条做（`fetch` = 一次带游标的 `sync.delta` 落库），把 `direct.get_history`
       继续挂着**，因为"会话级历史"在本地库成为记录之源之后，由**本地查询**回答更自然——
       那正是 §2 要画的东西。
+
+      **2026-10-03 按建议做了，而且做完了。** `fetch` 走 `sync.delta`，`direct.get_history`
+      **继续挂着**（服务端仍然不实现，[message-service.md](docs/design/message-service.md)
+      §9.3 那条注不用改）。"会话级历史"落成了 `msg history <peer_did>`——**本地查询**
+      （`MessageStore::conversation_with`，按 peer DID 取一条线、正序），正如这一条预测的那样。
 - [ ] **换钥之后 `deliveries.owner_did` 不被挪到新 DID 名下**（[message-service.md:914](docs/design/message-service.md#L914)）。
       这不是"还没做"，是一条**已知的没解的问题**：对端一直不再写信时，本地的 `did` 停在新钥之前，
       按 DID 发信失败、按名字解析出的还是旧 DID。读 = 本地之后它更刺眼——本地库按**槽位**组织
       （所以历史还在），而服务端那批投递仍挂在旧 DID 下，`fetch` 于是搬不到。要一个裁定。
+
+      **2026-10-03 补一条量出来的事实**：`fetch` 搬的是**自己账号在 `deliveries` 里的行**，而那批
+      行的 `owner_did` 是**旧 DID**；客户端解析出来的则是**新 DID**（本地的 `did` 已经换过）。
+      `deliveriesSince(ownerOf(meta), …)` 于是查的是新 DID，一行都查不到——**不是"搬不全"，
+      是"一条都搬不到"**，且失败方式是一次**退出 0 的空搬**（"brought in: 0"），最难被发现的
+      那一种。要不要在这里补一个"旧 DID 名下还有多少条没搬"的诊断，或者等 §3 那条换钥迁移一起
+      解决，**要用户裁定**。
 
 ---
 
@@ -152,11 +188,31 @@ TODO6 写完了一整轮**写**侧：本机消息库 `messages.db` 的写入侧�
       `message.get_batch` 是本服务自己的扩展（规范里不存在）。读 = 本地之后它们还有没有存在的理由？
       至少要区分：**`fetch` 需要的那几个**留下（如果 `fetch` 走 `sync.delta`，那连 `inbox.get`
       都不必留），**其余**是历史包袱。别让"读 = 本地"和"服务端还在答 `inbox.get`"同时为真。
-- [ ] **read 状态归谁。** 今天已读是**服务端按 (owner, device) 记的**（`inbox.mark_read` /
+
+      **2026-10-03 客户端这一侧已经落定，服务端那一侧卡在一个不是我的裁定上。** 事实：
+      - **Rust 客户端只剩一个调用者。** `sync.delta`（`msg fetch` 与 `msg listen` 的补齐）是
+        `x_agentx.inbox.v1` 里**唯一**还有客户端的成员。`INBOX_MARK_READ` 已从
+        [listen.rs](rust/crates/agentx-cli/src/message/listen.rs) 删掉（已读改由本地写），
+        `inbox.get` / `message.get_batch` 更早就没有 Rust 侧调用者了。
+      - **但 `packages/cli`（TS 那个客户端）还在调这三个**
+        （[msg.ts:54-56](packages/cli/src/commands/msg.ts#L54)），服务端的
+        `INBOX_GET` / `INBOX_MARK_READ` / `MESSAGE_GET_BATCH` 是**为它**留着的。
+      - 所以"读 = 本地"与"服务端还在答 `inbox.get`"今天**并不矛盾**——矛盾的只是 Rust 那半，
+        而那半已经不调了。真要退场，问题就变成"**TS 客户端还活着吗**"，那是另一条线
+        （[TODO6](TODO6.md) 已经把文档站与二进制名从它那儿挪走了）。**这一条要用户裁定**：
+        是把 TS 客户端也搬过来/退役，还是把 `inbox.get` 一族当成"给别的客户端的扩展"长期留着。
+- [x] **read 状态归谁。** 今天已读是**服务端按 (owner, device) 记的**（`inbox.mark_read` /
       `read_state`）。本地库有 `messages` 表，加一列 `read_at` 是最省事的做法，但那就有了
       **两个已读状态**——正是 realtime.md §5.4 那条"存了就变成两处状态，而它们一定会不一致"
       警告的情形。要么已读**只在本地**（服务端的 read 面随之退场），要么**只在服务端**
       （本地读的时候要联网问一次）。**这条要用户裁定。**
+
+      **2026-10-03 用户裁定："只放本地"。** 于是：
+      - `messages.read_at` **本来就在 v1 里**（`messages` 表建表时就有这一列），所以**没有迁移**。
+      - `msg read` 变成一次**本地写**：它不需要解析服务、不需要设备、更不该为此联网，
+        所以走的是新加的 `MessageStore::open_unsynced`（建库、游标键留空），而不是 `open`。
+      - **服务端的 read 面随之退场**：Rust 侧对 `inbox.mark_read` 的调用已经删了。
+        服务端那个 handler 还与 `inbox.get` 一族同上——去留见上一条。
 
 ---
 

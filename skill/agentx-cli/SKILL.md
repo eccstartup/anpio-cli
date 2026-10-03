@@ -70,13 +70,26 @@ The address is the DID, or a name from the address book:
 ```bash
 agentx-cli msg caps <did>                       # what that service supports, before sending
 agentx-cli msg send --to <did|name> --text "hello"   # body is --text (text/plain) or --body (JSON)
-agentx-cli msg inbox                            # what is waiting for the identity in use
+agentx-cli msg inbox                            # what this machine holds for the identity in use
+agentx-cli msg history <peer_did>               # one thread, oldest first, by peer DID
+agentx-cli msg show <message_id>                # one row
+agentx-cli msg read <message_id>                # mark read — a local write
+agentx-cli msg fetch                            # the one read that goes online: pull in what the service still holds
 agentx-cli msg listen                           # stay connected; print messages as they arrive
 ```
 
 `msg send` returning success means the message **entered the recipient's service**
 — not that anyone read it. Delivery and reading are separate facts, and the CLI
 never reports one as the other.
+
+**Reading is local.** `msg inbox` / `msg history` / `msg show` / `msg read` open this
+machine's own record: they never open a connection, so they answer with the service
+down. `msg fetch` is the one command that goes online, and it is a **write** — it
+pulls in what the service still holds, and its own first line of output says so when
+it cannot. The record is a file of plaintext messages: treat it the way you would
+treat the messages themselves, and do not expect a read to be reproducible somewhere
+else. `msg history` takes a DID, not a name — turn a name into a DID with
+`contacts resolve` first.
 
 **Names are a local convenience, not part of the protocol.** ANP addresses by DID;
 `contacts` is the layer that lets a person or a relaying agent say "Alice" instead.
@@ -89,17 +102,20 @@ agentx-cli contacts add <did> --remark Alice
 agentx-cli contacts resolve Alice               # name in, DID out
 ```
 
-`msg inbox` / `msg show` / `msg read` are an **implementation extension**, not the
-specification. A peer that implements only the spec answers "I do not have this
-method", and the CLI reports that as `unsupported_extension` — which is a correct
-answer about that peer, not a failure of the exchange. It is kept distinct from a
-refusal (`message_send_failed`) so a script can tell "try a different peer" from
-"this attempt did not land".
+`msg listen` and `msg fetch` go through an **implementation extension** of this
+service (`x_agentx.inbox.v1`), not the specification. A peer that implements only the
+spec answers "I do not have this method", and the CLI reports that as
+`unsupported_extension` — which is a correct answer about that peer, not a failure of
+the exchange. It is kept distinct from a refusal (`message_send_failed`) so a script
+can tell "try a different peer" from "this attempt did not land". The local reads
+above never reach a peer at all, so they cannot fail that way.
 
 `msg listen` is the only long-running command. It backfills what was missed, then
-goes live. Without `--ack` it does not advance the caller's cursor, so a run that
-ends prints the same messages again next time: a message printed twice is a
-nuisance, and one marked read that nobody saw is gone. Use `--once` to print the
+goes live. Every message it shows is also written to the local record. Without
+`--ack` it does not advance the caller's cursor, so a run that ends prints the same
+messages again next time: a message printed twice is a nuisance, and one marked read
+that nobody saw is gone. `--ack` says "I have this one" to the service **and** marks
+the row it just wrote read — the two are one act, not two. Use `--once` to print the
 backlog and exit instead of staying connected.
 
 ### Groups

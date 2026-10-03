@@ -155,7 +155,7 @@ connectx msg listen [--device <id>] [--since <seq>] [--ack] [--once]
 connectx msg inbox [--limit <n>] [--unread]     # 扩展面，读本地
 connectx msg history <peer_did> [--limit <n>]   # 读本地
 connectx msg show <message_id>                  # 读本地
-connectx msg read <message_id>... | --all       # 标已读（归属待裁定，见 client-messages.md §4）
+connectx msg read <message_id>... | --all       # 标已读（本地写，见 client-messages.md §8.5）
 connectx msg fetch [--since <seq>] [--limit <n>]  # 唯一联网的那一条
 ```
 

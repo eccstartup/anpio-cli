@@ -334,9 +334,12 @@ tests/cli_surface.rs` 里逐字列着今天每一个页面，删一个或改一�
   `--all and <message_id> are two spellings of the same thing; pass one`。
   `--all` 落的是**问的那一刻**未读的那些行。标不动的 id（已读、不在本地、或自己发出去的
   那些）不计数：报成"标了"会让这个数字什么都不说明。
-- **`msg fetch` 断网**：明确失败并说清它是**要联网的那一条**，而不是装作"本地就是全部"。
-  它对**只实现规范**的对端报 `unsupported_extension`（`sync.delta` 是实现扩展、规范未定义），
-  退出 1，**这是正确答案**不是缺陷。
+- **`msg fetch` 断网**：明确失败，而且**第一行就点名自己**——
+  `msg fetch` is the one read that goes online: it asks <endpoint> for its sync.delta page.
+  `msg inbox` / `history` / `show` answer from the local record and need no network.
+  不这么写的话，断网时的 `error sending request` 读起来像是"本地记录坏了"，而记录恰恰是还好着
+  的那件东西。它对**只实现规范**的对端报 `unsupported_extension`（`sync.delta` 是实现扩展、
+  规范未定义），退出 1，**这是正确答案**不是缺陷。
 - **`msg fetch` 搬不回来的**：已经 ack 掉又被服务端裁掉的、设备队列过期了的、换钥后仍挂在
   旧 DID 下的，都搬不回来。P6 的密文帧尤其——这台命令没有 MLS 接收侧，解不开，所以它会
   **点名**说哪些没取，而不是把密文当成正文记下来。
