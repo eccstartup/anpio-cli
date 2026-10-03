@@ -15,6 +15,7 @@
   * `GET  /g/<id>/did.json`                  **转发给服务**——群文档那一半
   * `POST /user-service/v1/did-auth/rpc`     `register` / `update_document`
   * `POST /user-service/v1/did/profile/rpc`  `get_me` / `update_me`
+  * `POST /user-service/v1/did/update`       一次 `did update` 的两个文档（ANP-03 §2.5.3）
 
 路径没有第二个约定：`didToUrl`（`packages/core/src/crypto/resolveDid.ts:498`）说
 `did:wba:<authority>[:<seg>…]` 住在 `/<seg…>/did.json`，所以 DID 自己说了它挂在哪。
@@ -42,6 +43,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 DID_AUTH_PATH = "/user-service/v1/did-auth/rpc"
 DID_PROFILE_PATH = "/user-service/v1/did/profile/rpc"
+# ANP-03 §2.5.3 不定管理接口的路径，所以 `did update --target` 自己指一个——真部署里这个 URL
+# 由那台主机的运维说了算，这里就挑一个和上面两条同族的。
+DID_UPDATE_PATH = "/user-service/v1/did/update"
 
 
 def jcs(value) -> bytes:
@@ -241,6 +245,47 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def handle_update(self, envelope) -> None:
+        """ANP-03 §2.5.3 的更新端点：一次 `did update` 送来的两个文档落在这里。
+
+        **它不验签，这是它的合同，不是它的疏漏。** 文件头那段写着这台主机一处签名逻辑都没有，
+        它只按 DID 存、按 DID 发。"这次转移是不是真的"由**读链的人**核：`resolve_chain` 会验
+        退休文档上 key-1 的 proof，验不过就走不到后继。所以主机收下的是一份客户端已经签好的
+        文档，判断对错不属于它——真主机（awiki）在这里是权威，要防伪造、防重放；这台演戏的
+        主机不演那一层。
+
+        它做的唯一一件事是把两份文档放到真主机会放的位置：退休文档盖住**旧 DID** 那条路径，
+        后继文档占住**新 DID** 那条。少了这一手，`did update` 的客户端那一侧就没有一个
+        "换过钥之后的世界"可跑——而那正是 e2e 要咬的东西。
+        """
+        retirement = envelope.get("didDocument")
+        retiring_did = envelope.get("did")
+        successor_did = envelope.get("successorDid")
+        successor_document = envelope.get("successorDocument")
+        if not isinstance(retirement, dict) or not isinstance(successor_document, dict):
+            self.send_json(400, {"error": "didDocument and successorDocument are required"})
+            return
+        if not isinstance(retiring_did, str) or not isinstance(successor_did, str):
+            self.send_json(400, {"error": "did and successorDid are required"})
+            return
+        old_path = path_for(retiring_did)
+        if self.state.documents.get(old_path) is None:
+            self.send_json(404, {"error": f"no document for {retiring_did}"})
+            return
+        # 两个文档都必须指着同一个后继，否则这就是一次把 A 退休、把 B 抬上去的交付——
+        # 收下它等于让这台主机替客户端编一份自相矛盾的账。
+        if retirement.get("successorDid") != successor_did or successor_document.get("id") != successor_did:
+            self.send_json(400, {"error": "successorDid must be the one both documents name"})
+            return
+        self.state.documents[old_path] = retirement
+        self.state.versions[old_path] += 1
+        new_path = path_for(successor_did)
+        self.state.documents[new_path] = successor_document
+        self.state.versions[new_path] = 1
+        self.state.tokens[f"e2e-token-{successor_did}"] = successor_did
+        self.state.profiles.setdefault(successor_did, {"did": successor_did, "handle": ""})
+        self.send_json(200, {"did": retiring_did, "successorDid": successor_did})
+
     def forward_group_document(self, path: str) -> None:
         url = f"{self.state.service_origin}{path}"
         try:
@@ -274,6 +319,9 @@ class Handler(BaseHTTPRequestHandler):
         authorization = self.headers.get("authorization", "")
         token = authorization[7:] if authorization.lower().startswith("bearer ") else None
 
+        if path == DID_UPDATE_PATH:
+            self.handle_update(envelope)
+            return
         if path == DID_AUTH_PATH:
             result, error = handle_auth_rpc(self.state, method, params, token, request_id)
         elif path == DID_PROFILE_PATH:

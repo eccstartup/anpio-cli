@@ -563,6 +563,116 @@ PY
   fi
 fi
 
+# ---- 换钥：信箱跟着人走 --------------------------------------------------------
+#
+# TODO7 §5 那条"对端换钥后一直不来信的那一半"。量的是一整条链上的四件事：换钥这件事本身
+# （`did update` 把旧文档标成退休、把新文档立起来）、旧 DID 的处置（`did resolve` 说它
+# 不是当前的那个，`--chain` 说出后继是谁）、发信那一侧的实情（按旧 DID 发信**不会失败**——
+# 收件人是当时那个 DID，一个还在服务手上的字符串），以及最要紧的那一件：**换钥之后投到旧
+# DID 名下的信，会不会自己找到人**。
+#
+# 最后一件有个时间上的前提，别处没写过：服务发现"对端换了 DID"的时延上界**就是** DID 文档
+# 缓存的 TTL（`config.ts` 的 `DEFAULT_DID_CACHE_TTL_MS` 那一段说的正是这件事——缓存里那份
+# 文档是换钥**之前**抓的，它自己不可能写着后来才发生的事，所以链只能等缓存过期再走一次）。
+# 这一节把服务**用一个 1 毫秒的 TTL 重启一次**：它量的是"换钥之后信会不会回来"，不是
+# "五分钟有多长"。别处跑的一直是出厂的那个数——这条只在这一节里成立。
+section "did update — a peer rotates its key, and the DID string moves with it"
+
+export AGENTXCLI_HOME="$WORK/home"
+for name in dave erin; do
+  run "$CLI" did create --host "http://localhost:${HOST_PORT}" --handle "$name" --agent "$name"
+  expect_status "did create $name succeeds" 0
+done
+run_quiet "$CLI" did show --agent dave --json
+DAVE_OLD="$(field did)"
+run_quiet "$CLI" did show --agent erin --json
+ERIN_DID="$(field did)"
+
+run "$CLI" contacts add --agent erin "$DAVE_OLD" --remark Dave
+expect_status "erin's book learns dave under the DID he has now" 0
+
+run "$CLI" msg send --agent erin --to "$DAVE_OLD" --text "before the rotation"
+expect_status "the message before the rotation is accepted" 0
+
+# dave 取一次件。这一步顺带把水位线（`account_dids`）压在他**现在**这个 DID 上——后面那句
+# "换钥之后他没再取过件"才有对照物。
+run "$CLI" msg listen --agent dave --once
+expect_status "dave reads it" 0
+expect "  and the message was there to read" "before the rotation"
+
+# 真的换一次钥。`--target` 是 ANP-03 §2.5.3 的要求：那条只定义了这次交付的**形状**，没有
+# 定义管理接口的路径，所以路径由主机的运维说了算——玩具主机演的那个见 `did_host.py`。
+run "$CLI" did update --agent dave --target "http://localhost:${HOST_PORT}/user-service/v1/did/update"
+expect_status "the host accepts the rotation" 0
+expect "  and names the DID it retired" "retiring did:"
+expect "  and the one that takes over" "successor did:"
+
+run_quiet "$CLI" did show --agent dave --json
+DAVE_NEW="$(field did)"
+if [ -n "$DAVE_NEW" ] && [ "$DAVE_NEW" != "$DAVE_OLD" ]; then
+  printf '    \033[32mok\033[0m   the local identity signs as a different DID now\n'
+else
+  printf '    \033[31mFAIL\033[0m did update left the DID as it was (%s)\n' "$DAVE_NEW"
+  FAILED=$((FAILED + 1))
+fi
+
+section "did resolve — the retired DID says so, and --chain names the successor"
+run "$CLI" did resolve "$DAVE_OLD"
+expect_status "did resolve on a retired DID exits 2" 2
+expect "  and says the document is not current" "superseded: yes"
+expect "  and points at the flag that follows the link" "--chain"
+
+run "$CLI" did resolve --chain "$DAVE_OLD"
+expect_status "did resolve --chain exits 2 too — the question was answered, not failed" 2
+expect "  and walks to the DID dave signs as now" "$DAVE_NEW"
+expect "  and reports how strong that hop was" "assurance:  verified"
+
+# 换钥是**对端**的事，本地的册子和发现都不会自己变——这正是问题里"我这边还记着旧的"那句。
+run "$CLI" contacts resolve --agent erin Dave
+expect_status "erin's book still answers for dave" 0
+expect "  and it is still the DID he left behind" "$DAVE_OLD"
+
+# 重启，把这个节的前提摆明（见上面那段）。日志用 `>>` 续写，前面那些行还留着。
+kill "$SERVICE_PID" 2>/dev/null || true
+wait "$SERVICE_PID" 2>/dev/null || true
+AGENTX_LISTEN="127.0.0.1:${SERVICE_PORT}" \
+AGENTX_PUBLIC_URL="http://127.0.0.1:${SERVICE_PORT}" \
+AGENTX_SERVICE_DID="$SERVICE_DID" \
+AGENTX_DB="$WORK/svc/svc.db" \
+AGENTX_OBJECT_DIR="$WORK/svc/objects" \
+AGENTX_DID_DEV_HOSTS="127.0.0.1,localhost" \
+AGENTX_DID_CACHE_TTL_MS=1 \
+  node "$ROOT/packages/service/dist/main.js" >>"$WORK/svc.log" 2>&1 &
+SERVICE_PID=$!
+wait_for_port "$SERVICE_PORT" "the service"
+
+section "the mailbox follows the key — mail sent to the retired DID comes home"
+# 按**旧 DID** 发信。断言的是"服务收下了"，不是"被拒了"：收件人是那个 DID 本身，而它还在
+# 服务手上，所以这一步不会失败——问题里"按 DID 发信失败"那句话，就是在这里被证伪的。
+run "$CLI" msg send --agent erin --to "$DAVE_OLD" --text "sent to the retired DID"
+expect_status "a send to the retired DID is still accepted" 0
+expect "  and the target is the DID erin still holds" "$DAVE_OLD"
+
+# 这就是"别让它悬着"。`sync.delta` 是自址请求，服务在这条路上顺带把旧 DID 名下的投递挪到
+# 新 DID 名下，于是那条信出现在 dave **自己**那个信箱里。
+run "$CLI" msg listen --agent dave --once
+expect_status "dave's next read exits 0" 0
+expect "  and the message sent to the DID he left behind is in his queue" "sent to the retired DID"
+
+run "$CLI" msg inbox --agent dave
+expect_status "dave's inbox answers" 0
+expect "  and holds the message sent to the old DID" "sent to the retired DID"
+expect "  and holds the one from before the rotation too" "before the rotation"
+
+# 上面那两条读的是**效果**；这一条读的是**那件事本身**——服务记了它挪了什么。只有它有这句
+# 话，才能把"读到了"和"它本来就该读到"分开。
+if grep -qF "mailbox of ${DAVE_OLD} -> ${DAVE_NEW}" "$WORK/svc.log"; then
+  printf '    \033[32mok\033[0m   the service moved the deliveries to the successor\n'
+else
+  printf '    \033[31mFAIL\033[0m the service never logged moving %s to %s\n' "$DAVE_OLD" "$DAVE_NEW"
+  FAILED=$((FAILED + 1))
+fi
+
 # ---- 只有 fetch 会联网 --------------------------------------------------------
 #
 # 这是"读搬到本地"那句裁定（TODO7 §2）的**可断言形态**。上面每一节验证的都是"有服务时读
@@ -603,7 +713,14 @@ expect_status "msg history answers offline too" 0
 expect "  and finds the thread by the peer's DID alone" "hello bob"
 
 run_quiet "$CLI" msg inbox --agent bob --json
-BOB_MSG_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["messages"][0]["message_id"])' "$LAST_OUT")"
+# 按**正文**挑那一行，不按位置：这个库是好几节一起攒出来的，`messages[0]` 是"最近的一条"，
+# 往上再添一条别的话，这条断言就会指着一个跟它无关的 id 还全绿。正文在 `body` 里
+# （`main.rs::row_of_stored`），文本消息的那个键就叫 `text`。
+BOB_MSG_ID="$(python3 -c '
+import json, sys
+rows = json.load(open(sys.argv[1]))["messages"]
+print(next(row["message_id"] for row in rows if (row.get("body") or {}).get("text") == "hello bob"))
+' "$LAST_OUT")"
 run "$CLI" msg show --agent bob "$BOB_MSG_ID"
 expect_status "msg show answers offline" 0
 expect "  and prints the row itself" "hello bob"
