@@ -22,14 +22,14 @@
 | 事实 | 量法 |
 | --- | --- |
 | Rust 单测 **132**，`cargo test` 全绿 | `cargo test --manifest-path rust/Cargo.toml` |
-| **全是单测**：没有一个测试同时起动服务和客户端 | `rust/crates/agentx-cli/` 下没有 `tests/` |
+| **全是单测**：没有一个测试同时起动服务和客户端 | `rust/crates/anpio-cli/` 下没有 `tests/` |
 | `cargo test` / `cargo clippy` **不在 CI 里** | `.github/workflows/ci.yml` 只有 `npm ci / build / typecheck / test` |
-| `packages/e2e` 不覆盖新客户端 | `grep -rn "agentx-cli" packages/e2e/src` → 0 行 |
-| 文档站不提 Rust 客户端 | `grep -n "Rust\|agentx-cli" vercel/reference/cli.md vercel/en/reference/cli.md` → 0 行 |
+| `packages/e2e` 不覆盖新客户端 | `grep -rn "anpio-cli" packages/e2e/src` → 0 行 |
+| 文档站不提 Rust 客户端 | `grep -n "Rust\|anpio-cli" vercel/reference/cli.md vercel/en/reference/cli.md` → 0 行 |
 | `docs/design/cli.md` 描述的是 **TS 的 `connectx`** | 二进制名、`--curve`、`--wallet`、`~/.connectx/`——一条都不是 Rust 这边的 |
 | `skill/connectx/SKILL.md` 同上 | 照 `connectx` 写 |
 | `rust/README.md` 是唯一描述真客户的文档 | 但它是一份 README，不是参考页 |
-| **没有通讯录**：任何"名字 → DID"的概念都不存在 | `grep -rni "contact\|remark\|nickname\|address_book" rust/crates/agentx-cli/src` → 只剩 `me` 那两处注释 |
+| **没有通讯录**：任何"名字 → DID"的概念都不存在 | `grep -rni "contact\|remark\|nickname\|address_book" rust/crates/anpio-cli/src` → 只剩 `me` 那两处注释 |
 | 群成员列表**没有名字字段** | `member_list` 每一项是 `{agent_did, role, status, joined_at}`（`docs/design/groups.md`） |
 | 群自己的名字是 `group_profile.display_name`，而 CLI **没有写它的命令** | `GroupCommand` 只有 create / info / members / join / leave / send |
 
@@ -48,10 +48,10 @@
 
 两条路，必须先选，否则后面全是重复劳动。
 
-| | 甲：`agentx-cli` 接棒 | 乙：两边都写 |
+| | 甲：`anpio-cli` 接棒 | 乙：两边都写 |
 | --- | --- | --- |
-| `docs/design/cli.md` | 改写成 `agentx-cli` 的设计（保留 §1 的判据与 §7 的退出码契约） | 拆两份 |
-| `vercel/reference/cli.md`（中英） | 改写成 `agentx-cli` | 加一节"另一个 CLI" |
+| `docs/design/cli.md` | 改写成 `anpio-cli` 的设计（保留 §1 的判据与 §7 的退出码契约） | 拆两份 |
+| `vercel/reference/cli.md`（中英） | 改写成 `anpio-cli` | 加一节"另一个 CLI" |
 | `skill/connectx/SKILL.md` | 改名 + 重写 | 两份 skill |
 | `packages/cli` | 明确标冻结，文档里不再作为入口 | 继续维护 |
 | 代价 | 文档站上旧的 `connectx` 页面要么删要么标注 | 每改一次命令面要改两处，且**门禁只认一份** |
@@ -64,7 +64,7 @@
 
 - [x] **§2.1 的裁定落成一句话**，写在 `docs/design/cli.md` 开头：这个仓库的 CLI 是哪个二进制，
       另一个是什么状态。**先做这条**，它是其余各条的前置。
-      —— 2026-10-02 定：`agentx-cli` 是 CLI，`connectx` 冻结；用户原话「ts的cli暂时不要动，
+      —— 2026-10-02 定：`anpio-cli` 是 CLI，`connectx` 冻结；用户原话「ts的cli暂时不要动，
       也不加功能，主攻rust cli」。已写进 `docs/design/cli.md` 开头。
 - [x] **`rust/README.md` 的**命令面一节**升级成参考页级别的逐条说明**
       （今天它是散文，缺"每个旗标的默认值"与"失败时说什么"）。
@@ -78,31 +78,31 @@
 - [x] **`vercel/reference/cli.md` 与 `vercel/en/reference/cli.md`：按 2.1 的裁定改写**，
       并**同时改 `see` 指向的那批页面**（`cli.md` §3 记的门禁只管"链接还活着"，
       不管内容一致——所以这条是人手的活，别指望门禁替你发现）。
-      —— 2026-10-02 完成（`aad660b`）：两页重写成 `agentx-cli`（怎么装、store 根、身份选择链、
+      —— 2026-10-02 完成（`aad660b`）：两页重写成 `anpio-cli`（怎么装、store 根、身份选择链、
       退出码与 `Error: <码>: <人话>`、逐族表 `did`/`agent`、`msg`、`contacts`、`group`（含
       `e2ee`）、`anp`、`me`、`discover`/`version`，以及调用方必须接住的那几条拒绝）。
       页面顶部有一句"`connectx` 已冻结、其余指南仍是 connectx 写法、正在迁移"——站点对自己的
       过渡状态说实话，而不是自相矛盾。导航标签、站点描述与**八处**入站链接文本一并改名；
       `npx vitepress build` 全页渲染、无死链。
-- [x] ~~**文档站其余页面里的 `connectx` 例子还没换。**~~ 参考页已指向 `agentx-cli`，但
+- [x] ~~**文档站其余页面里的 `connectx` 例子还没换。**~~ 参考页已指向 `anpio-cli`，但
       `quickstart.md`、`introduction.md`、`messages.md`、`realtime.md`、`groups.md`、`e2ee.md`、
       `deploy.md` 的**正文**仍在教 `npx connectx …`（各自 ×2 语言）。按 2.1 的裁定
       （`connectx`"不再是文档入口"）这些都该换，但那是一次跨十来页的正文改写，且 `quickstart`
       的安装那段要从 `npx` 改成"从源码 build"，**需要你点头再动**：甲=现在就整体换；
-      乙=只在各页加一句"另有 `agentx-cli`，见参考页"，正文维持现状。
-      —— **2026-10-02 核过一件事，它决定甲案怎么落笔**：`agentx-cli` 这个名字**在 crates.io 上
-      已经是别人家的**（`https://crates.io/api/v1/crates/agentx-cli` → `github.com/open-agentx/agentx-cli`，
+      乙=只在各页加一句"另有 `anpio-cli`，见参考页"，正文维持现状。
+      —— **2026-10-02 核过一件事，它决定甲案怎么落笔**：`anpio-cli` 这个名字**在 crates.io 上
+      已经是别人家的**（`https://crates.io/api/v1/crates/anpio-cli` → `github.com/open-agentx/anpio-cli`，
       一句"a lifecycle CLI for AI coding agents"，2026-05-10 发的 0.1.0，唯一一版）。本仓库
       `rust/Cargo.toml` 的 `version = "0.0.0"`、从没发过。所以第一，**不许写
-      `cargo install agentx-cli`**——那会装到别人家去；第二，甲案里 quickstart 的安装段只能
+      `cargo install anpio-cli`**——那会装到别人家去；第二，甲案里 quickstart 的安装段只能
       落成"从源码 build"（`cargo build --release --manifest-path rust/Cargo.toml`；**二进制叫
-      `agentx-cli`**，`agentx` 是同一个 crate 的 lib 名，别混），
+      `anpio-cli`**，`anpio_cli` 是同一个 crate 的 lib 名，别混），
       除非先决定改名或先决定发布。这两件都是独立决定，不在本条里顺带做。
       —— **2026-10-03 裁定：甲**（用户："一三按建议"）。就是现在整体换。
       —— **2026-10-03 完成（`385fa8d`）**：站上 7 个指南页（quickstart / introduction /
       messages / realtime / groups / e2ee / deploy）+ 首页 + 订阅页，**各 ×2 语言**的正文
-      全换成 `agentx-cli`；quickstart 的安装段落成"从源码 build"，参考页与快速开始各有一句
-      "crates.io 上那个 `agentx-cli` 是别的项目、别 `cargo install`"。`npx vitepress build`
+      全换成 `anpio-cli`；quickstart 的安装段落成"从源码 build"，参考页与快速开始各有一句
+      "crates.io 上那个 `anpio-cli` 是别的项目、别 `cargo install`"。`npx vitepress build`
       全页渲染、无死链（vitepress 本就查死链）。顺带改掉两处**因为这次换才变成假话**的地方：
       参考页顶部"其余指南仍是 connectx 写法、正在迁移"那半句，以及 `msg listen` 的长帮助里
       那句 "Nothing is stored locally"（`3ff2084`）——后者是 messages.db 落地后留下的，
@@ -112,18 +112,18 @@
       `~/.connectx/`"那句对照。
 - [x] **`skill/connectx/SKILL.md`：按 2.1 改名/重写，并**把 `help.test.ts` 的门禁跟着改**
       （它拿 skill 里逐字给出的调用去和命令面对账，命令面变了它就该红）。
-      —— 2026-10-02 完成（`6063fd0`）：`skill/connectx/SKILL.md` → **`skill/agentx-cli/SKILL.md`**，
+      —— 2026-10-02 完成（`6063fd0`）：`skill/connectx/SKILL.md` → **`skill/anpio-cli/SKILL.md`**，
       按 Rust 客户端重写（装法、store 根、`did create` 一步注册、`contacts`、扩展面的
       `unsupported_extension` 负结果、`Error: <码>: <人话>`），判断那部分照旧。
       门禁**从 `packages/cli` 搬到 Rust**：它原本拿 skill 的调用对 TS 的 `commands.ts` 账，
-      skill 改讲 `agentx-cli` 之后就对错了账本；现在在
-      `rust/crates/agentx-cli/tests/cli_surface.rs` 里**跑真二进制**校验每条逐字调用与旗标。
+      skill 改讲 `anpio-cli` 之后就对错了账本；现在在
+      `rust/crates/anpio-cli/tests/cli_surface.rs` 里**跑真二进制**校验每条逐字调用与旗标。
       `help.test.ts` 只留三条门禁；`docs/design/cli.md` 记了这次搬运。
 - [x] **`docs/design/cli.md` §8 的存储布局**：现在是 `~/.connectx/` + `key.json`（keystore V3），
-      与 Rust 的 `~/.agentx-cli/<agent>/<profile>/{identity.json,session.json}` **不同**。
+      与 Rust 的 `~/.anpio-cli/<agent>/<profile>/{identity.json,session.json}` **不同**。
       要么写两段，要么写一段并把差异点名。
       —— 2026-10-02 完成（`d565369`）：**一段名字、差异点名**。冻结的 `connectx` 那棵树保留，
-      旁边摆上 `agentx-cli` 的（`identity.json` / `session.json` / `successor.json` / `mls/` +
+      旁边摆上 `anpio-cli` 的（`identity.json` / `session.json` / `successor.json` / `mls/` +
       `current-agent`），并点出两处**实质**差异：私钥在 `identity.json` 里（PEM、0600）而不是
       单独的加密 V3 keystore（口令那套旗标在 Rust 侧不存在）；暂存后继钥叫 `successor.json`。
       `mls/` 只有 Rust 侧有（P6）。
@@ -137,7 +137,7 @@
       —— 进度：**§3 的 `contacts` 一族已随 `cf4b7dd` 落地**，文档同批写完
       （`rust/README.md` 的 `contacts` 条 + `msg send --to` 那一条，
       `docs/design/message-service.md` §9.4 的接口定义、§9.1 与 §13 的 Profile 清单）。
-      **§4 的"群里成员的名字"也已落地**（`rust/crates/agentx-cli/src/contacts.rs` 的
+      **§4 的"群里成员的名字"也已落地**（`rust/crates/anpio-cli/src/contacts.rs` 的
       `RosterNames` + `main.rs` 的 `group members --names`），文档同批在 `rust/README.md`
       的 `group` 条里。**§4 的"群的本地备注"也已落地**（service 侧 `cf4b7dd`… 之后的
       `5f979c0`，CLI 侧 `c2059f6`），文档同批：`docs/design/message-service.md` §9.1/§9.5/§13
@@ -147,7 +147,7 @@
       —— 2026-10-02 完成：参考层（`rust/README.md` 的 `### 约定` 往下 + 文档站两页）**不引任何
       TODO**，逐条表与"失败时说什么"引的都是真跑出来的输出，能独立读；上面那层"为什么"散文仍
       指 TODO5 §6，那是**刻意的**——它讲的是来历与取舍，不是使用说明。顺带把开头那句
-      `CONNECTX_HOME` 改成实际的环境变量名 `AGENTXCLI_HOME`。
+      `CONNECTX_HOME` 改成实际的环境变量名 `ANPIOCLI_HOME`。
 
 ---
 
@@ -185,8 +185,8 @@ ANP 的定址单位是 **DID**，`msg send --to` 只吃 DID。
       所以一个身份的备注对另一个身份天然不可见，粒度落在**身份**上而不是整机。
       这正是用户要的"别人是看不见的"，且不需要文件权限来保证。
 - [x] ~~**命令面 `contacts` 一族**~~ —— `list` / `add <did> [--remark <s>]` /
-      `set-remark <name> <s>` / `remove <name>` / `resolve <name>` 均已在 `agentx-cli` 落地
-      （`rust/crates/agentx-cli/src/main.rs` 的 `ContactsCommand`）。
+      `set-remark <name> <s>` / `remove <name>` / `resolve <name>` 均已在 `anpio-cli` 落地
+      （`rust/crates/anpio-cli/src/main.rs` 的 `ContactsCommand`）。
       `resolve` 名字进 DID 出、`--json` 给机读；`--own` 走本身份的库。
 - [x] ~~**`msg send --to` 接受名字**~~ —— **形状定为：DID 形状的参数直接进发现，其余当名字查通讯录**。
       不另开 `--to-name`：`--to` 的取值本身就能分辨（`looks_like_a_did` 是语法测试，不是方法白名单）。
@@ -396,7 +396,7 @@ msg * / group * / group e2ee *  ──►  packages/service（本仓，:8787 之
       这一遍会在那台 awiki 上**留下一条身份**（`register` 没有删除、handle 唯一），
       所以 handle 带时间戳、默认不开——前置条件（含起动命令）写在脚本头部，不假装自足。
       **两半都实跑过**：玩具那半全绿；awiki 那半（本机 8765 在跑）全绿，版本 1→2 是真的。
-- [x] ~~**把配方升成 `rust/crates/agentx-cli/tests/` 里的集成测试**~~，读 `AGENTXCLI_HOME`
+- [x] ~~**把配方升成 `rust/crates/anpio-cli/tests/` 里的集成测试**~~，读 `ANPIOCLI_HOME`
       指向的临时目录，自己起服务、自己收尾。这一步之后第三档才成立。
       —— **2026-10-02：这条的理由已经兑现，但走的是另一条路，所以留着等裁定。** 它给的
       结果是"第三档才成立"，而第三档今天成立的方式是**脚本进 CI**（§5.1 已改）——
@@ -413,7 +413,7 @@ msg * / group * / group e2ee *  ──►  packages/service（本仓，:8787 之
       （身份存储、JCS 哈希、会话缓存、策略、信封），**命令面一层几乎没有测试**。
       `did publish` 的三个分支（未变 / 变了 / 没有 token）今天只在手工验证里出现过。
       §3、§4 落地后同样要补进这一层。
-      —— 进度：**第一块已落**（`rust/crates/agentx-cli/tests/cli_surface.rs`，`d5bbd89`）。
+      —— 进度：**第一块已落**（`rust/crates/anpio-cli/tests/cli_surface.rs`，`d5bbd89`）。
       它跑**真二进制**（解析器推出来的清单与被测对象同源，什么都钉不住），覆盖九族的
       `--help`、`contacts resolve <did>` 的不读库短路、以及两条必须在联网前发生的拒绝。
       全是**不需要 DID host** 的那一半——`did publish` 三个分支仍要等 §5.2 的裁定。
@@ -474,7 +474,7 @@ PYTHONPATH=src AWIKI_DATA_DIR=/tmp/awiki-data \
 
 ```bash
 # 2. 客户端（本仓）
-export AGENTXCLI_HOME=/tmp/agentx-e2e
+export ANPIOCLI_HOME=/tmp/agentx-e2e
 
 cargo run --manifest-path rust/Cargo.toml -- \
   did create --host http://127.0.0.1:8765 --handle e2ealice --agent e2ealice
@@ -500,8 +500,8 @@ cargo run --manifest-path rust/Cargo.toml -- me show --agent e2ealice
 ```bash
 rm …/session.json
 cargo run --manifest-path rust/Cargo.toml -- did publish --agent e2ealice
-#   → Error: no usable access token for 127.0.0.1:8765 — run `agentx-cli did register …`
-#     或 `agentx-cli anp login --target …`
+#   → Error: no usable access token for 127.0.0.1:8765 — run `anpio-cli did register …`
+#     或 `anpio-cli anp login --target …`
 
 cargo run --manifest-path rust/Cargo.toml -- me set --agent e2ealice
 #   → Error: nothing to set — pass at least one of --name, --bio, --avatar, --profile-url
@@ -554,7 +554,7 @@ cargo run --manifest-path rust/Cargo.toml -- me set --agent e2ealice
       顺带修掉 realtime.md 里第三、第四份已经过期的"本地不存游标 / 尚未落地"。
 - [x] ~~**命令面定稿**：六族 24 条 + `did publish` / `me` + §3、§4 新增的，一起冻结形状。~~
       —— **2026-10-02 完成（`053c73e`）：定稿落成一份 50 个页面的清单**（九族 + 各子命令，
-      `group e2ee` 六条在内），在 `rust/crates/agentx-cli/tests/cli_surface.rs` 的
+      `group e2ee` 六条在内），在 `rust/crates/anpio-cli/tests/cli_surface.rs` 的
       `FROZEN_SURFACE` 里**逐字写着**，每条都要能在真二进制上答出 `--help`：
       改名或删命令会让你**故意**去改那份清单，而这是**唯一**会红的东西（解析器与 help
       渲染器同源，别处都发现不了）。**清单是手写的，不是从解析器推的**——推出来的与解析器

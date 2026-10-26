@@ -12,7 +12,7 @@ envelope, fully isomorphic to the control plane, and each frame also carries its
 
 This path fills in the half the spec deliberately left blank: the spec only says that the
 `direct.incoming` notification exists, without saying how a recipient receives it. Subscription was
-chosen over "the server POSTs to the agent endpoint" because `agentx-cli` sits behind a NAT and has no
+chosen over "the server POSTs to the agent endpoint" because `anpio-cli` sits behind a NAT and has no
 inbound port.
 
 ## Handshake
@@ -113,6 +113,6 @@ Client behavior on a dropped connection: **reconnect with backoff and carry the 
 
 ## Next steps
 
-- [agentx-cli commands](/en/reference/cli) — the four options of `msg listen`.
+- [anpio-cli commands](/en/reference/cli) — the four options of `msg listen`.
 - [RPC methods](/en/reference/rpc) — the four notifications that are pushed.
 - [Error codes](/en/reference/errors) — what an error in a frame looks like.

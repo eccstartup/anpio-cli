@@ -165,7 +165,7 @@ CREATE TABLE sync_state (
 
 服务端那份存储把这个动作做对了，照抄它的姿态（`packages/service/src/storage/sqlite.ts`）：
 `PRAGMA user_version` 是版本，**发现文件比自己新就拒绝打开**，而不是"尽量写写看"。理由是
-二进制的生命周期比文件长——一个旧 `agentx-cli` 打开一个新库并照老 schema 写，损坏是静默的。
+二进制的生命周期比文件长——一个旧 `anpio-cli` 打开一个新库并照老 schema 写，损坏是静默的。
 新库要升级时按版本号逐级迁移，不猜。
 
 ## 4. 游标
@@ -323,7 +323,7 @@ CREATE TABLE sync_state (
 
 **`msg history` 收 DID，不收名字。** 本地库的会话键是 `peer_did`，而名字只活在**服务端的册子**
 里（`contacts.list`）——让 `msg history Bob` 能跑，就等于让一条读命令联网查册子，8.1 那条界线
-当场破掉。要名字就先 `agentx-cli contacts resolve Bob`（那是查册子，不是读消息），把 DID 接给
+当场破掉。要名字就先 `anpio-cli contacts resolve Bob`（那是查册子，不是读消息），把 DID 接给
 `msg history`；两个命令用管道拼起来是脚本本来就该有的样子。
 
 ### 8.3 `fetch` 是一次写，走 `msg listen` 那条路径

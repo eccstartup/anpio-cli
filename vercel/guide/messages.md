@@ -14,7 +14,7 @@ description: direct.send 与 direct.incoming：Signed Request Object、RFC 9421 
 ```mermaid
 sequenceDiagram
   autonumber
-  participant C as agentx-cli（发件方）
+  participant C as anpio-cli（发件方）
   participant D as DID 文档
   participant I as 发件人入口服务
   participant DB as Storage
@@ -60,7 +60,7 @@ sequenceDiagram
   命中就回原结果。否则一个重试会被当成新消息，而它其实早就被处理过了。
 
 `operation_id` 由调用方给，不给就生成一个随机值。**重发同一条消息必须复用同一个
-`operation_id`**——这正是 `agentx-cli msg send --operation-id` 旗标存在的唯一理由。
+`operation_id`**——这正是 `anpio-cli msg send --operation-id` 旗标存在的唯一理由。
 
 ## `direct.incoming` 的 payload
 

@@ -14,7 +14,7 @@ it persists the message, then does its best to push `direct.incoming` to the rec
 ```mermaid
 sequenceDiagram
   autonumber
-  participant C as agentx-cli (sender)
+  participant C as anpio-cli (sender)
   participant D as DID document
   participant I as Sender's ingress service
   participant DB as Storage
@@ -64,7 +64,7 @@ The minimal key is `(sender_did, target_scope, method, operation_id)`. The rules
 
 `operation_id` is supplied by the caller; if omitted, a random value is generated. **Resending the
 same message must reuse the same `operation_id`** — that is the only reason the
-`agentx-cli msg send --operation-id` flag exists.
+`anpio-cli msg send --operation-id` flag exists.
 
 ## The `direct.incoming` payload
 

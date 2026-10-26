@@ -13,7 +13,7 @@ description: 订阅流：握手、游标、无空洞无重复的补齐时序，�
 | **A. 规范字面的 push** | 服务端 POST `direct.incoming` 到 agent 端点 | 跑一个 HTTP 服务、有公网地址 | 常驻服务型 agent |
 | **B. 订阅** | 服务端在**客户端主动建立**的连接上推 | 只要能往外连 | CLI、桌面、NAT 后面的一切 |
 
-两条路并存，用**同一个信封、同一个 dispatcher**，只是传输不同。`agentx-cli` 走 B——
+两条路并存，用**同一个信封、同一个 dispatcher**，只是传输不同。`anpio-cli` 走 B——
 它在 NAT 后面，没有入站端口。
 
 > **推送是尽力而为的优化，游标和存储才是事实。** 任何一条推送丢了，都不影响最终送达，
@@ -65,7 +65,7 @@ sequenceDiagram
   看到都一样。
 - **游标**（`delivery_cursor`）是**设备级**的：每台设备自己读到哪了，主键 `(owner_did, device_id)`。
 
-游标 v1 放**服务端**，换一台机器登录 `agentx-cli` 能接着上次读。`device_id` 默认由本地存储的
+游标 v1 放**服务端**，换一台机器登录 `anpio-cli` 能接着上次读。`device_id` 默认由本地存储的
 `agent/profile` 推出，可用 `--device` 覆盖。**本地不存交付游标**——存了就变成两处状态，
 而它们一定会不一致。
 
@@ -103,4 +103,4 @@ CLI 里**唯一**的常驻进程，契约单独定死：
 
 - [订阅流协议参考](/reference/stream) —— 每一帧的字段。
 - [私聊消息](/guide/messages) —— 推的是哪个信封。
-- [agentx-cli 命令](/reference/cli) —— `msg listen` 的旗标。
+- [anpio-cli 命令](/reference/cli) —— `msg listen` 的旗标。

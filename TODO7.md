@@ -20,8 +20,8 @@ TODO6 写完了一整轮**写**侧：本机消息库 `messages.db` 的写入侧�
 | 事实 | 量法 |
 | --- | --- |
 | `messages.db` **写入**侧已落地，**读**侧一行没动 | `MessageStore` 的公开面只有 `open` / `record` / `applied_seq` / `message_count` |
-| 后两个**谁也没在用** | `grep -rn 'message_count\|applied_seq' rust/crates/agentx-cli/src` → 除 `messages.rs` 自己与单测外 **0 行** |
-| 全仓只有两处打开本地库，**都是写** | `MessageStore::open` → `cmd_msg_listen`（[main.rs:3247](rust/crates/agentx-cli/src/main.rs#L3247)）与 `record_outgoing`（[main.rs:2727](rust/crates/agentx-cli/src/main.rs#L2727)） |
+| 后两个**谁也没在用** | `grep -rn 'message_count\|applied_seq' rust/crates/anpio-cli/src` → 除 `messages.rs` 自己与单测外 **0 行** |
+| 全仓只有两处打开本地库，**都是写** | `MessageStore::open` → `cmd_msg_listen`（[main.rs:3247](rust/crates/anpio-cli/src/main.rs#L3247)）与 `record_outgoing`（[main.rs:2727](rust/crates/anpio-cli/src/main.rs#L2727)） |
 | `msg inbox` / `msg show` / `msg read` 仍然**只问服务端** | 读这一族的语义写在 [client-messages.md](docs/design/client-messages.md) §8；当时是"读侧还没动——`msg inbox` 仍然只问服务端" |
 | 服务端**从不裁剪** `deliveries` | `grep -rn -i 'delete.*from deliveries' packages/service/src` → **0 行** |
 | `delivery_cursor` 的**唯一**写入者是 `stream.ack` | [sqlite.ts:653](packages/service/src/storage/sqlite.ts#L653) `advanceCursor` |
@@ -73,7 +73,7 @@ TODO6 写完了一整轮**写**侧：本机消息库 `messages.db` 的写入侧�
 
       **2026-10-03 三条都有答案，而且是同一句话的三个面**（设计见
       [client-messages.md](docs/design/client-messages.md) §8.3，代码在
-      [main.rs](rust/crates/agentx-cli/src/main.rs) `cmd_msg_fetch`）：
+      [main.rs](rust/crates/anpio-cli/src/main.rs) `cmd_msg_fetch`）：
       - **同一条写入路径**，不是另开一条。`sync.delta` 的每一项本来就是订阅路会推的那一帧
         `{seq, method, params}`，所以 `decode_message(&frame, seq)` → `records_from` →
         `MessageStore::record` 三行就是 `msg listen` 的那三行。为此 `records_from` 从
@@ -175,7 +175,7 @@ TODO6 写完了一整轮**写**侧：本机消息库 `messages.db` 的写入侧�
       且过同一张 `deviceFilter`），`readDelta` 把 `readWindowStart` 算出的下界喂给它
       （[inbox.ts](packages/service/src/rpc/inbox.ts)）。客户端 `msg fetch` 把它取成
       `aged_out`（页间取 max：只有第一页可能非零），`--json` 出 `aged_out` 字段，
-      非 `--json` 多打印一行"另有 N 条在窗口外"（[main.rs](rust/crates/agentx-cli/src/main.rs)
+      非 `--json` 多打印一行"另有 N 条在窗口外"（[main.rs](rust/crates/anpio-cli/src/main.rs)
       的 `cmd_msg_fetch`）。测试：`sqlite.test.ts` 两条（计数与游标的关系、与设备切片同口径），
       `dispatch.test.ts` 一条（空页 + 非零 `aged_out`，以及把 `since` 推过那段后归零）。
 - [x] **P6 设备队列的有界保留要不要为持久客户端放宽。** 今天是 8 次尝试 / 24 小时
@@ -271,7 +271,7 @@ TODO6 写完了一整轮**写**侧：本机消息库 `messages.db` 的写入侧�
       **2026-10-03 客户端这一侧已经落定，服务端那一侧卡在一个不是我的裁定上。** 事实：
       - **Rust 客户端只剩一个调用者。** `sync.delta`（`msg fetch` 与 `msg listen` 的补齐）是
         `x_agentx.inbox.v1` 里**唯一**还有客户端的成员。`INBOX_MARK_READ` 已从
-        [listen.rs](rust/crates/agentx-cli/src/message/listen.rs) 删掉（已读改由本地写），
+        [listen.rs](rust/crates/anpio-cli/src/message/listen.rs) 删掉（已读改由本地写），
         `inbox.get` / `message.get_batch` 更早就没有 Rust 侧调用者了。
       - **但 `packages/cli`（TS 那个客户端）还在调这三个**
         （[msg.ts:54-56](packages/cli/src/commands/msg.ts#L54)），服务端的
@@ -385,7 +385,7 @@ TODO6 写完了一整轮**写**侧：本机消息库 `messages.db` 的写入侧�
         `[x]`（`rust/README.md` 的 `did`/`me` 条 + 文档站的参考页）。"至今无文档"是引用它时
         没回头核。
       - **读这一族是照这条做的**：`msg inbox` / `history` / `show` / `read` / `fetch` 五条
-        的实现（[main.rs](rust/crates/agentx-cli/src/main.rs) 的 `cmd_msg_*`）与文档
+        的实现（[main.rs](rust/crates/anpio-cli/src/main.rs) 的 `cmd_msg_*`）与文档
         （[rust/README.md](rust/README.md) 那张参数表、那几条负结果、以及
         [client-messages.md](docs/design/client-messages.md) §8 的设计）在**同一批**里落的，
         没有攒。所以这条到此为止——留着的是那句规矩，不是一件待办。

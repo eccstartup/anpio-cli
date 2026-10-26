@@ -1,32 +1,32 @@
 ---
-title: agentx-cli 命令
-description: 命令行客户端 agentx-cli 的完整命令面：discover / did / agent / msg / group / anp / contacts / me / version，附退出码与输出约定。
+title: anpio-cli 命令
+description: 命令行客户端 anpio-cli 的完整命令面：discover / did / agent / msg / group / anp / contacts / me / version，附退出码与输出约定。
 ---
 
-# agentx-cli 命令
+# anpio-cli 命令
 
-`agentx-cli` 是本仓库的命令行客户端，Rust 写的，源码在 `rust/crates/agentx-cli/`。
-所有命令的形态是 `agentx-cli <命令> [子命令] [参数] [选项]`，
-`agentx-cli help [<命令> [<子命令>]]` 打印同一份说明（命令面的权威来源就是它打印的东西）。
+`anpio-cli` 是本仓库的命令行客户端，Rust 写的，源码在 `rust/crates/anpio-cli/`。
+所有命令的形态是 `anpio-cli <命令> [子命令] [参数] [选项]`，
+`anpio-cli help [<命令> [<子命令>]]` 打印同一份说明（命令面的权威来源就是它打印的东西）。
 
 > [!NOTE]
 > **`connectx` 已冻结。** `packages/cli` 的那个 TypeScript 客户端（`@agentx/cli` 包）不再加功能，
-> 也不再是文档入口——本页描述的是 `agentx-cli`，站上其余指南也都已换成它。两者的**协议语义相同**，
+> 也不再是文档入口——本页描述的是 `anpio-cli`，站上其余指南也都已换成它。两者的**协议语义相同**，
 > 命令名与旗标有出入，以本页与 `--help` 为准。
 
 ## 安装与 store
 
-`agentx-cli` 是二进制，不是 npm 包。从源码构建：
+`anpio-cli` 是二进制，不是 npm 包。从源码构建：
 
 ```bash
 cargo build --release --manifest-path rust/Cargo.toml
-# 产物：rust/target/release/agentx-cli
+# 产物：rust/target/release/anpio-cli
 ```
 
-**没有发布到任何包管理器**：crates.io 上的 `agentx-cli` 是**另一个项目**，所以不要写
-`cargo install agentx-cli`。
+**没有发布到任何包管理器**：crates.io 上的 `anpio-cli` 是**另一个项目**，所以不要写
+`cargo install anpio-cli`。
 
-它有自己的 store 根（`$AGENTXCLI_HOME`，缺省 `~/.agentx-cli`），
+它有自己的 store 根（`$ANPIOCLI_HOME`，缺省 `~/.anpio-cli`），
 **不碰 `connectx` 的 `~/.connectx/`**：两条 CLI 并存时互不干扰。
 一条身份由 `--agent` + `--profile` 命名，落在 `<store 根>/<agent>/<profile>/` 下
 （`identity.json`、`session.json`）。
@@ -45,8 +45,8 @@ cargo build --release --manifest-path rust/Cargo.toml
 
 | 选项 | 说明 |
 |---|---|
-| `--agent <id>` | 以哪个 agent 身份行动；缺省依次看 `$AGENTXCLI_AGENT`、当前 agent（`agent use` 选的）、`default` |
-| `--profile <name>` | agent 内的身份档；缺省看 `$AGENTXCLI_PROFILE`，再缺省 `default` |
+| `--agent <id>` | 以哪个 agent 身份行动；缺省依次看 `$ANPIOCLI_AGENT`、当前 agent（`agent use` 选的）、`default` |
+| `--profile <name>` | agent 内的身份档；缺省看 `$ANPIOCLI_PROFILE`，再缺省 `default` |
 | `--allow-private-host <host>` | 把一个**不以 loopback 拼法出现**的本地主机当成"本机"。放行之后同时允许私网地址与明文 `http` |
 | `--json` | 机器可读输出 |
 
@@ -54,14 +54,15 @@ cargo build --release --manifest-path rust/Cargo.toml
 `localhost` / `127.0.0.1` / `::1` 已经算本机、不需要它，它管的是"是本机但没这么拼"（LAN 地址、
 往里解析的名字）。
 
-**`did create` 是唯一不走身份选择链的**：它造的是**新的**身份，"谁当前被选中"不该决定第二份
-身份写在哪，所以缺省用 `--handle`。
+**`did create` 与 `did attach-anpio-key` 不走身份选择链**：它们建的是**新的**身份，"谁当前被选中"
+不该决定第二份身份写在哪，所以缺省都用 `--handle`。
 
 ## `did` 与 `agent` —— 身份
 
 | 子命令 | 作用 |
 |---|---|
 | `did create --host <url> --handle <name>` | 生成一份身份，并把 DID 文档发布到 DID 主机（`--agent` 缺省=handle） |
+| `did attach-anpio-key --did <did>` | 接管一把由本地 `anpio-key` 守护进程持有的钥：store 里没有私钥字节，签名走 socket |
 | `did show` | 打印本机存着的这份身份 |
 | `did list` | 这台机器持有的全部身份，以及各自绑到了什么 |
 | `did register` | 把 DID 文档（重新）发布给它自己的主机，取回 bearer token |
@@ -77,6 +78,11 @@ cargo build --release --manifest-path rust/Cargo.toml
 `did update` 会把后继钥在**任何字节出门之前**写进 `successor.json`：服务器接受之后、store 搬过去
 之前，那个文件是 DID 已经搬过去的钥的**唯一**副本。所以投递结果不确定时它**留着**暂存钥并提示
 `--resume`，而不是丢掉。
+
+**`anpio-key` 托管的那类身份只覆盖"签整条 HTTP 请求"**：`anp sign` / `anp login` /
+`did register` / `did publish` 可用；`msg` / `group` / `did update` 在动手之前就拒——它们的证明
+是对 CLI 自己拼的字节签的（origin proof、MLS 设备钥、退役文档），而守护进程的合同里没有
+"签任意字节"这条。
 
 ## `msg` —— 消息服务
 
@@ -214,7 +220,7 @@ cargo build --release --manifest-path rust/Cargo.toml
 "端点活着吗、说的是这个协议吗"检查。端点只给主机时自动补 `/anp-im/rpc`。
 
 ```bash
-agentx-cli discover http://127.0.0.1:8787
+anpio-cli discover http://127.0.0.1:8787
 ```
 
 ## 下一步

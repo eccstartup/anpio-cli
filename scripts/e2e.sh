@@ -4,7 +4,7 @@
 #
 # 这就是把 §6 那份手工配方钉成脚本——手工步骤是最先过时的那一类东西，所以它得能复跑。
 # 链路是**真进程**跑出来的：真的起一台 DID 主机、真的起本仓的 `packages/service`、
-# 真的用 `agentx-cli` 二进制发请求；替掉的只有"DID 文档谁托管"这一件事，替法见
+# 真的用 `anpio-cli` 二进制发请求；替掉的只有"DID 文档谁托管"这一件事，替法见
 # 【DID 主机】那段。
 #
 #   ./scripts/e2e.sh                  # 建好再跑
@@ -197,7 +197,7 @@ if [ "$BUILD" = 1 ]; then
   echo "    ok   rust binary + core + service dist"
 fi
 
-CLI="$ROOT/rust/target/debug/agentx-cli"
+CLI="$ROOT/rust/target/debug/anpio-cli"
 [ -x "$CLI" ] || { echo "FAIL: $CLI is missing — run without --no-build" >&2; exit 1; }
 
 # ---- 起 host 与 service -------------------------------------------------------
@@ -234,7 +234,7 @@ SERVICE_PID=$!
 wait_for_port "$HOST_PORT" "the DID host"
 wait_for_port "$SERVICE_PORT" "the service"
 
-export AGENTXCLI_HOME="$WORK/home"
+export ANPIOCLI_HOME="$WORK/home"
 # 这台主机的权威段是 `localhost`，而服务在 `127.0.0.1` 上——两个都放行。
 export AGENTX_DID_DEV_HOSTS="127.0.0.1,localhost"
 
@@ -518,7 +518,7 @@ if [ "$WITH_AWIKI" = 1 ]; then
     printf '         start it first — the command is in this script'\''s header\n'
     FAILED=$((FAILED + 1))
   else
-    export AGENTXCLI_HOME="$WORK/awiki-home"
+    export ANPIOCLI_HOME="$WORK/awiki-home"
     # handle 是那台主机上唯一的，而且删不掉——带时间戳，脚本才跑得第二遍。
     AWIKI_AGENT="e2e-awiki-$(date +%s)"
     run "$CLI" did create --host "$AWIKI_URL" --handle "$AWIKI_AGENT" --agent "$AWIKI_AGENT"
@@ -575,7 +575,7 @@ fi
 # 断言读的是**服务端看见了什么**：客户端说自己登录成功，与主机真的收到了那个 nonce，是两件事。
 section "anp login — the 401 challenge is answered, and answered with the server's nonce"
 
-export AGENTXCLI_HOME="$WORK/home"
+export ANPIOCLI_HOME="$WORK/home"
 run "$CLI" anp login --agent alice --target "http://localhost:${HOST_PORT}"
 expect_status "a login the host challenges once succeeds" 0
 expect "  and says where it signed in" "signed in to"
@@ -614,7 +614,7 @@ expect "  and it quotes the status it got" "HTTP 401"
 # 重启服务去压 TTL。
 section "did update — a peer rotates its key, and the DID string moves with it"
 
-export AGENTXCLI_HOME="$WORK/home"
+export ANPIOCLI_HOME="$WORK/home"
 for name in dave erin; do
   run "$CLI" did create --host "http://localhost:${HOST_PORT}" --handle "$name" --agent "$name"
   expect_status "did create $name succeeds" 0
@@ -714,7 +714,7 @@ UPDATE_LOST_ANSWER_PATH="/user-service/v1/did/update-lost-answer"
 UPDATE_LOST_REQUEST_PATH="/user-service/v1/did/update-lost-request"
 UPDATE_REFUSED_PATH="/user-service/v1/did/update-refused"
 
-export AGENTXCLI_HOME="$WORK/home"
+export ANPIOCLI_HOME="$WORK/home"
 run "$CLI" did create --host "http://localhost:${HOST_PORT}" --handle frank --agent frank
 expect_status "did create frank succeeds" 0
 run_quiet "$CLI" did show --agent frank --json
@@ -793,7 +793,7 @@ section "only msg fetch goes online — the read family answers with the service
 
 # carol 的身份是在服务还活着的时候建的，但从头到尾**没连过**它——她的本地库一行都没有。
 # "读不写文件"这条只有在她身上才查得出来：bob 的库早就存在了，光看存在与否分不出读和写。
-export AGENTXCLI_HOME="$WORK/home"
+export ANPIOCLI_HOME="$WORK/home"
 run_quiet "$CLI" did create --host "http://localhost:${HOST_PORT}" --handle carol --agent carol
 expect_status "did create carol succeeds while the service is still up" 0
 CAROL_DIR="$WORK/home/carol/default"

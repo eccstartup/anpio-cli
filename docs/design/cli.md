@@ -1,7 +1,7 @@
 # CLI 设计
 
-> **本仓库的 CLI 是 `agentx-cli`** —— Rust 客户端，源码在 `rust/crates/agentx-cli/`（库
-> `agentx`、bin `agentx-cli`）。**命令面的权威是 `--help`**，现状与逐族的旗标在
+> **本仓库的 CLI 是 `anpio-cli`** —— Rust 客户端，源码在 `rust/crates/anpio-cli/`（库
+> `anpio_cli`、bin `anpio-cli`）。**命令面的权威是 `--help`**，现状与逐族的旗标在
 > [`rust/README.md`](../../rust/README.md)。本文只写**为什么**：
 > 那条薄壳判据、它与服务端的分工、以及退出码契约。
 
@@ -53,7 +53,7 @@ store、消息库）都在库里，命令面只是它们的调用者。
 
 ## 3. 两处服务，两个客户端身份
 
-ANP 里有两个可以被"自己搭一个"的服务，`agentx-cli` 对两者都是客户端，但**分工是清楚的**：
+ANP 里有两个可以被"自己搭一个"的服务，`anpio-cli` 对两者都是客户端，但**分工是清楚的**：
 
 - **DID Service** —— 托管 `did.json`、发号（handle）。`did create` / `did register` /
   `did resolve` / `did update` 打的是它。独立部署，不属于本仓库。
@@ -98,4 +98,21 @@ P1 §6.2.2 L277 说 `profile` 是"唯一解释"）。
 
 Rust 客户端这边，这条边界落成一个具体的机器：**它只调 `anp` crate 的公开面**。客户端做群
 E2EE 需要 MLS，而官方的 MLS 实现只在 Rust crate 里——这正是客户端写成 Rust 的理由
-（[client-mls.md](client-mls.md) §2）。协议与状态在库 `agentx`，`main.rs` 只是命令面。
+（[client-mls.md](client-mls.md) §2）。协议与状态在库 `anpio_cli`，`main.rs` 只是命令面。
+
+## 7. 私钥的两种归属
+
+私钥要么由 `did create` 写进 store，要么由 [`anpio-key`](https://github.com/open-agentx/anpio-key)
+守护进程持有（`did attach-anpio-key`）。第二种下，身份文件里没有私钥字节，签名通过 socket 委托。
+
+**能委托的只有"签整条 HTTP 请求"这一件事。** `anpio-key` 的合同是"给我 method / URL / body，
+我把 RFC 9421 头还给你"，私钥不出守护进程，默认构建里也没有签任意字节的命令。所以：
+
+- **能跑**：`anp sign` / `anp login`（ANP-02 请求）、`did register` / `did publish`（用守护进程
+  发布的文档走主机的控制面）、`did show` / `anp show`。
+- **当场拒**：`msg` / `group`（origin proof 与 MLS 设备钥都是 CLI 自己拼的字节）、`did update`
+  （退役文档要由 key-1 签，而后继钥还是 CLI mint 的）。拒绝发生在动手之前，并把这条身份能做
+  什么写在错误里。
+
+这不是待办清单上的一条：要么守护进程长出一条"签任意字节"的接口（那等于放弃它存在的理由），
+要么这三处继续由本地钥完成。

@@ -70,4 +70,4 @@ v1 的取舍是：`msg` / `group` 族只接受 DID，账户 id 被拒（`caip10_
 
 - [私聊消息](/guide/messages) —— 用解析出的条目构造 `direct.send`。
 - [联邦与跨域](/guide/federation) —— `serviceDid` 在跨域时怎么用。
-- [agentx-cli 命令](/reference/cli) —— `did` 族的全部命令。
+- [anpio-cli 命令](/reference/cli) —— `did` 族的全部命令。

@@ -38,31 +38,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "agentx-cli"
-version = "0.0.0"
-dependencies = [
- "anp",
- "anyhow",
- "base64 0.22.1",
- "bs58",
- "chrono",
- "clap",
- "ed25519-dalek",
- "futures-util",
- "rand 0.8.8",
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "serde_json_canonicalizer",
- "sha2",
- "thiserror 1.0.69",
- "tokio",
- "tokio-tungstenite",
- "x25519-dalek",
-]
-
-[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -132,6 +107,31 @@ dependencies = [
  "url",
  "x25519-dalek",
  "zeroize",
+]
+
+[[package]]
+name = "anpio-cli"
+version = "0.0.0"
+dependencies = [
+ "anp",
+ "anyhow",
+ "base64 0.22.1",
+ "bs58",
+ "chrono",
+ "clap",
+ "ed25519-dalek",
+ "futures-util",
+ "rand 0.8.8",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "serde_json_canonicalizer",
+ "sha2",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-tungstenite",
+ "x25519-dalek",
 ]
 
 [[package]]

@@ -4,7 +4,7 @@ layout: home
 hero:
   name: AgentX
   text: ANP 消息层
-  tagline: agentx-cli 命令行客户端 + AgentXAgent 消息服务。把 ANP 协议里的收发、群组、附件与端到端加密，做成一套能自建、能部署的实现。
+  tagline: anpio-cli 命令行客户端 + AgentXAgent 消息服务。把 ANP 协议里的收发、群组、附件与端到端加密，做成一套能自建、能部署的实现。
   actions:
     - theme: brand
       text: 快速开始
@@ -18,7 +18,7 @@ features:
     details: 收件人域的入口服务：接收、持久化、投递 agent 之间的消息。方法面、存储、取件流与联邦都在这里。
     link: /guide/architecture
     linkText: 架构与投递
-  - title: 命令行 · agentx-cli
+  - title: 命令行 · anpio-cli
     details: Rust 客户端：身份、登录、收发消息、群组与端到端加密。命令面宁少勿多；扩展面的负结果会说清"这是实现扩展，规范未定义"。
     link: /reference/cli
     linkText: 命令参考

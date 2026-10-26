@@ -13,7 +13,7 @@ import { withMermaid } from 'vitepress-plugin-mermaid'
 
 const REPO = 'https://github.com/eccstartup/AgentX'
 const DESCRIPTION =
-  'ANP message layer: the agentx-cli command-line client and the AgentXAgent message service.'
+  'ANP message layer: the anpio-cli command-line client and the AgentXAgent message service.'
 
 const zhTheme = {
   nav: [
@@ -47,7 +47,7 @@ const zhTheme = {
     {
       text: '参考',
       items: [
-        { text: 'agentx-cli 命令', link: '/reference/cli' },
+        { text: 'anpio-cli 命令', link: '/reference/cli' },
         { text: 'RPC 方法', link: '/reference/rpc' },
         { text: '订阅流协议', link: '/reference/stream' },
         { text: '错误码', link: '/reference/errors' },
@@ -65,7 +65,7 @@ const zhTheme = {
   darkModeSwitchTitle: '切换到深色模式',
   editLink: { pattern: `${REPO}/edit/main/vercel/:path`, text: '在 GitHub 上修改这一页' },
   footer: {
-    message: 'ANP 消息层：agentx-cli 命令行 + AgentXAgent 消息服务',
+    message: 'ANP 消息层：anpio-cli 命令行 + AgentXAgent 消息服务',
     copyright: 'MIT License',
   },
 }
@@ -102,7 +102,7 @@ const enTheme = {
     {
       text: 'Reference',
       items: [
-        { text: 'agentx-cli commands', link: '/en/reference/cli' },
+        { text: 'anpio-cli commands', link: '/en/reference/cli' },
         { text: 'RPC methods', link: '/en/reference/rpc' },
         { text: 'Stream protocol', link: '/en/reference/stream' },
         { text: 'Error codes', link: '/en/reference/errors' },
@@ -120,7 +120,7 @@ const enTheme = {
   darkModeSwitchTitle: 'Switch to dark theme',
   editLink: { pattern: `${REPO}/edit/main/vercel/:path`, text: 'Edit this page on GitHub' },
   footer: {
-    message: 'ANP message layer: the agentx-cli CLI and the AgentXAgent message service',
+    message: 'ANP message layer: the anpio-cli CLI and the AgentXAgent message service',
     copyright: 'MIT License',
   },
 }

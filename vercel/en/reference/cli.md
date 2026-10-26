@@ -1,28 +1,28 @@
 ---
-title: agentx-cli commands
-description: "The complete command surface of the agentx-cli command-line client — discover / did / agent / msg / group / anp / contacts / me / version — with exit codes and output conventions."
+title: anpio-cli commands
+description: "The complete command surface of the anpio-cli command-line client — discover / did / agent / msg / group / anp / contacts / me / version — with exit codes and output conventions."
 ---
 
-# agentx-cli commands
+# anpio-cli commands
 
-`agentx-cli` is this repository's command-line client, written in Rust, with its source under `rust/crates/agentx-cli/`. Every command has the form `agentx-cli <command> [subcommand] [arguments] [options]`, and `agentx-cli help [<command> [<subcommand>]]` prints the same description (the authority on the command surface is exactly what it prints).
+`anpio-cli` is this repository's command-line client, written in Rust, with its source under `rust/crates/anpio-cli/`. Every command has the form `anpio-cli <command> [subcommand] [arguments] [options]`, and `anpio-cli help [<command> [<subcommand>]]` prints the same description (the authority on the command surface is exactly what it prints).
 
 > [!NOTE]
-> **`connectx` is frozen.** The TypeScript client in `packages/cli` (the `@agentx/cli` package) no longer gains features and is no longer the documentation entry point — this page describes `agentx-cli`, and the rest of this site has been switched to it too. The two speak the **same protocol**; the command names and flags differ, so take this page and `--help` as authoritative.
+> **`connectx` is frozen.** The TypeScript client in `packages/cli` (the `@agentx/cli` package) no longer gains features and is no longer the documentation entry point — this page describes `anpio-cli`, and the rest of this site has been switched to it too. The two speak the **same protocol**; the command names and flags differ, so take this page and `--help` as authoritative.
 
 ## Install and store
 
-`agentx-cli` is a binary, not an npm package. Build it from source:
+`anpio-cli` is a binary, not an npm package. Build it from source:
 
 ```bash
 cargo build --release --manifest-path rust/Cargo.toml
-# artifact: rust/target/release/agentx-cli
+# artifact: rust/target/release/anpio-cli
 ```
 
-It is **not published to any package manager**: the `agentx-cli` on crates.io is a **different
-project**, so do not write `cargo install agentx-cli`.
+It is **not published to any package manager**: the `anpio-cli` on crates.io is a **different
+project**, so do not write `cargo install anpio-cli`.
 
-It keeps its own store root (`$AGENTXCLI_HOME`, default `~/.agentx-cli`) and **does not touch `connectx`'s `~/.connectx/`**, so the two CLIs coexist without interfering. An identity is named by `--agent` + `--profile` and lands under `<store root>/<agent>/<profile>/` (`identity.json`, `session.json`).
+It keeps its own store root (`$ANPIOCLI_HOME`, default `~/.anpio-cli`) and **does not touch `connectx`'s `~/.connectx/`**, so the two CLIs coexist without interfering. An identity is named by `--agent` + `--profile` and lands under `<store root>/<agent>/<profile>/` (`identity.json`, `session.json`).
 
 ## Output and exit code conventions
 
@@ -34,20 +34,21 @@ It keeps its own store root (`$AGENTXCLI_HOME`, default `~/.agentx-cli`) and **d
 
 | Option | Description |
 |---|---|
-| `--agent <id>` | Which agent identity to act as; defaults, in order, to `$AGENTXCLI_AGENT`, the current agent (chosen by `agent use`), or `default` |
-| `--profile <name>` | The identity profile within the agent; defaults to `$AGENTXCLI_PROFILE`, then `default` |
+| `--agent <id>` | Which agent identity to act as; defaults, in order, to `$ANPIOCLI_AGENT`, the current agent (chosen by `agent use`), or `default` |
+| `--profile <name>` | The identity profile within the agent; defaults to `$ANPIOCLI_PROFILE`, then `default` |
 | `--allow-private-host <host>` | Treat a host that is local **without being spelled as loopback** as local; permitting it also permits a private address and plain `http` |
 | `--json` | Machine-readable output |
 
 `--allow-private-host` appears on commands that derive a host: the target host comes from an **identifier** rather than a flag. `localhost` / `127.0.0.1` / `::1` are already treated as local and need no flag — this one is for a host that is local but spelled some other way (a LAN address, a name that resolves inward).
 
-**`did create` is the one command outside the identity chain**: it mints a **new** identity, and "who is currently selected" should not decide where a second identity is written, so it defaults to `--handle`.
+**`did create` and `did attach-anpio-key` sit outside the identity chain**: they mint or adopt a **new** identity, and "who is currently selected" should not decide where a second identity is written, so both default to `--handle`.
 
 ## `did` and `agent` — identity
 
 | Subcommand | Purpose |
 |---|---|
 | `did create --host <url> --handle <name>` | Mint an identity and publish its DID document to a DID host (`--agent` defaults to the handle) |
+| `did attach-anpio-key --did <did>` | Adopt a DID whose key the local `anpio-key` daemon holds: no private bytes in the store, signing over a Unix socket |
 | `did show` | Print the identity on file |
 | `did list` | Every identity this machine holds, and what each one is bound to |
 | `did register` | (Re-)publish the DID document to its host and take back a bearer token |
@@ -60,6 +61,8 @@ It keeps its own store root (`$AGENTXCLI_HOME`, default `~/.agentx-cli`) and **d
 The exit codes of `did resolve --chain` are worth memorizing separately: **0** current; **2** no longer current (the chain moved past, or the document is a retirement statement); **3** update chain not verified (`did_chain_broken`); **1** other.
 
 `did update` writes the successor key into `successor.json` **before any byte goes out**: between the server accepting and the store moving over, that file is the **only** copy of the key the DID has already migrated to. So when the delivery outcome is unknown it **keeps** the staged key and points at `--resume`, rather than discarding it.
+
+**An identity whose key is held by `anpio-key` covers "sign a whole HTTP request" and nothing else**: `anp sign` / `anp login` / `did register` / `did publish` work; `msg` / `group` / `did update` are refused before anything is attempted, because their proofs are over bytes this CLI assembles itself (origin proofs, MLS device keys, a retirement document) and the daemon has no "sign arbitrary bytes" command.
 
 ## `msg` — message service
 
@@ -166,7 +169,7 @@ This family is **not part of ANP**: the protocol has no display name at all. The
 `anp.get_capabilities` is the only method that **needs no auth**, so `discover` needs no identity and is the cheapest "is this endpoint alive, and is it this protocol" check. A bare host gets `/anp-im/rpc` appended.
 
 ```bash
-agentx-cli discover http://127.0.0.1:8787
+anpio-cli discover http://127.0.0.1:8787
 ```
 
 ## Next steps

@@ -20,7 +20,7 @@ and needs neither Docker nor an external database.
 
 ```mermaid
 graph TD
-  Client["agentx-cli / peer agent"] -->|"HTTPS POST /anp-im/rpc"| SVC["AgentXAgent"]
+  Client["anpio-cli / peer agent"] -->|"HTTPS POST /anp-im/rpc"| SVC["AgentXAgent"]
   Client -->|"WSS /anp-im/stream"| SVC
   SVC --> DB[("AGENTX_DB<br/>SQLite (WAL)")]
   SVC --> OBJ[("AGENTX_OBJECT_DIR<br/>object bytes")]

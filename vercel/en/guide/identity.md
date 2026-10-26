@@ -63,4 +63,4 @@ But **the rejection happens at the locator layer**, not at the command layer's `
 
 - [Direct messages](/en/guide/messages) — using the resolved entry to build `direct.send`.
 - [Federation and cross-domain](/en/guide/federation) — how `serviceDid` is used cross-domain.
-- [agentx-cli commands](/en/reference/cli) — all commands in the `did` family.
+- [anpio-cli commands](/en/reference/cli) — all commands in the `did` family.

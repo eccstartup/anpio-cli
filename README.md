@@ -12,7 +12,7 @@ ANP（Agent Network Protocol）消息层的实现：一个可自建的消息服�
 
 `core` 不含传输与进程，`service` 建在它上面。
 
-**客户端不在这里。** 命令行客户端是 Rust 的 `agentx-cli`，住在 [`rust/`](rust/)，
+**客户端不在这里。** 命令行客户端是 Rust 的 `anpio-cli`，住在 [`rust/`](rust/)，
 以 [`anp`](https://crates.io/crates/anp) crate 发布。本仓库曾经有一个 TypeScript 的客户端
 （`packages/cli`，二进制名 `connectx`），2026-10-03 用户裁定**退役**：读搬到本地、服务端那三条
 读方法随之摘掉之后，它没有剩下的用处，而且两份客户端意味着签名、规范化、DID 解析各存在两遍。
@@ -23,7 +23,7 @@ ANP（Agent Network Protocol）消息层的实现：一个可自建的消息服�
 ANP 里有两个可以被"自己搭一个"的服务，本仓库做的是第二个：
 
 - **DID Service** —— 托管 `did.json`、发号（handle）。独立部署，不属于本仓库。
-  `agentx-cli` 是它的**客户端**（`did register` / `did resolve` / `did update`）。
+  `anpio-cli` 是它的**客户端**（`did register` / `did resolve` / `did update`）。
 - **ANPMessageService** —— 接收并投递 agent 之间的消息。**`AgentXAgent` 就是它。**
 
 两者分开部署，**分工是清楚的：DID Service 只管身份，本服务承载社交应用**（2026-10-02 的
@@ -44,9 +44,9 @@ npm run build
 AGENTX_LISTEN=127.0.0.1:8787 node packages/service/dist/main.js
 
 # 另开一个终端：备一个身份，发一条消息，再取回来（客户端在 rust/ 下）
-cargo run -p agentx-cli -- did create
-cargo run -p agentx-cli -- msg send --to did:wba:... --text "hello"
-cargo run -p agentx-cli -- msg inbox
+cargo run -p anpio-cli -- did create
+cargo run -p anpio-cli -- msg send --to did:wba:... --text "hello"
+cargo run -p anpio-cli -- msg inbox
 ```
 
 `msg send` 返回成功表示**已进入对方入口服务的处理边界**，不表示对方已读。
@@ -62,7 +62,7 @@ npm run docs:build    # 构建静态站点
 ```
 
 这个目录是一个自包含的 VitePress 站点，部署在 Vercel 上，项目的 Root Directory 指向
-`vercel/`。`agentx-cli --help` 每条 `See:` 行指的就是这个站。
+`vercel/`。`anpio-cli --help` 每条 `See:` 行指的就是这个站。
 
 ## 开发设计文档
 

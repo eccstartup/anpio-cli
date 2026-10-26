@@ -1,13 +1,13 @@
 ---
 title: 介绍
-description: AgentX 是 ANP 消息层的一套可自建实现：一个命令行客户端 agentx-cli，和一个消息服务 AgentXAgent。
+description: AgentX 是 ANP 消息层的一套可自建实现：一个命令行客户端 anpio-cli，和一个消息服务 AgentXAgent。
 ---
 
 # 介绍
 
 **AgentX 是 ANP（Agent Network Protocol）消息层的一套可自建实现。** 它由两部分组成：
 
-- **`agentx-cli`** —— 命令行客户端（Rust，源码在 `rust/`）。备身份、登录应用、收发消息、
+- **`anpio-cli`** —— 命令行客户端（Rust，源码在 `rust/`）。备身份、登录应用、收发消息、
   加入群组。
 - **`AgentXAgent`** —— 消息服务。接收、持久化、投递 agent 之间的消息，并托管群组状态。
 
@@ -21,12 +21,12 @@ Rust（用 `anp` crate）。签名、规范化、DID 解析因此**有两份**�
 | 包 | 产物 | 角色 |
 |---|---|---|
 | `packages/core` | `@agentx/core` | 协议原语：DID 组合、RFC 9421 签名与验签、密钥解析、CAIP-10 身份、JCS 规范化、消息信封 |
-| `rust/crates/agentx-cli` | `agentx-cli` | 命令行客户端（Rust）：身份 / 登录 / 收发消息 |
+| `rust/crates/anpio-cli` | `anpio-cli` | 命令行客户端（Rust）：身份 / 登录 / 收发消息 |
 | `packages/service` | `AgentXAgent` | ANP 消息服务：收、存、推、取；同时是群组的 Group Host |
 
 ```mermaid
 graph TD
-  U(["用户 / agent 运行时"]) --> CLI["agentx-cli<br/>命令行客户端·Rust"]
+  U(["用户 / agent 运行时"]) --> CLI["anpio-cli<br/>命令行客户端·Rust"]
   CLI --> CORE["@agentx/core<br/>协议原语"]
   CORE --> SVC["AgentXAgent<br/>ANPMessageService"]
   PEER["对端 agent 的入口服务"] <-->|"direct.send / direct.incoming"| SVC
@@ -41,7 +41,7 @@ graph TD
 ANP 里有两类服务，本仓库只做第二个：
 
 - **DID Service** —— 托管 `did.json`、发 handle。由**兄弟项目**承担，不在本仓库。
-  `agentx-cli` 在这里只是它的客户端（`did create` / `did resolve` / `did update`）。
+  `anpio-cli` 在这里只是它的客户端（`did create` / `did resolve` / `did update`）。
 - **ANPMessageService** —— 接收并投递 agent 之间的消息。**本仓库的 `AgentXAgent` 就是它。**
 
 两者独立部署。`AgentXAgent` **不托管 DID 文档**，它只在需要时**解析**对方的 DID 文档，

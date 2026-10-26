@@ -90,4 +90,4 @@ flowchart TD
 
 - [附件](/guide/attachments) —— 群里发附件走同一套消息面。
 - [端到端加密](/guide/e2ee) —— P6 群组加密下 Host 只当见证者。
-- [agentx-cli 命令](/reference/cli) —— `group` 族命令。
+- [anpio-cli 命令](/reference/cli) —— `group` 族命令。

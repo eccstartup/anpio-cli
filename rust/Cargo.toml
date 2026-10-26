@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/agentx-cli"]
+members = ["crates/anpio-cli"]
 
 [workspace.package]
 version = "0.0.0"
@@ -8,7 +8,7 @@ edition = "2021"
 license = "MIT"
 rust-version = "1.88.0"
 
-# The Rust client (`agentx-cli`) is a separate thing from the TS service and the
+# The Rust client (`anpio-cli`) is a separate thing from the TS service and the
 # TS CLI (TODO5 §0). It talks to the official `anp` crate, pinned (TODO5 §0.1 #4).
 [workspace.dependencies]
 anp = "1.0.5"

@@ -24,7 +24,7 @@
 | DID Service（托管 `did.json`、发 handle） | 兄弟仓库 `awiki-open-server` |
 | 应用服务端（登录、签发站点 token） | `agent-on` 一类的站点 |
 | 中继 / 网关 | **规范里没有这种东西**（P8 §3.1 明确不新增 Relay 方法） |
-| 客户端库 | `packages/core`（协议原语）；命令行客户端是本仓库外的 Rust `agentx` crate |
+| 客户端库 | `packages/core`（协议原语）；命令行客户端是本仓库 Rust 的 `anpio-cli` crate |
 
 **`AgentXAgent` 不托管别人的 DID 文档，但需要解析它们**——发件人身份、入口服务发现、群成员
 校验都要。**一处例外**：它**自己名下**的群 DID 文档由它自己发布（§13、[groups.md](groups.md)
@@ -876,7 +876,7 @@ subjectOf(did)     // did:wba → 去掉变化的那一段（钥指纹），其�
 
 `subjectOf` 对不是 `did:wba` 的输入**原样返回**（它是全函数），所以
 `contacts.put` 收一个非 DID 的字符串会成功存下一行——**"是不是 DID"由调用方在参数处挡住**，
-服务端不替它判（服务端只保证键稳定，不保证键可达）。`agentx-cli contacts add` 因此在
+服务端不替它判（服务端只保证键稳定，不保证键可达）。`anpio-cli contacts add` 因此在
 开身份之前就先拒掉非 DID 输入。
 
 **目标建模与 §9.1 同规。** `meta.target = {kind: "agent", did: <owner_did>}`，
@@ -904,7 +904,7 @@ subjectOf(did)     // did:wba → 去掉变化的那一段（钥指纹），其�
 不是"最后一次被摸是什么时候"——后者是 `updated_at`，每次写都刷新）。
 
 `remark` **缺席即清空**——线上没有"三态"，
-所以"保留原备注"是**客户端**的语义（`agentx-cli` 用缺席＝保留、`--clear-remark`＝清空），
+所以"保留原备注"是**客户端**的语义（`anpio-cli` 用缺席＝保留、`--clear-remark`＝清空），
 服务端只认"给了就写、没给就没有"。这一处不对称是**故意的**：服务端做最简单的
 那件事，把"缺字段算不算一次修改"这个判断留给唯一知道用户意图的那一层。
 

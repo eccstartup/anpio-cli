@@ -13,8 +13,8 @@
 > `CONNECTX_HOME` 下的 store** 是当时那份计划，**已经取消**：MLS 只在 Rust crate 里，
 > 所以不做 napi 壳，**直接由 Rust 客户端调**（[TODO5.md](../../TODO5.md) §3 那句"B2 的 napi
 > 壳整条取消——不是'要写两次'，是'换一种方式拿 MLS'"）。今天的事实是：
-> store 在 `$AGENTXCLI_HOME/<agent>/<profile>/mls/`（**不是** `CONNECTX_HOME`，两个客户端
-> 的 store 根是分开的），实现是 [`rust/crates/agentx-cli/src/mls.rs`](../../rust/crates/agentx-cli/src/mls.rs)，
+> store 在 `$ANPIOCLI_HOME/<agent>/<profile>/mls/`（**不是** `CONNECTX_HOME`，两个客户端
+> 的 store 根是分开的），实现是 [`rust/crates/anpio-cli/src/mls.rs`](../../rust/crates/anpio-cli/src/mls.rs)，
 > **已经真的在跑**（`publish` / `get-key-package` / `create` / `add` / `remove` / `send` 与收包路径）。
 > 保留下来的读法是 §2 / §2.1 那张 crate 函数对照表与 §5 的四个坑——它们与实现无关，仍然成立。
 > 这个目录里的**兄弟** `messages.db` 单独一份：[client-messages.md](client-messages.md)。

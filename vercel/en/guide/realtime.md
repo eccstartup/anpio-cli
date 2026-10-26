@@ -14,7 +14,7 @@ not define what transport it uses. So there are two paths:
 | **B. Subscription** | The server pushes over a connection the **client actively establishes** | Just the ability to connect outbound | CLIs, desktops, anything behind NAT |
 
 The two paths coexist, using **the same envelope and the same dispatcher**, differing only in
-transport. `agentx-cli` uses B — it sits behind NAT and has no inbound port.
+transport. `anpio-cli` uses B — it sits behind NAT and has no inbound port.
 
 > **Push is a best-effort optimization; cursors and storage are the truth.** If any push is lost,
 > final delivery is unaffected, because the next path is pull.
@@ -71,7 +71,7 @@ fresh catch-up on reconnect. **Better to disconnect than to silently drop.**
 - The **cursor** (`delivery_cursor`) is **device-level**: each device tracks its own read position,
   with primary key `(owner_did, device_id)`.
 
-Cursor v1 lives **on the server**, so logging into `agentx-cli` on another machine resumes from
+Cursor v1 lives **on the server**, so logging into `anpio-cli` on another machine resumes from
 where you left off. `device_id` is derived by default from the locally stored `agent/profile`, and
 can be overridden with `--device`. **The delivery cursor is not stored locally** — storing it would
 create two sources of state, and they would inevitably disagree.
@@ -117,4 +117,4 @@ catch-up.
 
 - [Subscription stream protocol reference](/en/reference/stream) — the fields of every frame.
 - [Direct messages](/en/guide/messages) — which envelope is being pushed.
-- [agentx-cli commands](/en/reference/cli) — the flags of `msg listen`.
+- [anpio-cli commands](/en/reference/cli) — the flags of `msg listen`.

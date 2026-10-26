@@ -1,7 +1,7 @@
 # TODO5 —— 客户端换成 Rust（第五轮台账）
 
 接 [TODO4.md](TODO4.md)。2026-10-02 提出一个**大手术**：客户端整体用 Rust 重写，起名
-**`agentx-cli`**；**服务端保留**（继续 TS，并把它做好）；**TS 版 CLI 原地不动**，与新的 Rust
+**`anpio-cli`**；**服务端保留**（继续 TS，并把它做好）；**TS 版 CLI 原地不动**，与新的 Rust
 客户端并存。动机是让客户端**直接用 Rust 原生的 MLS**，省掉
 [client-mls.md](docs/design/client-mls.md)（TODO4 §B2）里那层 napi 绑定。
 
@@ -17,7 +17,7 @@
 
 1. **命令行与服务是两个分开的东西。** 服务端 `packages/service` 保留，继续 TS，继续做好。
 2. **客户端全量 Rust 化，不做 strangler。** 这是"真动"，一次到位。
-3. **新客户端叫 `agentx-cli`**（不叫 `connectx`）。
+3. **新客户端叫 `anpio-cli`**（不叫 `connectx`）。
 4. **TS 版 CLI 原地不动**——`packages/cli` 保留、不删、不改，与新客户端并存。
 5. **Rust 客户端按最新的官方 `anp` crate 写。** pin **1.0.5**（2026-09-24，crates.io）；
    本机检出停在 0.9.0、落后 origin/master 93 个提交，**可以更新**（§9 第 1 条）。
@@ -27,7 +27,7 @@
 
 | # | 问题 | 裁定 |
 |---|---|---|
-| 1 | `agentx-cli` 与 `CONNECTX_HOME` | **分开**。新客户端有自己的 store 根与环境变量前缀，**不共用** TS 那份身份 → 两台不同的设备，§8-A 的 listener 互抢问题**不会发生**。 |
+| 1 | `anpio-cli` 与 `CONNECTX_HOME` | **分开**。新客户端有自己的 store 根与环境变量前缀，**不共用** TS 那份身份 → 两台不同的设备，§8-A 的 listener 互抢问题**不会发生**。 |
 | 2 | 消息库明文策略 | **本地留明文**。理由见下——服务端会清理，不能当永久记录。**按对话分别存储，存储方式要设计**（§4）。 |
 | 3 | 消息库是不是记录之源 | **是。本地存储就是记录之源。** 服务端降级为传输/中转（§8-C / §8-D）。 |
 | 4 | `anp` pin | **1.0.5**；本机检出**更新**到最新后重核签名。 |
@@ -124,7 +124,7 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
    "不检查"的路。文档那一跳（`resolve.rs`）本来就在。**仍缺的一半是 DNS**：TS 还会把*主机名*
    解析成地址、拒绝私网地址（`resolveHostAddresses`），这条要一个 Rust 侧不带的解析器，
    所以只保留**字面 IP** 的判断（与 TS 在没有 `node:dns` 时的回退同形）。见
-   [`assert_allowed_host`](rust/crates/agentx-cli/src/message/resolve.rs) 的函数注释。
+   [`assert_allowed_host`](rust/crates/anpio-cli/src/message/resolve.rs) 的函数注释。
 5. **[部分]** **命令逻辑**（~1500 行）：`group` / `msg` / `listen`（含 `msg listen` 这条唯一的常驻契约，
    [realtime.md](docs/design/realtime.md)）。三族都已落；`group e2ee` 六条方法全落，只剩收包
    路径未做。
@@ -194,7 +194,7 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
    身份，所以 Rust 侧必须逐字节兼容 keystore / `identity.json` / session / `paths` 布局。
    **store 根一分开（§8-F），两个客户端就不共用盘了**，这条约束不成立——Rust 侧自定格式、
    自己拥有；只有"把旧身份搬过来"才需要一次性的导入（§8-E）。
-4. **发布面变了。** `agentx-cli` 是**按平台发的原生二进制**（交叉编译矩阵、签名、升级）；
+4. **发布面变了。** `anpio-cli` 是**按平台发的原生二进制**（交叉编译矩阵、签名、升级）；
    keystore 的 scrypt/keccak、web3 的 EIP-1193 在 Rust 里要各自找库。
 
 ---
@@ -203,7 +203,7 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 
 ### 进度总表（2026-10-02）
 
-`~~划掉~~`＝做完；`- [ ]`＝还没动。命令面的实际清单是 `agentx-cli --help`，这张表只记状态。
+`~~划掉~~`＝做完；`- [ ]`＝还没动。命令面的实际清单是 `anpio-cli --help`，这张表只记状态。
 
 | 家族 | 命令 | 状态 |
 | --- | --- | --- |
@@ -238,7 +238,7 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 对**真服务**发一条 `group.e2ee.*`，看能不能过服务端的方法表与资格门禁。不做 CLI、不做 e2e。
 只回答一个问题：**1.0.5 的客户端能力，够不够接上服务端那 571 行。**
 
-**结果（2026-10-02，spike 在 [`rust/crates/agentx-cli/src/main.rs`](rust/crates/agentx-cli/src/main.rs)）：
+**结果（2026-10-02，spike 在 [`rust/crates/anpio-cli/src/main.rs`](rust/crates/anpio-cli/src/main.rs)）：
 够，但缺口的位置和原先写的不同。**
 
 1. **crate 那一侧是通的。** spike 用 `create_did_wba_document` 造身份、写出带 `deviceManifest`
@@ -267,7 +267,7 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 5. **还没做的那半步**：真正连一台跑起来的服务打一发。它需要的正是第 4 条那个传输层，
    所以**并进 Phase 1**，不留在 spike 里——spike 已经把它该回答的回答完了。
 
-**Phase 1 —— `agentx-cli` 骨架 + 身份 + 一个族**
+**Phase 1 —— `anpio-cli` 骨架 + 身份 + 一个族**
 - [x] ~~Rust workspace 新建（顶层 `rust/` 或 cargo workspace 成员），arg 解析（clap）、帮助/渲染、
   身份读取（**自定盘上格式**，独立 store 根；**不需要**与 TS 逐字节兼容，见 §8-E）、
   core 客户端子集里 `msg` 必需的那部分。~~ **已落**（2026-10-02）。
@@ -277,12 +277,12 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 
 **Phase 1 进展（2026-10-02）**
 
-- **骨架已立**：`rust/crates/agentx-cli` 现在是 `lib`（`agentx`）+ `bin`（`agentx-cli`）。
+- **骨架已立**：`rust/crates/anpio-cli` 现在是 `lib`（`anpio_cli`）+ `bin`（`anpio-cli`）。
   spike 挪到 `examples/phase0_key_package.rs`，仍可复跑（`cargo run --example phase0_key_package`），
   但它**不是** CLI 的一部分。
 - **传输层已落，并且真的打通了**：`src/message/envelope.rs`（出站信封装配，
   `core/message/envelope.ts` 的移植）与 `src/message/rpc.rs`（那一跳 HTTP，
-  `core/message/rpc.ts` 的移植），13 个单测。**`agentx-cli discover <endpoint>` 对着真服务
+  `core/message/rpc.ts` 的移植），13 个单测。**`anpio-cli discover <endpoint>` 对着真服务
   跑通了**——`anp.get_capabilities` 是唯一不需要 auth 的方法（P1 §8.2），所以它不需要身份，
   也就成了最省的"端点活着吗、说的是这个协议吗"检查。这一步同时回答完 Phase 0 剩下的那半步。
 - **顺带核对**：服务端回的 `supported_profiles` 里有 `anp.group.base.v2`、**没有**
@@ -296,7 +296,7 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
   不需要。移之前在 `post_message` 的文档注释里标了，也在 §3 立了账。
 - **身份已发布（2026-10-02 跑通，本机 awiki host :8765）**：`identity/` 三件
   （`store.rs` 盘上格式 + 0600、`did.rs` 造文档、`host.rs` 读 host 文档并 `register`）+
-  `agentx-cli did create|show|register`。**文档形状**：根 `#key-1`（Multikey Ed25519）+
+  `anpio-cli did create|show|register`。**文档形状**：根 `#key-1`（Multikey Ed25519）+
   设备签名钥 + 设备协商钥（都是这条身份自己生成的，见 §8-J 第二个坑），关系集
   `authentication`/`assertionMethod` = {root, signing}、`keyAgreement` = {agreement}，
   manifest 宣告 P6 整条依赖闭包。**双向核过**：
@@ -517,11 +517,11 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 - 先落 **`msg`** 一族（含 `msg listen` 常驻契约），因为它是 §4 消息库的入口。
   → [x] ~~已落~~
 - **`agent` 一族已落（2026-10-02）**（`show` / `use` / `list`）。它不只是三条命令：它给
-  `--agent` / `--profile` 换了一条**解析链**——`--agent` > `$AGENTXCLI_AGENT` > 当前 agent >
+  `--agent` / `--profile` 换了一条**解析链**——`--agent` > `$ANPIOCLI_AGENT` > 当前 agent >
   `default`——所以之前**每个**旗标都钉死在字面量 `default` 的日子结束了，一份 store 里放多个
   agent 不再需要每条命令都手打 `--agent`。三处值得记：
   （a）**当前 agent 在旗标与环境变量之下**。`agent use` 写的是一台机器上的"我现在是谁"，
-  而 `--agent` / `$AGENTXCLI_AGENT` 是**一次调用**说的，脚本点名了 agent 就不该被 store 里
+  而 `--agent` / `$ANPIOCLI_AGENT` 是**一次调用**说的，脚本点名了 agent 就不该被 store 里
   躺着的一个选择改道。它在**默认值之上**——TS 那条链的最后一步是"从别的工具的环境变量里猜"
   （marker detection），本客户端没有那套 marker，而**猜**是唯一可能悄悄选错身份的一步，所以这条
   链止于 `default`。
@@ -569,7 +569,7 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
   当前 DID 是**第三个** → 别人把这个身份推走了，**什么都不动**，暂存钥留在原处（改一个字都可能
   把唯一一份钥弄丢）。链**验不过**（`did_chain_broken`）不是"哪个 DID 当前"的答案，所以同样什么都不动。
   （d）**已经暂存着继任者时，`did update` 拒绝，而不是覆盖**——这一点比 TS 客户端严。覆盖会把
-  暂存想保护的那份钥正好毁掉；所以它让你先把上一跳结清（`agentx-cli did update --resume`）。
+  暂存想保护的那份钥正好毁掉；所以它让你先把上一跳结清（`anpio-cli did update --resume`）。
   另外投递里**没有** `login` 那样的 409 重试：这个请求是用**它要退休的那个 DID** 签的，
   "该 DID 已被取代"意味着调用方的前提就是错的，先去解链，而不是让客户端去猜一个自己可能连钥
   都没有的前任。
@@ -725,13 +725,13 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 
 **Phase 4 —— 覆盖与收束**（还没动）
 - [ ] 新客户端自己的端到端（Rust 侧，或驱动二进制的 TS 侧——今天的 `packages/e2e` **不覆盖它**，
-  见 §8-H）；`agentx-cli` 的命令面定稿；TS CLI 冻结在某个版本（§8-I）。
+  见 §8-H）；`anpio-cli` 的命令面定稿；TS CLI 冻结在某个版本（§8-I）。
 
 ---
 
 ## 7. 待定项（已在 §0.1 全部裁定，此处留索引）
 
-1. **`agentx-cli` 与 `CONNECTX_HOME`** → 分开，独立 store 根（§0.1 第 1 条）。
+1. **`anpio-cli` 与 `CONNECTX_HOME`** → 分开，独立 store 根（§0.1 第 1 条）。
 2. **消息库明文策略** → 留明文，按对话存，方式待设计（§4）。
 3. **消息库是不是记录之源** → 是（§4 / §8-C）。
 4. **`anp` pin** → 1.0.5（§9）。
@@ -777,7 +777,7 @@ Phase 1 到此收口：`msg listen` 与 `group` 一族都已落地（见 §6）�
   名推出（[realtime.md](docs/design/realtime.md) §5.4）；投递游标与 read 状态都是服务端按
   **(owner, device)** 记的。若指向同一个 store 根，两个客户端就是**同一台设备**：同时跑
   `msg listen`，服务端游标只会前进一次，**消息被其中一边吃掉**。**分开就避开了**——但这也意味着
-  TS CLI 那条身份与 `agentx-cli` 那条身份是**两个独立的账号/设备**，不能互相顶替。
+  TS CLI 那条身份与 `anpio-cli` 那条身份是**两个独立的账号/设备**，不能互相顶替。
 - **B. 本地明文 = 新的密钥资产。** 见 §4 第 2 点。留明文就等于把 TODO4 §E 那条规矩的适用范围
   从 `mls/` 扩到 `messages.db`——备份、调试、分享都要重新立边界。
 - **C. 两份真相要对账。** 服务端收件箱（扩展面 `x_agentx.inbox.v1`）与本地库会分叉。
@@ -796,7 +796,7 @@ Phase 1 到此收口：`msg listen` 与 `group` 一族都已落地（见 §6）�
   一个已有身份**从 TS 迁到 Rust**，那是一次性的**导入**（读旧、写新），不是长期 ABI。
   **开工前不要按"逐字节兼容"去做 Phase 1 的身份部分**——那是作废了的约束。
 - **F. 名字不只是名字。**（**已裁定：分开，独立前缀与 store 根。** §0.1 第 1 条。）
-  `agentx-cli` 换了名，也用**自己**的 store 根与环境变量前缀，不碰 `CONNECTX_HOME` / 旧
+  `anpio-cli` 换了名，也用**自己**的 store 根与环境变量前缀，不碰 `CONNECTX_HOME` / 旧
   `AGENTX_*`。代价是两条身份各自独立（见 §8-A 末句），收益是两个客户端互不干扰。
 - **G. crate 的依赖面要接受。** `anp` 1.0.5 是 **Apache-2.0**（本机 0.9.0 检出写的是 MIT）；
   `default` features 拖 **`reqwest` + `tokio`**；`mls` 拖 **`rusqlite`(bundled) + openmls
@@ -804,10 +804,10 @@ Phase 1 到此收口：`msg listen` 与 `group` 一族都已落地（见 §6）�
   **服务器**库。这些都要在 §7 第 4 点一并接受或绕开。
 - **H. 新客户端没有任何端到端覆盖。**（**已裁定：接受，随功能落。** §0.1 第 6 条。）TS CLI
   不动，今天的 `packages/e2e`（TS 直接调 CLI 命令函数）**一行不用改，但它覆盖的是 TS 客户端**。
-  `agentx-cli` 的端到端从零起，跟功能一起写。
-- **I. 命令面会分叉。**（**已裁定：TS CLI 冻结，`agentx-cli` 是唯一前进方向。** §0.1 第 5 条。）
+  `anpio-cli` 的端到端从零起，跟功能一起写。
+- **I. 命令面会分叉。**（**已裁定：TS CLI 冻结，`anpio-cli` 是唯一前进方向。** §0.1 第 5 条。）
   24 条命令面是 [cli.md](docs/design/cli.md) 按判据裁出来的；TS 侧冻在"明文群聊跑得通"这条线，
-  新命令面只在 `agentx-cli` 里长。
+  新命令面只在 `anpio-cli` 里长。
 - **J. 客户端自己的 DID 文档**要挂在哪？**（**已裁定：挂本机已有的 `awiki-open-server`**，
   不自己写桩——§0.1 追加）**
   `did:wba:<host>:...` 里的 `host` 是 DID 的一部分，而服务端要**按那个 host 去取文档**才能

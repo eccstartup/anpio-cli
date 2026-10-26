@@ -50,7 +50,7 @@ The **Device Delivery Queue** is a push-based per-device queue, sharded by `(rec
 
 ## A direct consequence
 
-**`inbox.get` returns ciphertext in an E2EE session.** `agentx-cli msg show` on an E2EE session can only print the envelope; decryption is the client's job. Do not design the server to "just decrypt it along the way".
+**`inbox.get` returns ciphertext in an E2EE session.** `anpio-cli msg show` on an E2EE session can only print the envelope; decryption is the client's job. Do not design the server to "just decrypt it along the way".
 
 > [!NOTE]
 > P6 group encryption is still a **candidate**; its `anp.group.e2ee.v2` is stuck at the release gate of "registering a stable MLS `ExtensionType` code point". Until it clears that gate, P6's capabilities **will not** be declared as a stable Profile in `anp.get_capabilities`.

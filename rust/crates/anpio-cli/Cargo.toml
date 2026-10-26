@@ -1,0 +1,42 @@
+[package]
+name = "anpio-cli"
+description = "anpio-cli — an ANP client for identity, messaging, and group E2EE."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "anpio_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "anpio-cli"
+path = "src/main.rs"
+
+[dependencies]
+anp.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_json_canonicalizer.workspace = true
+sha2.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+reqwest.workspace = true
+bs58.workspace = true
+base64.workspace = true
+ed25519-dalek.workspace = true
+x25519-dalek.workspace = true
+rand.workspace = true
+rusqlite.workspace = true
+
+[dev-dependencies]
+# The command-surface test (`tests/cli_surface.rs`) reads `--json` output as JSON rather
+# than matching on it as a string. Already in the tree; this declares it for the test
+# target, which does not inherit the crate's regular dependencies.
+serde_json.workspace = true

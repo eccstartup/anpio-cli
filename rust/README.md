@@ -1,8 +1,8 @@
-# `agentx-cli` —— Rust 客户端
+# `anpio-cli` —— Rust 客户端
 
 [TODO5.md](../TODO5.md) 落地的那个客户端。**与服务端分开**：`packages/service` 继续是 TS 的
-ANPMessageService，这一份是它的客户端。**它有自己的 store 根**（`AGENTXCLI_HOME`，缺省
-`~/.agentx-cli`）。
+ANPMessageService，这一份是它的客户端。**它有自己的 store 根**（`ANPIOCLI_HOME`，缺省
+`~/.anpio-cli`）。
 
 > 本仓库曾经有一个 TypeScript 客户端（`packages/cli`，二进制名 `connectx`，store 根
 > `~/.connectx/`），2026-10-03 用户裁定**退役并删除**（[cli.md](../docs/design/cli.md) §1）。
@@ -20,9 +20,9 @@ ANPMessageService，这一份是它的客户端。**它有自己的 store 根**�
 ```
 rust/
   Cargo.toml                     # workspace
-  crates/agentx-cli/
-    src/lib.rs                   # 库 `agentx` —— 协议与状态都在这
-    src/main.rs                  # bin `agentx-cli` —— 命令面（薄壳）
+  crates/anpio-cli/
+    src/lib.rs                   # 库 `anpio_cli` —— 协议与状态都在这
+    src/main.rs                  # bin `anpio-cli` —— 命令面（薄壳）
     src/error.rs
     src/group.rs                 # P4 `anp.group.base.v2` 的策略与 target
     src/mls.rs                   # P6 的设备半边：MLS store 与它造出来的对象
@@ -43,9 +43,9 @@ pin 为准**，源码阅读用 `git show origin/release/0929:rust/...`。
 
 ## 现在有什么
 
-store 根是 `AGENTXCLI_HOME`（缺省 `~/.agentx-cli`），一条身份由 `--agent` / `--profile`
-命名——两个都可以不写：`--agent` > `$AGENTXCLI_AGENT` > 当前 agent（`agent use` 选的）>
-`default`，`--profile` > `$AGENTXCLI_PROFILE` > `default`。`cargo test` 全绿（147 个单测）。
+store 根是 `ANPIOCLI_HOME`（缺省 `~/.anpio-cli`），一条身份由 `--agent` / `--profile`
+命名——两个都可以不写：`--agent` > `$ANPIOCLI_AGENT` > 当前 agent（`agent use` 选的）>
+`default`，`--profile` > `$ANPIOCLI_PROFILE` > `default`。`cargo test` 全绿（147 个单测）。
 
 - **`did create | show | list | register`** —— 身份存储 + DID 文档。
   `list` 与 `agent list` 不是一回事：后者答"现在是谁"（选择），前者答"这里有哪些 DID"（身份），
@@ -227,11 +227,11 @@ cargo run --manifest-path rust/Cargo.toml --example phase0_key_package -- /tmp/a
 ### 约定（每条命令都适用）
 
 上面那些是**为什么**；从这里往下是**怎么用**：先一次说清所有命令共有的东西，再逐族列旗标
-与默认值。`agentx-cli <族> --help` / `agentx-cli <族> <子命令> --help` 打印同一份东西。
+与默认值。`anpio-cli <族> --help` / `anpio-cli <族> <子命令> --help` 打印同一份东西。
 
 **这一层是定稿的（2026-10-02，TODO6 §7）。** 下面这张表与六个族的表共同组成命令面的契约，
 **权威是 `--help`**，文档与它不一致时以 `--help` 为准（不一致本身就是 bug）。"定稿"在这里
-指一件具体的事：**加命令是加法，改名与删命令是破坏性的**——`rust/crates/agentx-cli/
+指一件具体的事：**加命令是加法，改名与删命令是破坏性的**——`rust/crates/anpio-cli/
 tests/cli_surface.rs` 里逐字列着今天每一个页面，删一个或改一个名字，那一格就红，
 必须有人**故意**去改那份清单。旗标**没有**被这样钉住，是刻意的：它们会随协议长出来，
 把每个旗标抄进测试只会让每次加法都要改测试，而它换不来"某个旗标被改名"之外的东西。
@@ -241,8 +241,8 @@ tests/cli_surface.rs` 里逐字列着今天每一个页面，删一个或改一�
 | `--allow-private-host <host>` | 把一个**不以 loopback 拼法出现**的本地主机当成"本机"。`localhost` / `127.0.0.1` / `::1` 已经算本机，不需要它；它管的是"是本机但没这么拼"（一个 LAN 地址、一个往里解析的名字）。放行之后**同时**允许私网地址与明文 `http`（ANP-02 的 TLS 要求针对真部署，本机开发服务器是它存在的理由）。 |
 | `--json` | stdout 变成机读：多数命令一个 JSON 对象，`msg listen` 是每行一个（[realtime.md](../docs/design/realtime.md)）。状态、进度与错误**始终**走 stderr，所以 `> file` 拿到的是纯结果。 |
 
-**身份怎么选。** `--agent` > `$AGENTXCLI_AGENT` > 当前 agent（`agent use` 选的）> `default`；
-`--profile` > `$AGENTXCLI_PROFILE` > `default`。**`did create` 是唯一不走这条链的**：它造的是
+**身份怎么选。** `--agent` > `$ANPIOCLI_AGENT` > 当前 agent（`agent use` 选的）> `default`；
+`--profile` > `$ANPIOCLI_PROFILE` > `default`。**`did create` 是唯一不走这条链的**：它造的是
 **新的**身份，"谁当前被选中"不该决定第二份身份写在哪，所以缺省用 `--handle`。
 
 **退出码。** 0 成功、1 失败，只有 `did resolve` 例外——它按**答案**而不是按成败给码：
@@ -259,6 +259,7 @@ tests/cli_surface.rs` 里逐字列着今天每一个页面，删一个或改一�
 | 命令 | 位置参数 | 旗标（默认值） |
 | --- | --- | --- |
 | `did create` | — | `--host <URL>`（必填）、`--handle <NAME>`（必填）、`--agent`（缺省=handle）、`--profile`（`default`） |
+| `did attach-anpio-key` | — | `--did <DID>`（必填）、`--key-root <DIR>`、`--socket <PATH>`、`--kid <FRAGMENT>`、`--host <URL>`、`--agent`（缺省=handle）、`--profile`、`--force`、`--json` |
 | `did show` | — | `--agent`、`--profile`、`--json` |
 | `did list` | — | `--json` |
 | `did register` | — | `--agent`、`--profile` |
@@ -275,13 +276,13 @@ tests/cli_surface.rs` 里逐字列着今天每一个页面，删一个或改一�
 - **`did publish` 没有可用 token**：退出 1，并把回程路写出来：
 
   ```text
-  no usable access token for <host> — run `agentx-cli did register --agent <agent>` or `agentx-cli anp login --target …`
+  no usable access token for <host> — run `anpio-cli did register --agent <agent>` or `anpio-cli anp login --target …`
   ```
 
   token 就在 `session.json` 里（`did create` / `did register` / `anp login` 都会写它）；
   删掉这个文件，等于"register 这一步从没发生过"。
 - **`did create` 注册失败**（handle 已被占、主机不通…）：退出 1，并且**明说身份已经落盘**——
-  `the identity was saved, but publishing it failed: …` 加一行 `retry with: agentx-cli did
+  `the identity was saved, but publishing it failed: …` 加一行 `retry with: anpio-cli did
   register --agent <agent>`。所以本地那半是好的：目录在、DID 不在，`did list` 如实写
   `not registered`（那个命令存在的理由就是这个状态），补一次 `did register` 即可。
 - **`did update` 的两种拒绝**：`--resume` 与 `--target` 一起给 → `--resume settles an update
@@ -292,6 +293,40 @@ tests/cli_surface.rs` 里逐字列着今天每一个页面，删一个或改一�
   更新链只往前推（ANP-03 §2.5.3）——这是"明说的拒绝"，不是缺实现。
 - **`did resolve <did>` 不带 `--chain`，而文档已被取代**：照常打印文档，然后**退出 2**，
   并提示 `--chain`。取代的文档是**证据**，不是错误。
+
+### 私钥放在 anpio-key 里：`did attach-anpio-key`
+
+`did create` 把私钥写进 `<store>/<agent>/<profile>/identity.json`。另一条路是把钥匙交给
+[`anpio-key`](https://github.com/open-agentx/anpio-key) 那台本地守护进程：**身份文件里一个私钥字节都没有**，
+每次要签名时由 CLI 通过 socket 请它签。
+
+```text
+anpio-cli did attach-anpio-key --did did:wba:example.com:user:bob:e1_…
+```
+
+前提是守护进程在跑、那把钥已 `unlock`。命令先向守护进程要文档（`anpio-key document --did`），
+文档里必须真有这把钥，然后才写身份——要么守护进程确实持有这把钥，要么 store 一点没动。
+`--kid` 收的是 fragment（`key-1`），给整条 `did:wba:…#key-1` 也认（`anpio-key list` 打出来
+的就是整条）。`--agent` 缺省是 handle，`--host` 缺省由 DID 的 authority 推出来
+（`localhost` / `127.0.0.1` 用 `http://`，其余 `https://`）——host 只服务 `register` /
+`publish` / `me` 这类控制面，签名不用它。
+
+**能的**：`anp sign` / `anp login` / `anp show`、`did show` / `did register` / `did publish`。
+签名时文档是从守护进程现取的，不是身份文件里那份快照——密钥轮换过也不会拿着旧文档去签。
+`did register` / `did publish` 同样先取当前文档。
+
+**不能的**：`msg`、`group`（含 E2EE）、`did update`。这不是没接线，是守护进程的合同里
+没有这条路：`anpio-key` 只签**整条 RFC 9421 HTTP 请求**，默认构建里没有任何"签任意字节"的
+命令。`msg` / `group` 的 origin proof 是对 CLI 自己拼的字节签的，MLS 设备钥也是 CLI 自己
+mint 的，`did update` 的退役文档还得由 key-1 签——三处都拿不到 daemon 手里的钥，所以
+命令在动手之前就拒，并列出这条身份**能**做什么。
+
+环境：`$ANPIOCLI_ANPIO_KEY` 指定二进制（缺省 `anpio-key`，走 `PATH`），`--key-root` /
+`--socket` 指定守护进程的库（缺省交给 `anpio-key` 自己的 `~/.anpio-key`）。
+
+> crates.io 上的 `anpio-cli` 是**别人的包**（`open-agentx/anpio-cli`），和这个仓不是同一份
+> 代码，所以这份文档不写 `cargo install anpio-cli`；要从源码装就 `cargo install --path
+> rust/crates/anpio-cli`。
 
 ### `msg`
 
@@ -423,7 +458,7 @@ tests/cli_surface.rs` 里逐字列着今天每一个页面，删一个或改一�
 - **`contacts add` 收到的不是 DID**：退出 1，**在开身份之前**就拒——不读 store、不连网：
 
   ```text
-  Error: message_invalid: "Alice" is not a DID: `contacts add` takes the DID, and the name goes in --remark (`agentx-cli contacts add did:wba:… --remark Alice`)
+  Error: message_invalid: "Alice" is not a DID: `contacts add` takes the DID, and the name goes in --remark (`anpio-cli contacts add did:wba:… --remark Alice`)
   ```
 
   不这么拦，`subject_of`（全函数）会把字面量 `Alice` 原样存成一个键，落一行永远发不出去、也永远
@@ -434,7 +469,7 @@ tests/cli_surface.rs` 里逐字列着今天每一个页面，删一个或改一�
   下一步**，不是一个解析成了空的字符串：
 
   ```text
-  no contact named "Alice": add one with `agentx-cli contacts add <did> --remark Alice`, or use the DID directly
+  no contact named "Alice": add one with `anpio-cli contacts add <did> --remark Alice`, or use the DID directly
   ```
 - **`contacts set-remark` / `remove` 的 `<name>` 收名字或 DID**，解名字的路子与 `msg send --to`
   同一条（所以重名在这里也拒）。`remove` 一个册上没有的 DID：
