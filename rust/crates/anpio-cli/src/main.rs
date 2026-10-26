@@ -253,6 +253,13 @@ enum DidCommand {
         /// The handle to register under on that host.
         #[arg(long)]
         handle: String,
+        /// The address the handle is registered under. awiki.ai's production
+        /// registration carries one (`anpio-extension` sends `handle`, `email`,
+        /// `did_document`), and a host that requires it refuses a registration
+        /// without it. This sends the address; it does not prove it — that is the
+        /// host's email round trip, which this client does not run.
+        #[arg(long, value_name = "EMAIL")]
+        email: Option<String>,
         /// The local agent name — the DID path segment and the store directory.
         ///
         /// Unlike the other subcommands this one does NOT consult `$ANPIOCLI_AGENT` or
@@ -333,6 +340,11 @@ enum DidCommand {
         agent: Option<String>,
         #[arg(long)]
         profile: Option<String>,
+        /// The address to register the handle under, as on `did create`. It is not
+        /// stored with the identity, so a retry of a registration that needed one
+        /// has to pass it again.
+        #[arg(long, value_name = "EMAIL")]
+        email: Option<String>,
     },
     /// Re-publish a document that changed, over the host's authenticated control plane.
     ///
@@ -1088,9 +1100,10 @@ async fn main() -> anyhow::Result<()> {
             DidCommand::Create {
                 host,
                 handle,
+                email,
                 agent,
                 profile,
-            } => cmd_did_create(&host, &handle, agent, profile.as_deref()).await,
+            } => cmd_did_create(&host, &handle, email.as_deref(), agent, profile.as_deref()).await,
             DidCommand::AttachAnpioKey {
                 did,
                 key_root,
@@ -1122,7 +1135,11 @@ async fn main() -> anyhow::Result<()> {
                 json,
             } => cmd_did_show(agent.as_deref(), profile.as_deref(), json),
             DidCommand::List { json } => cmd_did_list(json),
-            DidCommand::Register { agent, profile } => cmd_did_register(agent.as_deref(), profile.as_deref()).await,
+            DidCommand::Register {
+                agent,
+                profile,
+                email,
+            } => cmd_did_register(agent.as_deref(), profile.as_deref(), email.as_deref()).await,
             DidCommand::Publish { json, own } => cmd_did_publish(json, &own).await,
             DidCommand::Resolve { did, chain, json } => cmd_did_resolve(&did, chain, json, &allow_private).await,
             DidCommand::Update {
@@ -1555,6 +1572,7 @@ async fn cmd_discover(endpoint: &str, allow_private: &[String]) -> anyhow::Resul
 async fn cmd_did_create(
     host: &str,
     handle: &str,
+    email: Option<&str>,
     agent: Option<String>,
     profile: Option<&str>,
 ) -> anyhow::Result<()> {
@@ -1582,7 +1600,7 @@ async fn cmd_did_create(
     println!("device:  {}", identity.device_id);
     println!("stored:  {}", location.identity_path().display());
 
-    match register_identity(&client, &base, &identity).await {
+    match register_identity(&client, &base, &identity, email).await {
         Ok(issued) => {
             // The host hands back a bearer token with the acceptance, and that is the only
             // credential its own control plane (`update_document`, `me`) accepts — the ANP
@@ -1599,7 +1617,11 @@ async fn cmd_did_create(
             // The keys are already on disk; a failed publish is retryable and must not
             // look like a failed create.
             eprintln!("the identity was saved, but publishing it failed: {err:#}");
-            eprintln!("retry with: anpio-cli did register --agent {}", location.agent);
+            eprintln!(
+                "retry with: anpio-cli did register --agent {}{}",
+                location.agent,
+                email.map(|email| format!(" --email {email}")).unwrap_or_default()
+            );
             return Err(err);
         }
     }
@@ -2154,7 +2176,7 @@ fn cmd_did_list(json: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cmd_did_register(agent: Option<&str>, profile: Option<&str>) -> anyhow::Result<()> {
+async fn cmd_did_register(agent: Option<&str>, profile: Option<&str>, email: Option<&str>) -> anyhow::Result<()> {
     let location = IdentityLocation::resolve(agent, profile)?;
     let identity = Identity::load(&location)?;
     // Registration publishes the document. For an `anpio-key` identity that document lives in
@@ -2170,7 +2192,7 @@ async fn cmd_did_register(agent: Option<&str>, profile: Option<&str>) -> anyhow:
     let base = Url::parse(&identity.did_host)
         .map_err(|err| anyhow::anyhow!("the stored host is not a URL: {err}"))?;
     let client = http_client()?;
-    let issued = register_identity(&client, &base, &identity).await?;
+    let issued = register_identity(&client, &base, &identity, email).await?;
     // Same credential, same place as `did create`: a re-register is one of the two ways the
     // token ever gets into the cache in the first place.
     match cache_issued_token(&location, &identity, &issued) {
