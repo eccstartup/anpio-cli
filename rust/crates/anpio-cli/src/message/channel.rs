@@ -17,8 +17,8 @@ use reqwest::Url;
 use serde_json::{Map, Value};
 
 use crate::error::{AnpioError, Result};
-use crate::custody::Operation;
-use crate::identity::Identity;
+use crate::custody::{AnpioKey, Operation};
+use crate::identity::{Custody, Identity};
 
 use super::discovery::{discover_message_service, AnpCapabilities, MessageServiceTarget};
 use super::envelope::{
@@ -215,6 +215,18 @@ pub async fn discover(
 ///
 /// `agent` / `profile` travel with it rather than being looked up again, because they are
 /// what `msg listen` derives its default `device_id` from (realtime.md §5.4).
+/// What proves the requests this run sends.
+///
+/// The two arms are custody, not preference: a self-custody identity has the bytes in this
+/// process, an `anpio-key` identity has only a daemon that will sign for it. There is no
+/// third arm that falls back from one to the other.
+pub enum SenderKey {
+    /// The private key was read from `identity.json` (or a staged successor).
+    Local(PrivateKeyMaterial),
+    /// The daemon holds the key; each proof is one protected `SIGN_ORIGIN_PROOF` call.
+    AnpioKey(AnpioKey),
+}
+
 pub struct Sender {
     pub did: String,
     pub keyid: String,
@@ -224,7 +236,7 @@ pub struct Sender {
     /// forbids it everywhere else, so it rides along and only [`call_device`] puts it on the
     /// wire — a `Sender` is not a device until a Profile says the caller is one.
     pub device_id: String,
-    signing_key: PrivateKeyMaterial,
+    signing_key: SenderKey,
 }
 
 impl Sender {
@@ -243,24 +255,39 @@ impl Sender {
         // Every message this client sends carries an origin proof over bytes it assembles
         // itself. Whether the daemon can make one is negotiated, not assumed: the refusal
         // names the missing operation and what the daemon does announce.
-        if let Some(custody) = &identity.custody {
-            custody
-                .require(Operation::OriginProof, "msg send")
-                .map_err(|err| AnpioError::MessageInvalid(format!("{err:#}")))?;
-        }
-        let fragment = "key-1";
-        let key = identity.keys.get(fragment).ok_or_else(|| {
-            AnpioError::MessageInvalid(format!(
-                "{} has no {fragment}; re-run: anpio-cli did create",
-                identity.did
-            ))
-        })?;
-        let signing_key = PrivateKeyMaterial::from_pem(&key.private_key_pem).map_err(|err| {
-            AnpioError::MessageInvalid(format!("cannot read {fragment} from the store: {err}"))
-        })?;
+        //
+        // The key is chosen by custody before anything is read: an `anpio-key` identity has
+        // no `key-1` in its store by construction, and looking for one would report the
+        // wrong problem (a missing key) for the right one (a daemon that cannot sign).
+        let keyid = format!("{}#key-1", identity.did);
+        let signing_key = match &identity.custody {
+            Some(custody) => {
+                custody
+                    .require(Operation::OriginProof, "msg send")
+                    .map_err(|err| AnpioError::MessageInvalid(format!("{err:#}")))?;
+                let Custody::AnpioKey(key) = custody;
+                SenderKey::AnpioKey(key.clone())
+            }
+            None => {
+                let fragment = "key-1";
+                let key = identity.keys.get(fragment).ok_or_else(|| {
+                    AnpioError::MessageInvalid(format!(
+                        "{} has no {fragment}; re-run: anpio-cli did create",
+                        identity.did
+                    ))
+                })?;
+                let signing_key =
+                    PrivateKeyMaterial::from_pem(&key.private_key_pem).map_err(|err| {
+                        AnpioError::MessageInvalid(format!(
+                            "cannot read {fragment} from the store: {err}"
+                        ))
+                    })?;
+                SenderKey::Local(signing_key)
+            }
+        };
         Ok(Self {
             did: identity.did.clone(),
-            keyid: format!("{}#key-1", identity.did),
+            keyid,
             agent: identity.agent.clone(),
             profile: identity.profile.clone(),
             device_id: identity.device_id.clone(),
@@ -287,7 +314,7 @@ impl Sender {
             agent: self.agent.clone(),
             profile: self.profile.clone(),
             device_id: self.device_id.clone(),
-            signing_key,
+            signing_key: SenderKey::Local(signing_key),
         }
     }
 }
@@ -400,22 +427,46 @@ pub fn sign_request(sender: &Sender, id: &str, request: CallRequest) -> Result<A
     // another. (`request_meta_is_what_gets_signed` pins that down.)
     let meta_value = serde_json::to_value(&meta)?;
     let body_value = Value::Object(body);
-    let proof = generate_rfc9421_origin_proof(
-        &method,
-        &meta_value,
-        &body_value,
-        &sender.signing_key,
-        &sender.keyid,
-        Rfc9421OriginProofGenerationOptions::default(),
-    )
-    .map_err(|err| AnpioError::MessageInvalid(format!("signing {method}: {err}")))?;
+    //
+    // Under `anpio-key` the daemon is handed those same two values and signs them with its
+    // own clock and key; the three strings that come back go into the envelope untouched.
+    // The daemon request_id is the envelope `id`: one exchange, one UUID, so a re-sent
+    // attempt is the same reservation rather than a second use of the grant.
+    let (content_digest, signature_input, signature) = match &sender.signing_key {
+        SenderKey::Local(signing_key) => {
+            let proof = generate_rfc9421_origin_proof(
+                &method,
+                &meta_value,
+                &body_value,
+                signing_key,
+                &sender.keyid,
+                Rfc9421OriginProofGenerationOptions::default(),
+            )
+            .map_err(|err| AnpioError::MessageInvalid(format!("signing {method}: {err}")))?;
+            (proof.content_digest, proof.signature_input, proof.signature)
+        }
+        SenderKey::AnpioKey(key) => {
+            let signed = key
+                .sign_origin_proof(&sender.did, id, &method, &meta_value, &body_value)
+                .map_err(|err| {
+                    AnpioError::MessageInvalid(format!(
+                        "signing {method} with anpio-key: {err:#}"
+                    ))
+                })?;
+            (
+                signed.content_digest,
+                signed.signature_input,
+                signed.signature,
+            )
+        }
+    };
 
     let auth = AnpAuth {
         scheme: ORIGIN_PROOF_SCHEME.to_string(),
         origin_proof: AnpOriginProof {
-            content_digest: proof.content_digest,
-            signature_input: proof.signature_input,
-            signature: proof.signature,
+            content_digest,
+            signature_input,
+            signature,
         },
     };
 
@@ -966,6 +1017,77 @@ mod tests {
             "did:wba:example.com:user:test:e1_abc#test/default-sign",
             "only the verification method changes"
         );
+    }
+
+    // ---- custody: who holds the key -------------------------------------------
+
+    fn anpio_key_identity(key: AnpioKey) -> Identity {
+        Identity {
+            did: "did:wba:example.com:user:test:e1_abc".to_string(),
+            device_id: "test/default".to_string(),
+            agent: "test".to_string(),
+            profile: "default".to_string(),
+            handle: "test".to_string(),
+            did_host: "https://example.com".to_string(),
+            created_at: "2026-10-02T00:00:00Z".to_string(),
+            keys: std::collections::BTreeMap::new(),
+            did_document: serde_json::json!({}),
+            custody: Some(Custody::AnpioKey(key)),
+        }
+    }
+
+    fn a_request(method: &str) -> CallRequest {
+        CallRequest {
+            method: method.to_string(),
+            profile: "anp.direct.base.v1".to_string(),
+            target: AnpTarget {
+                kind: TargetKind::Agent,
+                did: "did:wba:example.com:user:b".to_string(),
+            },
+            body: Map::new(),
+            sender_device_id: None,
+            security_profile: None,
+            message_id: None,
+            content_type: None,
+            operation_id: None,
+        }
+    }
+
+    /// An `anpio-key` identity has no `key-1` in its store, so a custody refusal must happen
+    /// before the key lookup — otherwise a daemon that cannot sign is reported as a store
+    /// that is missing a key, and the user goes looking in the wrong place.
+    #[test]
+    fn an_anpio_key_identity_refuses_a_send_before_any_key_is_read() {
+        let err = Sender::from_identity(&anpio_key_identity(AnpioKey::default()))
+            .err()
+            .expect("an unannounced daemon cannot sign an origin proof")
+            .to_string();
+        assert!(err.contains("SIGN_ORIGIN_PROOF"), "{err}");
+        assert!(!err.contains("has no key-1"), "{err}");
+    }
+
+    /// Once custody has a grant and the daemon announces the operation, assembling the
+    /// request still stops at the development socket rather than silently signing locally:
+    /// the identity carries no private bytes to fall back to, and it must not try.
+    #[test]
+    fn a_granted_anpio_key_identity_needs_a_protected_config_to_sign() {
+        let sender = Sender::from_identity(&anpio_key_identity(AnpioKey {
+            operations: Some(vec!["SIGN_ORIGIN_PROOF".to_string()]),
+            grant: Some("grant-1".to_string()),
+            ..AnpioKey::default()
+        }))
+        .expect("a granted daemon that announces the operation is allowed to try");
+
+        let err = sign_request(
+            &sender,
+            "8b3f4f0e-7a5b-4c47-9c2f-2b6a1d9e0c11",
+            a_request("direct.send"),
+        )
+        .err()
+        .expect("the development socket cannot make an origin proof")
+        .to_string();
+        assert!(err.contains("development socket"), "{err}");
+        assert!(err.contains("--config"), "{err}");
     }
 
     // ---- the negative results (TODO6 §5.3) -----------------------------------

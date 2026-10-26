@@ -929,7 +929,7 @@ mod tests {
     }
 
     #[test]
-    fn a_refusal_says_when_the_daemon_has_it_but_this_build_does_not() {
+    fn a_refusal_names_the_missing_grant_when_the_daemon_announces_the_operation() {
         let custody = Custody::AnpioKey(crate::custody::AnpioKey {
             operations: Some(vec!["SIGN_HTTP".to_string(), "SIGN_ORIGIN_PROOF".to_string()]),
             ..crate::custody::AnpioKey::default()
@@ -938,7 +938,22 @@ mod tests {
             .require(Operation::OriginProof, "msg send")
             .unwrap_err()
             .to_string();
-        assert!(err.contains("does not yet delegate SIGN_ORIGIN_PROOF"), "{err}");
+        assert!(err.contains("records no grant"), "{err}");
+        assert!(err.contains("attach-anpio-key"), "{err}");
+    }
+
+    #[test]
+    fn a_refusal_says_when_the_daemon_has_it_but_this_build_does_not() {
+        let custody = Custody::AnpioKey(crate::custody::AnpioKey {
+            operations: Some(vec!["SIGN_HTTP".to_string(), "SIGN_PURPOSE".to_string()]),
+            grant: Some("grant-1".to_string()),
+            ..crate::custody::AnpioKey::default()
+        });
+        let err = custody
+            .require(Operation::Purpose, "group e2ee")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("does not yet delegate SIGN_PURPOSE"), "{err}");
         assert!(err.contains("missing half is on this client"), "{err}");
     }
 

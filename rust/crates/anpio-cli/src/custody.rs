@@ -66,6 +66,21 @@ pub struct AnpioKey {
     pub operations: Option<Vec<String>>,
 }
 
+/// One ANP origin proof made by the daemon.
+///
+/// `signature_input` and `signature` are passed through as the daemon produced them: the
+/// daemon canonicalises `{method, meta, body}` and builds the signature base, so anything
+/// this side rebuilt would be a second implementation of the thing the daemon exists to own.
+/// `created` comes back because it was the daemon's clock that signed it.
+#[derive(Debug, Clone)]
+pub struct OriginProofSigning {
+    pub content_digest: String,
+    pub signature_input: String,
+    pub signature: String,
+    pub created: i64,
+    pub expires: Option<i64>,
+}
+
 /// A proof this client can ask `anpio-key` to produce.
 ///
 /// The names are the daemon's (`ADAPTER.md` §11.3), because they are what `GET_CAPABILITIES`
@@ -129,7 +144,7 @@ impl Operation {
     /// gap, not a daemon gap, and the two are reported differently. Stage 1 flips this for
     /// `OriginProof`, stage 2 for `Purpose`, and so on.
     pub fn implemented(self) -> bool {
-        matches!(self, Operation::Http)
+        matches!(self, Operation::Http | Operation::OriginProof)
     }
 
     pub fn purpose(self) -> &'static str {
@@ -417,6 +432,68 @@ impl AnpioKey {
         parse_signed_headers(&result?, did)
     }
 
+    /// The request one `SIGN_ORIGIN_PROOF` sends, as the daemon reads it.
+    ///
+    /// Split out from the subprocess so the shape can be asserted without a daemon. There is
+    /// no `created` field: the daemon's clock is the one that signs, and a caller-supplied
+    /// creation time would let a proof be replayed outside its window.
+    pub fn origin_proof_request(
+        grant: &str,
+        request_id: &str,
+        method: &str,
+        meta: &Value,
+        body: &Value,
+    ) -> Value {
+        serde_json::json!({
+            "operation": "SIGN_ORIGIN_PROOF",
+            "grant_id": grant,
+            "request_id": request_id,
+            "origin": {"method": method, "meta": meta, "body": body},
+        })
+    }
+
+    /// Ask the daemon for an ANP origin proof over `{method, meta, body}`.
+    ///
+    /// This is the protected surface only. The development socket signs whole HTTP requests
+    /// and has neither grants nor audit; when the identity names no config there is nothing
+    /// here to fall back to, so the refusal says which attach flag fixes it.
+    pub fn sign_origin_proof(
+        &self,
+        did: &str,
+        request_id: &str,
+        method: &str,
+        meta: &Value,
+        body: &Value,
+    ) -> Result<OriginProofSigning> {
+        let config = self.config.as_ref().ok_or_else(|| {
+            anyhow!(
+                "{did} reaches anpio-key over its development socket, which cannot make an ANP \
+                 origin proof; re-run: anpio-cli did attach-anpio-key --config \
+                 <service.json>"
+            )
+        })?;
+        let grant = self.grant.as_ref().ok_or_else(|| {
+            anyhow!(
+                "{did} has no anpio-key grant, so the daemon has no authorization for \
+                 SIGN_ORIGIN_PROOF; ask the anpio-key administrator for a session grant, then \
+                 re-run: anpio-cli did attach-anpio-key --grant <grant-id>"
+            )
+        })?;
+
+        let request = Self::origin_proof_request(grant, request_id, method, meta, body);
+        let path = write_temp_json(&serde_json::to_vec(&request)?)?;
+        let args = vec![
+            "data".to_string(),
+            "--config".to_string(),
+            config.display().to_string(),
+            "--file".to_string(),
+            path.display().to_string(),
+        ];
+        let result = self.invoke_protected(&args);
+        let _ = fs::remove_file(&path);
+        parse_origin_proof(&result?)
+    }
+
     fn invoke(&self, args: &[String]) -> Result<Vec<u8>> {
         let binary = match std::env::var(BINARY_ENV) {
             Ok(value) if !value.trim().is_empty() => value,
@@ -566,6 +643,40 @@ fn binding_keyid(document: &Value) -> Option<String> {
         Value::Object(map) => map.get("id").and_then(Value::as_str).map(str::to_string),
         _ => None,
     }
+}
+
+/// Read a `SIGN_ORIGIN_PROOF` reply from `anpio-key data`.
+///
+/// A refusal is a code, not an empty result: the daemon answers `OK` only after it signed,
+/// so anything else means no proof exists and the caller must not send one.
+fn parse_origin_proof(bytes: &[u8]) -> Result<OriginProofSigning> {
+    let reply: Value = serde_json::from_slice(bytes)
+        .context("anpio-key returned an origin-proof reply that is not JSON")?;
+    let code = reply
+        .get("code")
+        .and_then(Value::as_str)
+        .unwrap_or("missing code");
+    if code != "OK" {
+        bail!("anpio-key refused SIGN_ORIGIN_PROOF with {code}");
+    }
+    let data = reply.get("data").cloned().unwrap_or(Value::Null);
+    let text = |name: &str| {
+        data.get(name)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| anyhow!("anpio-key returned an origin proof without {name}"))
+    };
+    let created = data
+        .get("created")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| anyhow!("anpio-key returned an origin proof without created"))?;
+    Ok(OriginProofSigning {
+        content_digest: text("content_digest")?,
+        signature_input: text("signature_input")?,
+        signature: text("signature")?,
+        created,
+        expires: data.get("expires").and_then(Value::as_i64),
+    })
 }
 
 /// Read a `GET_CAPABILITIES` reply from `anpio-key data`.
@@ -768,11 +879,94 @@ mod tests {
     }
 
     #[test]
+    fn the_origin_proof_request_carries_the_facts_and_not_the_clock() {
+        let request = AnpioKey::origin_proof_request(
+            "grant-1",
+            "8b3f4f0e-7a5b-4c47-9c2f-2b6a1d9e0c11",
+            "direct.send",
+            &json!({"target": {"kind": "agent", "did": "did:wba:x:user:bob"}}),
+            &json!({"text": "hi"}),
+        );
+        assert_eq!(request["operation"], "SIGN_ORIGIN_PROOF");
+        assert_eq!(request["grant_id"], "grant-1");
+        assert_eq!(
+            request["request_id"],
+            "8b3f4f0e-7a5b-4c47-9c2f-2b6a1d9e0c11"
+        );
+        assert_eq!(request["origin"]["method"], "direct.send");
+        assert_eq!(request["origin"]["meta"]["target"]["kind"], "agent");
+        assert_eq!(request["origin"]["body"]["text"], "hi");
+        assert!(
+            request["origin"].get("created").is_none(),
+            "the daemon's clock signs, so the caller must not name one"
+        );
+    }
+
+    #[test]
+    fn an_origin_proof_reply_is_read_only_when_the_daemon_says_ok() {
+        let ok = br#"{"version":2,"code":"OK","data":{"request_id":"r","content_digest":"sha-256=:AA==:","signature_input":"sig1=(\"@method\": \"direct.send\")","signature":"sig1=:AA==:","created":1700000000,"expires":null}}"#;
+        let signed = parse_origin_proof(ok).unwrap();
+        assert_eq!(signed.content_digest, "sha-256=:AA==:");
+        assert!(signed.signature_input.starts_with("sig1=("));
+        assert_eq!(signed.signature, "sig1=:AA==:");
+        assert_eq!(signed.created, 1_700_000_000);
+        assert_eq!(signed.expires, None);
+
+        let refused = br#"{"version":2,"code":"FEATURE_DISABLED"}"#;
+        let err = parse_origin_proof(refused).unwrap_err().to_string();
+        assert!(err.contains("refused SIGN_ORIGIN_PROOF"), "{err}");
+        assert!(err.contains("FEATURE_DISABLED"), "{err}");
+
+        let short = br#"{"version":2,"code":"OK","data":{"created":1}}"#;
+        let err = parse_origin_proof(short).unwrap_err().to_string();
+        assert!(err.contains("content_digest"), "{err}");
+    }
+
+    #[test]
+    fn an_origin_proof_needs_the_protected_surface_and_a_grant() {
+        let development = AnpioKey {
+            operations: Some(vec!["SIGN_ORIGIN_PROOF".to_string()]),
+            grant: Some("grant-1".to_string()),
+            ..AnpioKey::default()
+        };
+        let err = development
+            .sign_origin_proof(
+                "did:wba:x:user:alice:e1_x",
+                "8b3f4f0e-7a5b-4c47-9c2f-2b6a1d9e0c11",
+                "direct.send",
+                &json!({}),
+                &json!({}),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("development socket"), "{err}");
+        assert!(err.contains("--config"), "{err}");
+
+        let ungranted = AnpioKey {
+            config: Some(PathBuf::from("/etc/anpio-key/service.json")),
+            ..AnpioKey::default()
+        };
+        let err = ungranted
+            .sign_origin_proof(
+                "did:wba:x:user:alice:e1_x",
+                "8b3f4f0e-7a5b-4c47-9c2f-2b6a1d9e0c11",
+                "direct.send",
+                &json!({}),
+                &json!({}),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no anpio-key grant"), "{err}");
+        assert!(err.contains("--grant"), "{err}");
+    }
+
+    #[test]
     fn a_cached_capability_set_is_authoritative() {
         let key = AnpioKey {
             operations: Some(vec![
                 "SIGN_HTTP".to_string(),
                 "SIGN_ORIGIN_PROOF".to_string(),
+                "SIGN_PURPOSE".to_string(),
                 "SIGN_FROM_THE_FUTURE".to_string(),
             ]),
             ..AnpioKey::default()
@@ -780,15 +974,18 @@ mod tests {
         let capabilities = key.capabilities().unwrap();
         assert_eq!(capabilities.source(), CapabilitySource::Cached);
         assert!(capabilities.contains(Operation::OriginProof));
-        // Announced by the daemon, not driven by this build yet.
-        assert_eq!(capabilities.effective(), ["http"]);
-        assert_eq!(
-            capabilities.announced_not_effective(),
-            ["origin-proof"]
-        );
+        // Origin proof is driven now; purpose is still a client gap, and the unknown name is
+        // kept verbatim rather than guessed at.
+        assert_eq!(capabilities.effective(), ["http", "origin-proof"]);
+        assert_eq!(capabilities.announced_not_effective(), ["purpose"]);
         assert_eq!(
             capabilities.announced_names(),
-            ["SIGN_FROM_THE_FUTURE", "SIGN_HTTP", "SIGN_ORIGIN_PROOF"]
+            [
+                "SIGN_FROM_THE_FUTURE",
+                "SIGN_HTTP",
+                "SIGN_ORIGIN_PROOF",
+                "SIGN_PURPOSE"
+            ]
         );
     }
 
