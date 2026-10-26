@@ -74,14 +74,24 @@ anpio-cli did attach-anpio-key --did <did> --agent <your-id>
 #     names this DID and carries the key; there are no private bytes in the store
 ```
 
-What works: `anp sign`, `anp login`, `did register`, `did publish`, `did show`,
-`anp show` — all of them sign whole ANP-02 HTTP requests, which is exactly what
-the daemon offers.
+Pass `--config <service.json>` to use the daemon's protected surface instead of
+its development socket (`--grant <grant-id>` names the grant this identity signs
+under). One identity has one surface: `--config` and `--key-root`/`--socket`
+cannot be combined.
 
-What is refused outright: `msg`, `group` (including E2EE), and `did update`. Their
-proofs are over bytes this CLI assembles itself (origin proofs, MLS device keys, a
-retirement document), and `anpio-key` has no "sign arbitrary bytes" command. The
-refusal names the commands that do work; do not try to work around it.
+What works on either surface: `anp sign`, `anp login`, `did register`,
+`did publish`, `did show`, `anp show` — they sign whole ANP-02 HTTP requests,
+which is what the development socket offers.
+
+What the protected surface adds: when the daemon announces `SIGN_ORIGIN_PROOF`,
+`msg` (except the purely local reads, which never signed), `contacts`, and
+`group` (except E2EE) send their origin proofs to the daemon. `did show` prints
+`signs:` with what the identity actually got, and a refusal always says which
+half is missing — the daemon's announcement or this build.
+
+What is refused outright: `group e2ee` and `did update`. Their proofs need a
+device key or a freshly minted successor key, which `anpio-key` cannot supply
+yet. The refusal names the commands that do work; do not try to work around it.
 
 ### Messaging
 

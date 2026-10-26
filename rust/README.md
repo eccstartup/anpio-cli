@@ -259,7 +259,7 @@ tests/cli_surface.rs` 里逐字列着今天每一个页面，删一个或改一�
 | 命令 | 位置参数 | 旗标（默认值） |
 | --- | --- | --- |
 | `did create` | — | `--host <URL>`（必填）、`--handle <NAME>`（必填）、`--agent`（缺省=handle）、`--profile`（`default`） |
-| `did attach-anpio-key` | — | `--did <DID>`（必填）、`--key-root <DIR>`、`--socket <PATH>`、`--kid <FRAGMENT>`、`--host <URL>`、`--agent`（缺省=handle）、`--profile`、`--force`、`--json` |
+| `did attach-anpio-key` | — | `--did <DID>`（必填）、`--config <PATH>`、`--grant <GRANT-ID>`（要 `--config`）、`--key-root <DIR>`、`--socket <PATH>`（与 `--config` 互斥）、`--kid <FRAGMENT>`、`--host <URL>`、`--agent`（缺省=handle）、`--profile`、`--force`、`--json` |
 | `did show` | — | `--agent`、`--profile`、`--json` |
 | `did list` | — | `--json` |
 | `did register` | — | `--agent`、`--profile` |
@@ -311,18 +311,27 @@ anpio-cli did attach-anpio-key --did did:wba:example.com:user:bob:e1_…
 （`localhost` / `127.0.0.1` 用 `http://`，其余 `https://`）——host 只服务 `register` /
 `publish` / `me` 这类控制面，签名不用它。
 
-**能的**：`anp sign` / `anp login` / `anp show`、`did show` / `did register` / `did publish`。
-签名时文档是从守护进程现取的，不是身份文件里那份快照——密钥轮换过也不会拿着旧文档去签。
-`did register` / `did publish` 同样先取当前文档。
+**两个入口，一个身份只接一个。** 上面这条走的是**开发 socket**。给 `--config <service.json>`
+则走**受保护 v2 入口**（`anpio-key data --config`：grant、`request_id`、审计）；两者同时给由
+parser 拒掉，`--grant` 不带 `--config` 也拒。受保护入口下文档走
+`LIST_AUTHORIZED_KEYS` → `GET_DOCUMENT`，attach 还会检查 grant 现在可用（过期、用完的
+grant 会在 attach 时就拒，而不是等到第一次发送），并缓存协商到的操作集。
 
-**不能的**：`msg`、`group`（含 E2EE）、`did update`。这不是没接线，是守护进程的合同里
-没有这条路：`anpio-key` 只签**整条 RFC 9421 HTTP 请求**，默认构建里没有任何"签任意字节"的
-命令。`msg` / `group` 的 origin proof 是对 CLI 自己拼的字节签的，MLS 设备钥也是 CLI 自己
-mint 的，`did update` 的退役文档还得由 key-1 签——三处都拿不到 daemon 手里的钥，所以
-命令在动手之前就拒，并列出这条身份**能**做什么。
+**能的**（开发 socket）：`anp sign` / `anp login` / `anp show`、`did show` / `did register` /
+`did publish`。签名时文档是从守护进程现取的，不是身份文件里那份快照——密钥轮换过也不会
+拿着旧文档去签。`did register` / `did publish` 同样先取当前文档。
 
-环境：`$ANPIOCLI_ANPIO_KEY` 指定二进制（缺省 `anpio-key`，走 `PATH`），`--key-root` /
-`--socket` 指定守护进程的库（缺省交给 `anpio-key` 自己的 `~/.anpio-key`）。
+**受保护入口还能多做一件事**：守护进程宣告 `SIGN_ORIGIN_PROOF` 时，`msg`（`send` /
+`listen` / `fetch` / 本地读）与 `contacts`、`group`（不含 E2EE）的 origin proof 交给守护进程签。
+`msg listen` 开流前会查 `GET_GRANT_STATUS`，一小时内有到期而 grant 还能续时按
+`RENEW_GRANT` 续一次（daemon 按策略上限截断），续不到就把管理员要做的事写进错误。
+
+**不能的**：`group e2ee` 与 `did update`。前者要 `SIGN_PURPOSE` 与设备钥（阶段 2），后者要
+铸后继钥、退役文档还得由 key-1 签（管理面缺口）。拒绝发生在动手之前，并列出这条身份**能**
+做什么、缺的是 daemon 那一半还是本 build 这一半。
+
+环境：`$ANPIOCLI_ANPIO_KEY` 指定二进制（只影响开发 socket；受保护入口钉在管理员装的二进制上），
+`--key-root` / `--socket` 指定守护进程的库（缺省交给 `anpio-key` 自己的 `~/.anpio-key`）。
 
 > crates.io 上的 `anpio-cli` 是**别人的包**（`open-agentx/anpio-cli`），和这个仓不是同一份
 > 代码，所以这份文档不写 `cargo install anpio-cli`；要从源码装就 `cargo install --path

@@ -56,7 +56,9 @@ store 里只有公开文档、keyid 与授权引用；签名经本地守护进�
 
 ---
 
-## 2. 今天的边界（2026-10-26 量出来的）
+## 2. 接入前的边界（2026-10-26 量出来的）
+
+这一节是**动手前的基线**，用来对照阶段 0 / 1 改掉了什么；当前状态见本节末尾。
 
 `Custody::refuse` 只有三处调用，覆盖三族命令：
 
@@ -66,19 +68,29 @@ store 里只有公开文档、keyid 与授权引用；签名经本地守护进�
 | [mls.rs:100](../../rust/crates/anpio-cli/src/mls.rs#L100) | `group e2ee`（`device_signing_key` 拿不到设备钥） |
 | [main.rs:2509](../../rust/crates/anpio-cli/src/main.rs#L2509) | `did update`（要铸后继钥，且退役文档由 key-1 签） |
 
-能用的只有走 `Signer::AnpioKey` 的 ANP-02 路径：`anp sign` / `anp login` / `did register`，
+那时能用的只有走 `Signer::AnpioKey` 的 ANP-02 路径：`anp sign` / `anp login` / `did register`，
 以及不签名的 `did show` / `anp show` / `me`；`did publish` 直接用守护进程发布的
 已签名文档（[main.rs:2165](../../rust/crates/anpio-cli/src/main.rs#L2165)）。
 
 两件容易漏掉的事实：
 
-- **今天走的是开发 socket，不是受保护 v2。** `custody.rs` 调 `anpio-key sign --did …`
+- **那时走的是开发 socket，不是受保护 v2。** `custody.rs` 调 `anpio-key sign --did …`
   / `anpio-key document --did …`，不读 `service.json`，不带 grant、request_id，也不查审计。
   ADAPTER §3.1 的受保护入口是 `data --config`。强对接必须换入口，否则「托管」只兑现了
   「私钥不落盘」这一半。
-- **身份记录里只有 `root` / `socket` / `kid`。** 没有 config、grant、设备绑定、操作集
+- **那时身份记录里只有 `root` / `socket` / `kid`。** 没有 config、grant、设备绑定、操作集
   （[custody.rs:36](../../rust/crates/anpio-cli/src/custody.rs#L36)）。这些都得在阶段 0 补进
   `Custody::AnpioKey`，并保证老 `identity.json` 还能读（serde default）。
+
+**现在（2026-10-26，阶段 1 客户端侧落地后）：**
+
+- 身份记录多了 `config` / `grant` / `device` / `operations`，老文件照读；
+  `did attach-anpio-key --config --grant` 走 `data --config`（LIST_AUTHORIZED_KEYS → GET_DOCUMENT），
+  `--config` 与 `--key-root` / `--socket` 互斥，attach 时缓存协商到的操作集。
+- `msg` / `contacts` / `group` 的 origin proof 在 `SenderKey::AnpioKey` 这一支交给守护进程；
+  能力集里没有 `SIGN_ORIGIN_PROOF` 时拒绝仍发生在联网之前。
+- 仍然拒的只剩两族：`group e2ee`（设备钥，P2）与 `did update`（铸后继钥，P5）。
+- 端到端（真守护进程 + 真服务）还没在本仓库验收，见 §10 最后一行。
 
 ---
 
@@ -226,6 +238,23 @@ session grant、策略 `schema_version: 2`、每条新签名路的独立开关�
 - daemon 停掉 / 锁定 / grant 耗尽：失败且不降级，错误可分流；
 - store 里没有任何私钥字节（沿用 `no_key_material_on_disk` 的思路）。
 
+> **状态（2026-10-26）：客户端侧已落地，端到端待验收。**
+>
+> - `SenderKey::{Local, AnpioKey}` 已接；`sign_request` 的 daemon 支路把信封的 `id` 当
+>   `request_id`，一次请求一个 UUID。
+> - attach 的 `--config` / `--grant` 与受保护入口已落地（见 §2 末尾）。
+> - grant 生命周期：`msg listen` 开始前查 `GET_GRANT_STATUS`，剩不到
+>   [`GRANT_RENEW_WINDOW_SECS`](../../rust/crates/anpio-cli/src/custody.rs#L125)（1 小时）时按
+>   `RENEW_GRANT` 续到 `now + 1 天`（daemon 按策略上限截断），续不到就把管理员要做的事写进
+>   错误。续期发生在连流之前，所以失败是普通的退出 1，不是一条起不来的流。
+> - **请求日志没做，是个决定而不是遗漏。** 日志要解决的是「自动重试时换不换 request_id」，
+>   而这条 CLI 没有任何自动重试：网络失败就是失败，重试是人再跑一次。人重跑时
+>   `--operation-id` 复用业务幂等键（operation_id / message_id），信封 `id` 仍是新的——
+>   对守护进程而言那就是第二次签名，占第二次配额，这是诚实的记账。等哪天出现自动重试，
+>   日志才该出现；那时的触发点是 `REQUEST_ID_CONFLICT`（ADAPTER §8），不是超时。
+> - 端到端（真服务、两个托管身份、私聊 + 群聊 + contacts）与 golden 对照尚未跑；
+>   anpio-key 侧 `SIGN_ORIGIN_PROOF` 的线（commit `b067353`）已落地，但还没有发布版。
+
 ### 阶段 2 —— 群端到端加密（anpio-key P2）
 
 **守护进程**：`device_signing` 角色与专用键、`SIGN_PURPOSE`（每 purpose 一把键、一个开关）、
@@ -238,7 +267,9 @@ session grant、策略 `schema_version: 2`、每条新签名路的独立开关�
   `complete_key_package_v2`；完成后校验返回的 `public_multibase` 等于文档里的设备签名键。
 - `group e2ee send`：设备钥签 origin proof（若 §4.2 按建议放行），否则走
   `SIGN_PURPOSE` 退路；两条路都保留「签名者 keyid == 文档 `signing_key_id`」的检查。
-- `create` / `add` / `remove` 在 P1 已可用（key-1 origin proof）；本阶段不动。
+- `create` / `add` / `remove` 都要一把设备钥（每次 join 的 KeyPackage 由本设备签），
+  所以和 `publish` 一样落在这个阶段；P1 的 `SIGN_ORIGIN_PROOF` 解锁不了它们
+  （[mls.rs:100](../../rust/crates/anpio-cli/src/mls.rs#L100) 要的是 `SIGN_PURPOSE`）。
 - **MLS ratchet 钥继续留在本地 store**。它是会话状态，不是身份钥；把它也搬进 daemon
   是另一个量级的工程，且当前 §11 没有任何 MLS 操作。这一点必须在文档里写明，
   不能让读者以为「托管身份 = 端到端加密钥也托管」。
@@ -280,17 +311,20 @@ session grant、策略 `schema_version: 2`、每条新签名路的独立开关�
 
 ## 6. 验收矩阵
 
-| 命令族 | 自托管 | 托管（今天） | 托管（目标） |
+「托管·受保护 v2」一列以**能力协商**为准：daemon 宣告了 `SIGN_ORIGIN_PROOF`、身份又带
+config + grant，才算可用；任何一个不满足，拒绝都在联网之前、并点名缺的是哪一半。
+
+| 命令族 | 自托管 | 托管·开发 socket | 托管·受保护 v2 |
 | --- | --- | --- | --- |
 | `did show` / `anp show` / `me` | 可用 | 可用 | 可用 |
-| `anp sign` / `anp login` / `did register` | 可用 | 可用（开发 socket） | 可用（v2 入口） |
+| `anp sign` / `anp login` / `did register` | 可用 | 可用（`SIGN_HTTP`） | 可用（`SIGN_HTTP`） |
 | `did publish` | 可用 | 可用 | 可用 |
-| `msg send` / `listen` / `fetch` | 可用 | 拒 | P1 |
+| `msg send` / `listen` / `fetch` | 可用 | 拒（无 `SIGN_ORIGIN_PROOF`） | 可用 |
 | `msg inbox` / `history` / `show` / `read` | 可用 | 可用（纯本地） | 可用（纯本地） |
-| `contacts` 全族 | 可用 | 拒 | P1 |
-| `group create` / `join` / `leave` / `send` / `info` / `members` / 两个名字 | 可用 | 拒 | P1 |
+| `contacts` 全族 | 可用 | 拒 | 可用 |
+| `group create` / `join` / `leave` / `send` / `info` / `members` / 两个名字 | 可用 | 拒 | 可用 |
 | `group e2ee publish` / `send` | 可用 | 拒 | P2 |
-| `group e2ee create` / `add` / `remove` | 可用 | 拒 | P1（origin proof 由 hot 签） |
+| `group e2ee create` / `add` / `remove` | 可用 | 拒 | P2（要设备钥，见 §5） |
 | `did update` | 可用 | 拒 | P5 / 仍拒（见 §4.4） |
 
 ---
@@ -348,14 +382,15 @@ session grant、策略 `schema_version: 2`、每条新签名路的独立开关�
 | --- | --- | --- | --- |
 | 0.1 | `custody.rs` | 扩 `AnpioKey` 字段；`capabilities()`；受保护入口 | 已落地 |
 | 0.2 | `identity/store.rs` | `Custody::supports` / `denied`；`did show` / `list` 输出 | 已落地 |
-| 1.1 | `message/channel.rs` | `SenderKey` 枚举；origin proof 走 daemon；请求日志 | 待守护进程 P1 |
-| 1.2 | `main.rs` | attach 新旗标；grant 续期与错误分流；解锁命令清单 | 待 1.1 |
+| 1.1 | `message/channel.rs` | `SenderKey` 枚举；origin proof 走 daemon | 已落地（请求日志见 §5 阶段 1 的决定） |
+| 1.2 | `main.rs` | attach 新旗标；listen 的 grant 续期；解锁命令随能力协商 | 已落地 |
+| 1.3 | — | 真服务端到端：两机两托管身份、私聊 + 群聊 + contacts；本地钥 golden 对照 | 待 anpio-key 发布版 |
 | 2.1 | `mls.rs` | KeyPackage prepare/complete；设备键映射 | 待 P2 |
 | 2.2 | `main.rs` | `group e2ee send` 的设备钥路径 | 待 2.1 |
 | 3.x | — | 非目标 | — |
 | 4.1 | `main.rs` | attach 四类键的映射；文档流程 | 待 P4 |
 | 5.1 | `main.rs` | `did update` 的拒绝文案指向管理面 | 待管理面操作 |
-| 文档 | `docs/design/cli.md` §7、`rust/README.md`、`skill/`、文档站 | 行为落地后同批更新，不提前写 | 部分（§7 已链） |
+| 文档 | `docs/design/cli.md` §7、`rust/README.md`、`skill/`、文档站 | 行为落地后同批更新，不提前写 | 已同步（2026-10-26） |
 
 每一步的测试都在该步落地：拒绝在联网前、老身份可读、命令行为与本地钥逐字节一致、
 store 无私钥字节。

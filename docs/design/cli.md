@@ -105,14 +105,23 @@ E2EE 需要 MLS，而官方的 MLS 实现只在 Rust crate 里——这正是客
 私钥要么由 `did create` 写进 store，要么由 [`anpio-key`](https://github.com/open-agentx/anpio-key)
 守护进程持有（`did attach-anpio-key`）。第二种下，身份文件里没有私钥字节，签名通过 socket 委托。
 
-**能委托的只有"签整条 HTTP 请求"这一件事。** `anpio-key` 的合同是"给我 method / URL / body，
-我把 RFC 9421 头还给你"，私钥不出守护进程，默认构建里也没有签任意字节的命令。所以：
+**能委托什么，取决于这条身份接的是哪个入口，以及守护进程宣告了什么。** 一个身份只接一个
+入口，attach 时就钉死：`--config` 选受保护的 `data --config`（grant、`request_id`、审计），
+`--key-root` / `--socket` 选开发 socket。两者同时给由 parser 拒掉（退出 2），`--grant` 没有
+`--config` 也拒——否则「这条身份能签什么」会取决于后来跑了哪条命令。
 
-- **能跑**：`anp sign` / `anp login`（ANP-02 请求）、`did register` / `did publish`（用守护进程
-  发布的文档走主机的控制面）、`did show` / `anp show`。
-- **当场拒**：`msg` / `group`（origin proof 与 MLS 设备钥都是 CLI 自己拼的字节）、`did update`
-  （退役文档要由 key-1 签，而后继钥还是 CLI mint 的）。拒绝发生在动手之前，并把这条身份能做
-  什么写在错误里。
+- **开发 socket** 的合同只有"给我 method / URL / body，我把 RFC 9421 头还给你"：能跑
+  `anp sign` / `anp login`（ANP-02 请求）、`did register` / `did publish`（用守护进程发布的
+  文档走主机的控制面）、`did show` / `anp show`。`msg` / `contacts` / `group` 当场拒，
+  因为基线能力集里没有 `SIGN_ORIGIN_PROOF`。
+- **受保护 v2** 在守护进程宣告 `SIGN_ORIGIN_PROOF` 时，把 `{method, meta, body}` 交给它：
+  签名基由守护进程拼，grant 与审计也由它管，`request_id` 用信封的 `id`（一次请求一个 UUID）。
+  于是 `msg send` / `listen` / `fetch`、`contacts` 全族、`group`（不含 E2EE）都通。
+  attach 时缓存协商到的操作集，`did show` 的 `signs:` 行把它摊开；`msg listen` 开流前查一次
+  `GET_GRANT_STATUS`，快过期且还有续期额度时按 `RENEW_GRANT` 续，续不到就把管理员要做的事
+  写进错误。
+- **仍然拒**：`group e2ee`（设备断言与 MLS 设备钥要 `SIGN_PURPOSE`，阶段 2）和 `did update`
+  （退役文档要由 key-1 签，而后继钥还得在守护进程的管理面里铸）。
 
 拒绝不是一句笼统的「不支持」，因为它有两个可能的下半句：守护进程没宣告这个操作，或者宣告了
 而本 build 还没把这条签名路接上。身份记录里现在带一份协商到的操作集（`did attach-anpio-key`

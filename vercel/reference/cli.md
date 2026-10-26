@@ -79,10 +79,13 @@ cargo build --release --manifest-path rust/Cargo.toml
 之前，那个文件是 DID 已经搬过去的钥的**唯一**副本。所以投递结果不确定时它**留着**暂存钥并提示
 `--resume`，而不是丢掉。
 
-**`anpio-key` 托管的那类身份只覆盖"签整条 HTTP 请求"**：`anp sign` / `anp login` /
-`did register` / `did publish` 可用；`msg` / `group` / `did update` 在动手之前就拒——它们的证明
-是对 CLI 自己拼的字节签的（origin proof、MLS 设备钥、退役文档），而守护进程的合同里没有
-"签任意字节"这条。
+**`anpio-key` 托管的那类身份有两个入口，一个身份只接一个**：`--config <service.json>` 走受保护
+入口（grant、`request_id`、审计），`--key-root` / `--socket` 走开发 socket，两者同时给会被拒。
+开发 socket 只覆盖"签整条 HTTP 请求"：`anp sign` / `anp login` / `did register` / `did publish`
+可用，`msg` / `contacts` / `group` 在动手之前就拒。受保护入口下，守护进程宣告
+`SIGN_ORIGIN_PROOF` 时 `msg`（本地读除外）/ `contacts` / `group`（不含 E2EE）的 origin proof
+交给它签，`msg listen` 开流前还会按需续 grant。仍然拒的是 `group e2ee`（要设备钥）与
+`did update`（要铸后继钥）。
 
 ## `msg` —— 消息服务
 

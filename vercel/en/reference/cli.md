@@ -62,7 +62,7 @@ The exit codes of `did resolve --chain` are worth memorizing separately: **0** c
 
 `did update` writes the successor key into `successor.json` **before any byte goes out**: between the server accepting and the store moving over, that file is the **only** copy of the key the DID has already migrated to. So when the delivery outcome is unknown it **keeps** the staged key and points at `--resume`, rather than discarding it.
 
-**An identity whose key is held by `anpio-key` covers "sign a whole HTTP request" and nothing else**: `anp sign` / `anp login` / `did register` / `did publish` work; `msg` / `group` / `did update` are refused before anything is attempted, because their proofs are over bytes this CLI assembles itself (origin proofs, MLS device keys, a retirement document) and the daemon has no "sign arbitrary bytes" command.
+**An identity whose key is held by `anpio-key` has two surfaces, and picks one at adopt time**: `--config <service.json>` selects the protected surface (grants, `request_id`, audit), `--key-root` / `--socket` the development socket, and passing both is refused. The development socket covers "sign a whole HTTP request" only: `anp sign` / `anp login` / `did register` / `did publish` work, while `msg` / `contacts` / `group` are refused before anything is attempted. On the protected surface, when the daemon announces `SIGN_ORIGIN_PROOF`, the origin proofs of `msg` (local reads aside) / `contacts` / `group` (E2EE excluded) go to it, and `msg listen` renews the grant before opening the stream when it is about to run out. Still refused: `group e2ee` (needs a device key) and `did update` (needs a freshly minted successor).
 
 ## `msg` — message service
 
