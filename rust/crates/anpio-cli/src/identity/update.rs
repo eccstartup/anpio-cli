@@ -28,7 +28,8 @@ use reqwest::Url;
 use serde_json::{json, Value};
 
 use crate::anp::request as anp_request;
-use crate::message::resolve::{assert_allowed_host, ResolvePolicy};
+use crate::message::client::client_for_url;
+use crate::message::resolve::ResolvePolicy;
 
 /// What the DID server's acceptance amounts to.
 ///
@@ -87,7 +88,7 @@ pub struct Hop<'a> {
 
 /// Deliver one update hop to `target`.
 pub async fn deliver(
-    client: &reqwest::Client,
+    _client: &reqwest::Client,
     target: &str,
     policy: &ResolvePolicy,
     hop: Hop<'_>,
@@ -96,12 +97,12 @@ pub async fn deliver(
         .map_err(|err| UpdateError::Settled(anyhow!("--target must be a URL: {err}")))?;
     // Before anything is signed: a hop is not sent to a host the policy has not seen, and a
     // hop is the one request whose body a proxy must not be free to rewrite.
-    assert_allowed_host(&url, policy, "the DID server's update endpoint")
+    let client = client_for_url(&url, policy, "the DID server's update endpoint")
         .map_err(|err| UpdateError::Settled(err.into()))?;
 
     let signer = anp_request::Signer::Local(hop.key1);
     let posted = anp_request::post_signed(
-        client,
+        &client,
         &anp_request::SignedPost {
             did: hop.retiring_did,
             document: hop.retirement_document,

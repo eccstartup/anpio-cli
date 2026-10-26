@@ -16,7 +16,8 @@ use serde_json::Value;
 
 use crate::anp::request::{self as anp_request, SignedPost};
 use crate::identity::{subject_of, Identity};
-use crate::message::resolve::{assert_allowed_host, ResolvePolicy};
+use crate::message::client::client_for_url;
+use crate::message::resolve::ResolvePolicy;
 
 /// What a successful login amounts to.
 ///
@@ -73,7 +74,7 @@ impl std::fmt::Display for Superseded {
 /// document the peer will compare the signature against, so it must be the one the key
 /// belongs to.
 pub async fn login(
-    client: &reqwest::Client,
+    _client: &reqwest::Client,
     target: &str,
     policy: &ResolvePolicy,
     identity: &Identity,
@@ -86,10 +87,10 @@ pub async fn login(
     // The target is the application server, and the policy is the caller's: a login is a
     // signed request carrying the DID document, so it goes to the same hosts everything else
     // this client sends to may go to, and no others.
-    assert_allowed_host(&url, policy, "the login endpoint").map_err(|err| LoginError::Refused(err.into()))?;
+    let client = client_for_url(&url, policy, "the login endpoint").map_err(|err| LoginError::Refused(err.into()))?;
 
     let posted = anp_request::post_signed(
-        client,
+        &client,
         &SignedPost {
             did: &identity.did,
             document,

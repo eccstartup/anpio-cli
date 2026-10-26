@@ -15,14 +15,9 @@
 //! is ours, and it follows the TS rules instead: split on `:` first, then percent-decode
 //! each segment, then validate every one (TODO5 §3 #4).
 //!
-//! **The policy.** A DID names the host its document comes from, so the fetch goes to a
-//! host the *caller* named — and, for the message hop, sometimes to a host the *peer* named
-//! (`channel::discover` hands the endpoint host to `post_message`). The three gates the TS
-//! client applies are ported: a non-empty allowlist, a scheme that must be `https` unless
-//! the host was declared local, and a private-address refusal for literal IPs. **One part
-//! is not ported and is called out at [`assert_allowed_host`]**: the TS client also
-//! resolves a *name* to addresses and refuses private ones, which needs a DNS resolver this
-//! client does not carry.
+//! **The policy.** Every fetch applies the hostname/scheme/literal-address gates
+//! here, then uses `client::client_for_url` to validate DNS answers at connection
+//! time. Private access requires an explicit per-host exemption.
 
 use base64::Engine as _;
 use reqwest::Url;
@@ -67,7 +62,7 @@ fn blocked(message: impl Into<String>) -> AnpioError {
 
 /// A response larger than this is refused rather than buffered. Matches `rpc`'s cap — the
 /// same guard, because a document and a response travel the same way.
-const MAX_DOCUMENT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_DOCUMENT_BYTES: usize = super::client::MAX_RESPONSE_BYTES;
 
 /// The percent-decode `decodeURIComponent` performs, without its `+`-is-space rule (which
 /// is form encoding, not URI encoding). `None` for malformed input or invalid UTF-8, so a
@@ -228,7 +223,7 @@ pub fn is_loopback_host_name(host: &str) -> bool {
 
 /// The private/loopback/reserved ranges a fetch driven by a peer must not reach
 /// (`resolveDid.ts`'s `isPrivateIpAddress`).
-fn is_private_address(address: std::net::IpAddr) -> bool {
+pub(crate) fn is_private_address(address: std::net::IpAddr) -> bool {
     use std::net::IpAddr;
     match address {
         IpAddr::V4(address) => {
@@ -275,13 +270,8 @@ pub fn document_url(did: &str, policy: &ResolvePolicy) -> Result<Url> {
 /// Apply the allowlist, the address gate, and the scheme gate to one URL. Both gates apply
 /// to every hop, so this is called before every fetch and before every message POST.
 ///
-/// **Not ported:** `resolveHostAddresses` — the TS client also resolves a *hostname* through
-/// `node:dns` and refuses one that resolves to a private address, which is what stops a name
-/// that is not spelled loopback (a LAN name, a rebinding record) from reaching inward. Doing
-/// that here needs a DNS resolver this client does not carry, so the check is limited to
-/// **literal IPs**, which is the same fallback the TS client takes where `node:dns` is
-/// absent (its browser path). The allowlist still bounds which hosts are reachable at all;
-/// what is missing is the second opinion on what a name resolves to. Tracked in TODO5 §3.
+/// DNS answers are additionally checked by the transport at connection time.
+/// This synchronous gate alone does not authorize a connection.
 pub fn assert_allowed_host(url: &Url, policy: &ResolvePolicy, context: &str) -> Result<()> {
     let host = url
         .host_str()
@@ -390,12 +380,12 @@ fn proof_value_as_base64url(document: &Value) -> Option<Value> {
 /// spells. The document's `id` is checked first, because a document for another DID is not
 /// ours to judge.
 pub async fn resolve_did_document(
-    client: &reqwest::Client,
+    _client: &reqwest::Client,
     did: &str,
     policy: &ResolvePolicy,
 ) -> Result<Value> {
     let url = document_url(did, policy)?;
-    assert_allowed_host(&url, policy, did)?;
+    let client = super::client::client_for_url(&url, policy, did)?;
 
     let response = client
         .get(url.clone())
@@ -415,10 +405,7 @@ pub async fn resolve_did_document(
         .unwrap_or("")
         .trim()
         .to_ascii_lowercase();
-    let text = response
-        .text()
-        .await
-        .map_err(|err| AnpioError::MessageSendFailed(format!("reading {url}: {err}")))?;
+    let text = super::client::read_bounded(response, MAX_DOCUMENT_BYTES).await?;
     if !status.is_success() {
         return Err(AnpioError::MessageSendFailed(format!(
             "GET {url} failed: HTTP {status}: {}",
@@ -437,13 +424,6 @@ pub async fn resolve_did_document(
             "the DID document from {url} has unsupported Content-Type \"{media_type}\""
         )));
     }
-    if text.len() > MAX_DOCUMENT_BYTES {
-        return Err(AnpioError::ResponseTooLarge(format!(
-            "the DID document from {url} is {} bytes",
-            text.len()
-        )));
-    }
-
     let document: Value = serde_json::from_str(&text)
         .map_err(|_| AnpioError::MessageInvalid(format!("{url} did not return a JSON document")))?;
     if document.get("id").and_then(Value::as_str) != Some(did) {

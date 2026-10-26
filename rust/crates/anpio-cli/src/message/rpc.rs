@@ -24,7 +24,8 @@ use serde_json::Value;
 use crate::error::{AnpioError, AnpErrorObject, Result};
 
 use super::envelope::{AnpNotification, AnpRequest, JSONRPC_VERSION};
-use super::resolve::{assert_allowed_host, ResolvePolicy};
+use super::resolve::ResolvePolicy;
+use super::client::{client_for_url, read_bounded, MAX_RESPONSE_BYTES};
 
 /// A JSON-RPC response (P1 §5.6). Success and failure are the two arms of one type, because
 /// exactly one of them is present and which one it is *is* the answer.
@@ -59,10 +60,6 @@ const JSON_RPC_HEADERS: [(&str, &str); 2] = [
     ("content-type", "application/json"),
     ("accept", "application/json"),
 ];
-
-/// A response larger than this is refused rather than buffered. Matches the guard the TS
-/// client applies through `fetchControlledJson`'s `tooLarge` code.
-const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
 fn check_response(endpoint: &str, request_id: &str, text: &str) -> Result<AnpResponse> {
     let raw: Value = serde_json::from_str(text).map_err(|_| {
@@ -123,7 +120,7 @@ fn check_response(endpoint: &str, request_id: &str, text: &str) -> Result<AnpRes
 /// the endpoint comes out of a peer's DID document, so "remember to check it" is the one
 /// thing this hop must not rely on.
 pub async fn post_message(
-    client: &reqwest::Client,
+    _client: &reqwest::Client,
     endpoint: &str,
     request: &AnpRequest,
     policy: &ResolvePolicy,
@@ -131,7 +128,7 @@ pub async fn post_message(
 ) -> Result<AnpResponse> {
     let url = Url::parse(endpoint)
         .map_err(|err| AnpioError::MessageInvalid(format!("endpoint is not a URL: {err}")))?;
-    assert_allowed_host(&url, policy, context)?;
+    let client = client_for_url(&url, policy, context)?;
 
     let body = serde_json::to_string(request)?;
     // §14.1: no redirects. A redirect would carry the signed request to a host the policy
@@ -159,16 +156,7 @@ pub async fn post_message(
             "ANP message service at {endpoint} answered HTTP {status}"
         )));
     }
-    let text = response
-        .text()
-        .await
-        .map_err(|err| AnpioError::MessageSendFailed(err.to_string()))?;
-    if text.len() > MAX_RESPONSE_BYTES {
-        return Err(AnpioError::ResponseTooLarge(format!(
-            "ANP message service at {endpoint} answered {} bytes",
-            text.len()
-        )));
-    }
+    let text = read_bounded(response, MAX_RESPONSE_BYTES).await?;
     check_response(endpoint, &request.id, &text)
 }
 
@@ -176,7 +164,7 @@ pub async fn post_message(
 /// so a 200 with an empty body is success, and reading it as JSON would turn a delivered
 /// notification into a failure and resend it.
 pub async fn post_notification(
-    client: &reqwest::Client,
+    _client: &reqwest::Client,
     endpoint: &str,
     notification: &AnpNotification,
     policy: &ResolvePolicy,
@@ -184,7 +172,7 @@ pub async fn post_notification(
 ) -> Result<()> {
     let url = Url::parse(endpoint)
         .map_err(|err| AnpioError::MessageInvalid(format!("endpoint is not a URL: {err}")))?;
-    assert_allowed_host(&url, policy, context)?;
+    let client = client_for_url(&url, policy, context)?;
 
     let body = serde_json::to_string(notification)?;
     let response = client

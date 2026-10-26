@@ -76,19 +76,19 @@ export function createRateLimiter(policy: RateLimitPolicy) {
   /**
    * 一次机会。允许则扣一枚令牌，拒绝则**不扣**（并算出还差几秒）。
    *
-   * 桶空时不更新时间戳：那次补充要等到有令牌可补时才算数，否则一个被持续打的桶会因为每次
-   * 都刷新 `refilledAt` 而永远补不满——那是"拒绝"变成了"永远拒绝"。
+   * 补充后的余额和补充时刻一起保存，避免下一次拒绝重复计算同一段时间。
    */
   function take(key: string, atMs: number): RateLimitDecision {
     const bucket = buckets.get(key) ?? { tokens: policy.burst, refilledAt: atMs }
-    const elapsed = Math.max(0, atMs - bucket.refilledAt) / 1000
+    const refilledAt = Math.max(atMs, bucket.refilledAt)
+    const elapsed = (refilledAt - bucket.refilledAt) / 1000
     const tokens = Math.min(policy.burst, bucket.tokens + elapsed * perSecond)
     if (tokens < 1) {
-      buckets.set(key, { tokens, refilledAt: bucket.refilledAt })
+      buckets.set(key, { tokens, refilledAt })
       const deficit = 1 - tokens
       return { allowed: false, retryAfterSeconds: Math.max(1, Math.ceil(deficit / perSecond)) }
     }
-    buckets.set(key, { tokens: tokens - 1, refilledAt: atMs })
+    buckets.set(key, { tokens: tokens - 1, refilledAt })
     return { allowed: true, retryAfterSeconds: 0 }
   }
 
