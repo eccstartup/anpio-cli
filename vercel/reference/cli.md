@@ -61,7 +61,7 @@ cargo build --release --manifest-path rust/Cargo.toml
 | 子命令 | 作用 |
 |---|---|
 | `did create --host <url> --handle <name>` | 生成一份身份，并把 DID 文档发布到 DID 主机（`--agent` 缺省=handle） |
-| `did attach-anpio-key --did <did>` | 接管一把由本地 `anpio-key` 守护进程持有的钥：store 里没有私钥字节，签名走 socket |
+| `did attach-anpio-key --did <did>` | 接管一把由本地 `anpio-key` 守护进程持有的钥：store 里没有私钥字节，签名走 socket。`--config <service.json>` 选受保护入口（配 `--grant`），`--device <id>` 绑定群 E2EE 的设备名 |
 | `did show` | 打印本机存着的这份身份 |
 | `did list` | 这台机器持有的全部身份，以及各自绑到了什么 |
 | `did register` | 把 DID 文档（重新）发布给它自己的主机，取回 bearer token |
@@ -83,8 +83,14 @@ cargo build --release --manifest-path rust/Cargo.toml
 开发 socket 只覆盖"签整条 HTTP 请求"：`anp sign` / `anp login` / `did register` / `did publish`
 可用，`msg` / `contacts` / `group` 在动手之前就拒。受保护入口下，守护进程宣告
 `SIGN_ORIGIN_PROOF` 时 `msg`（本地读除外）/ `contacts` / `group`（不含 E2EE）的 origin proof
-交给它签，`msg listen` 开流前还会按需续 grant。仍然拒的是 `group e2ee`（要设备钥）与
-`did update`（要铸后继钥）。
+交给它签，`msg listen` 开流前还会按需续 grant。
+
+**群 E2EE 走设备断言**：attach 时给 `--device <id>`，守护进程宣告
+`SIGN_PURPOSE(device_assertion)` 时，`group e2ee` 的 KeyPackage 绑定与 `send` 的设备 origin
+proof 都由它签。设备名必须是文档里的 `{device}-sign`；客户端拿 daemon 回的
+`public_multibase` 与文档逐字节核对，再让 `anp` crate 自己验一次签名。不给 `--device`（或
+守护进程没开这个 purpose）时，`group e2ee` 会在动手之前拒，并说清缺的是哪一半。仍然拒的
+只剩 `did update`（要铸后继钥，管理面缺口）。
 
 ## `msg` —— 消息服务
 
@@ -183,6 +189,9 @@ cargo build --release --manifest-path rust/Cargo.toml
 这四类控制方法都**不当作成功，除非**答复里有 `published: true` / `created: true` /
 `accepted: true`。`group e2ee send --content-type` 是**加密内容**的类型，与 `msg send` 那个被
 规范钉死的外层 `meta.content_type` 不是一回事。
+
+这一族的设备钥可以在本地 store，也可以在 `anpio-key` 里——后者要在 attach 时给 `--device`，
+见上面「`anpio-key` 托管的那类身份」一段。
 
 ## `anp` —— 应用层
 

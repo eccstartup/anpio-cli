@@ -121,8 +121,12 @@ E2EE 需要 MLS，而官方的 MLS 实现只在 Rust crate 里——这正是客
   attach 时缓存协商到的操作集，`did show` 的 `signs:` 行把它摊开；`msg listen` 开流前查一次
   `GET_GRANT_STATUS`，快过期且还有续期额度时按 `RENEW_GRANT` 续，续不到就把管理员要做的事
   写进错误。
-- **仍然拒**：`group e2ee`（设备断言与 MLS 设备钥要 `SIGN_PURPOSE`，阶段 2）和 `did update`
-  （退役文档要由 key-1 签，而后继钥还得在守护进程的管理面里铸）。
+- **设备断言**：`group e2ee` 在 `did attach-anpio-key --device <id>` 且守护进程宣告
+  `SIGN_PURPOSE(device_assertion)` 时可用——KeyPackage 绑定与 `send` 的设备 origin proof
+  都交给它签。设备名必须是文档里的 `{device}-sign`；签名回来后按文档的
+  `publicKeyMultibase` 核对，再让 `anp` crate 自己验一次。不给 `--device` 或没宣告这个
+  purpose 时，拒绝发生在动手之前。
+- **仍然拒**：`did update`（退役文档要由 key-1 签，而后继钥还得在守护进程的管理面里铸）。
 
 拒绝不是一句笼统的「不支持」，因为它有两个可能的下半句：守护进程没宣告这个操作，或者宣告了
 而本 build 还没把这条签名路接上。身份记录里现在带一份协商到的操作集（`did attach-anpio-key`

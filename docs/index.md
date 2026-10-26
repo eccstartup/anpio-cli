@@ -1,59 +1,34 @@
----
-layout: home
+# 设计文档索引
 
-hero:
-  name: anpio-cli
-  text: ANP 消息层
-  tagline: anpio-cli 命令行 + AnpioAgent ANPMessageService。设计先行，实现逐块落地。
-  actions:
-    - theme: brand
-      text: 从服务端开始
-      link: /docs/design/message-service
-    - theme: alt
-      text: 仓库总览
-      link: /overview
+这里是**实现者**看的文档：逐条引 ANP 规范行号，记录取舍与偏离，以及哪些规范条款本实现
+故意不覆盖。引用行号以**已发布的 ANP v1.2** 为准；P6（群组 E2EE）仍是候选，见
+[README 的规范版本](https://github.com/eccstartup/anpio-cli#规范版本)。
 
-features:
-  - title: 服务端 · AnpioAgent
-    details: 方法面、存储、取件流与联邦。规范 I/O 是本模块唯一的对外形状。
-    link: /docs/design/message-service
-    linkText: message-service
-  - title: 命令面 · anpio-cli
-    details: Rust 客户端。薄壳判据、与服务端的分工、退出码契约——命令面本身以 `--help` 为准。
-    link: /docs/design/cli
-    linkText: cli
-  - title: 实时接收 · msg listen
-    details: 订阅流、游标、无空洞无重复——这三条是取件面的全部承诺。
-    link: /docs/design/realtime
-    linkText: realtime
-  - title: 群组（P4）
-    details: Group Host 的语义：成员 DID、策略判定与群消息的受理顺序。
-    link: /docs/design/groups
-    linkText: groups
-  - title: 附件与对象（P7）
-    details: 消息面送清单、控制面签票据、数据面搬字节——三个平面不混淆。
-    link: /docs/design/attachments
-    linkText: attachments
-  - title: 端到端加密（P5 / P6）
-    details: 服务端只做钥匙柜与邮箱；群组一侧是 Host 排序、业主算。
-    link: /docs/design/e2ee-direct
-    linkText: e2ee-direct
-  - title: 联邦与跨域（P8）
-    details: 两层身份、一个 anchor、两条路：外层服务身份与终端业务身份分开。
-    link: /docs/design/federation
-    linkText: federation
-  - title: 协议原语 · packages/core
-    details: 从 anp-sdk 裁剪出来的那一部分：DID 组合、RFC 9421、JCS、CAIP-10。
-    link: /docs/design/vendored-core
-    linkText: vendored-core
----
+面向**使用者**的文档不在这里，在 **https://anpio-cli.vercel.app**（源文件在 [`vercel/`](../vercel/)）。
 
-## 这个站点是什么
+## 服务端
 
-九份设计文档 + 台账 + 仓库 README，**从仓库里的 Markdown 直接渲染**，没有第二份副本。
-所以这里的每一页都等于仓库里的那个文件，链接到的行号也就是 `git blame` 找得到的行号。
+| 文档 | 内容 |
+|---|---|
+| [message-service.md](design/message-service.md) | `AnpioAgent`：方法面、存储、取件流、通讯录与群备注、联邦 |
+| [realtime.md](design/realtime.md) | 实时接收：订阅流、游标、无空洞无重复 |
+| [groups.md](design/groups.md) | P4 群组：Group Host 语义、名册、策略与消息受理顺序 |
+| [attachments.md](design/attachments.md) | P7 附件与对象：消息面送清单、控制面签票据、数据面搬字节 |
+| [e2ee-direct.md](design/e2ee-direct.md) | P5 私聊端到端加密：服务端只是钥匙柜与邮箱 |
+| [e2ee-group.md](design/e2ee-group.md) | P6 群组端到端加密：Host 排序、业主算 |
+| [federation.md](design/federation.md) | P8 联邦与跨域：两层身份、一个 anchor、两条路 |
+| [vendored-core.md](design/vendored-core.md) | `packages/core`：保留 / 删除 / 新增清单，以及 CAIP-10 留的口子 |
 
-规范出处、版本与"行号以哪份 checkout 为准"写在[总览](/overview)里（当前基线是
-**ANP 1.2**，已发布）。
+## 客户端
 
-还没做完的事记在[台账](/todo)，台账只写**还剩什么**——做完的一律划掉，不复述。
+| 文档 | 内容 |
+|---|---|
+| [cli.md](design/cli.md) | 命令面的设计：薄壳判据、与服务端的分工、退出码契约、私钥归属 |
+| [client-messages.md](design/client-messages.md) | 客户端 `messages.db`：写入路径、游标，以及本地读与 `msg fetch` 的界 |
+| [client-mls.md](design/client-mls.md) | 客户端群 MLS：设备侧的密码学，以及还没做的 owner 编排 |
+| [anpio-key-integration.md](design/anpio-key-integration.md) | 把私钥与签名交给本地 `anpio-key` 守护进程的分期计划、证明点与拒绝边界 |
+
+## 台账
+
+[`TODO.md`](../TODO.md) 只记**仍然开着**的事，按"卡在谁那儿"分栏：本仓库自己能做的、
+等人裁定的、等上游或前置条件的。做完的条目删掉，历史留在 git 里。

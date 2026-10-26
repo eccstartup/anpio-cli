@@ -74,6 +74,10 @@ anpio-cli did attach-anpio-key --did <did> --agent <your-id>
 #     names this DID and carries the key; there are no private bytes in the store
 ```
 
+For group E2EE, add `--device <id>` naming the `{device}-sign` entry in the DID
+document. Without it those commands refuse, and they say so before touching the
+network — the local `{agent}/{profile}` is not a device name.
+
 Pass `--config <service.json>` to use the daemon's protected surface instead of
 its development socket (`--grant <grant-id>` names the grant this identity signs
 under). One identity has one surface: `--config` and `--key-root`/`--socket`
@@ -85,13 +89,16 @@ which is what the development socket offers.
 
 What the protected surface adds: when the daemon announces `SIGN_ORIGIN_PROOF`,
 `msg` (except the purely local reads, which never signed), `contacts`, and
-`group` (except E2EE) send their origin proofs to the daemon. `did show` prints
-`signs:` with what the identity actually got, and a refusal always says which
-half is missing — the daemon's announcement or this build.
+`group` send their origin proofs to the daemon. With `--device <id>` at attach
+time and `SIGN_PURPOSE(device_assertion)` announced, `group e2ee` also works: the
+KeyPackage binding and `send`'s device origin proof go to the daemon, which signs
+under the document's `{device}-sign` key. `did show` prints `signs:` with what
+the identity actually got, and a refusal always says which half is missing — the
+daemon's announcement or this build.
 
-What is refused outright: `group e2ee` and `did update`. Their proofs need a
-device key or a freshly minted successor key, which `anpio-key` cannot supply
-yet. The refusal names the commands that do work; do not try to work around it.
+What is refused outright: `did update`. It needs a freshly minted successor key,
+which `anpio-key` cannot supply from its administrative surface yet. The refusal
+names the commands that do work; do not try to work around it.
 
 ### Messaging
 

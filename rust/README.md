@@ -24,11 +24,17 @@ rust/
     src/lib.rs                   # 库 `anpio_cli` —— 协议与状态都在这
     src/main.rs                  # bin `anpio-cli` —— 命令面（薄壳）
     src/error.rs
+    src/custody.rs               # anpio-key 客户端：两个入口、六条数据面操作、拒绝分类
     src/group.rs                 # P4 `anp.group.base.v2` 的策略与 target
+    src/group_remarks.rs         # 只有我看得见的群备注
+    src/group_receive.rs         # 收群帧：P4 状态变化与 P6 密文帧
+    src/contacts.rs              # 名字 ↔ DID 的纯函数判定
+    src/messages.rs              # 本地 `messages.db`
     src/mls.rs                   # P6 的设备半边：MLS store 与它造出来的对象
     src/group_e2ee.rs            # P6 的线上半边：请求体的形状
-    src/identity/                # 身份库（store / did 文档 / host 注册 / 更新链）
-    src/message/                 # 信封装配 + 那一跳 HTTP + 发现 + 流
+    src/identity/                # 身份库（store / did 文档 / proof / host / 更新链 / 会话）
+    src/message/                 # 信封、那一跳 HTTP、发现、流、本地读
+    tests/cli_surface.rs         # 命令面清单：删一个或改一个名字，这里就红
     examples/phase0_key_package.rs
 ```
 
@@ -45,7 +51,8 @@ pin 为准**，源码阅读用 `git show origin/release/0929:rust/...`。
 
 store 根是 `ANPIOCLI_HOME`（缺省 `~/.anpio-cli`），一条身份由 `--agent` / `--profile`
 命名——两个都可以不写：`--agent` > `$ANPIOCLI_AGENT` > 当前 agent（`agent use` 选的）>
-`default`，`--profile` > `$ANPIOCLI_PROFILE` > `default`。`cargo test` 全绿（147 个单测）。
+`default`，`--profile` > `$ANPIOCLI_PROFILE` > `default`。`cargo test` 全绿（224 个单测 +
+9 个 `cli_surface` 集成测试）。
 
 - **`did create | show | list | register`** —— 身份存储 + DID 文档。
   `list` 与 `agent list` 不是一回事：后者答"现在是谁"（选择），前者答"这里有哪些 DID"（身份），
@@ -54,6 +61,9 @@ store 根是 `ANPIOCLI_HOME`（缺省 `~/.anpio-cli`），一条身份由 `--age
   没有 `curve` 列：这边绑定钥永远是 `e1_` 的 Ed25519，每行都一样的列是噪音。
   `create` 与 `register` 都会把主机随受理一起发下来的 **bearer token** 存进 `session.json`
   （同目录，明文 `0600`）——它是唯一能喂给主机自己那几个方法的凭据，下面两条读它。
+- **`did attach-anpio-key`** —— 把私钥交给本地 `anpio-key` 守护进程：store 里
+  **没有私钥字节**，每次签名走 socket。两个入口（开发 socket / 受保护 v2）一个身份只接
+  一个；`--device` 绑定群 E2EE 的设备名。见下面「私钥放在 anpio-key 里」。
 - **`did publish [--agent] [--profile] [--json]`** —— 把本地的文档推给主机，走的是主机的
   `update_document` 而不是 ANP 的签名路。三件事按这个顺序：`get_me` 取回主机**正在服务**的那份
   文档、哈希它（`sha256:` + base64url sha256(JCS(doc))，正是主机算 CAS 的方式）、
@@ -511,6 +521,11 @@ MLS 自己的 ratchet 钥仍在本地 store：那是会话状态，不是身份�
 
 身份这块只剩"换设备"，而它核下来是**对端没有这条路**（本机 awiki host 对改设备清单回
 `device_*_not_supported`，`replace_did` 回 `not_supported`），不是待办。
+
+`anpio-key` 那一侧还有两笔开着，都等上游：它的 v2 面没有发布版，所以「真守护进程跑完
+`publish → get-key-package → create → add → send`」没有验收过；`did update` 在托管身份上仍是
+明确拒绝（后继钥要在守护进程的管理面里铸）。见 [TODO.md](../TODO.md) §3.3、§3.4。
+
 命令面本身没有测试长的第三档之外的东西：覆盖是库侧单测 + `scripts/e2e.sh`（真服务、真
 socket、真 WebSocket）。
 

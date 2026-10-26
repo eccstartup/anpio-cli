@@ -48,7 +48,7 @@ It keeps its own store root (`$ANPIOCLI_HOME`, default `~/.anpio-cli`). A `~/.co
 | Subcommand | Purpose |
 |---|---|
 | `did create --host <url> --handle <name>` | Mint an identity and publish its DID document to a DID host (`--agent` defaults to the handle) |
-| `did attach-anpio-key --did <did>` | Adopt a DID whose key the local `anpio-key` daemon holds: no private bytes in the store, signing over a Unix socket |
+| `did attach-anpio-key --did <did>` | Adopt a DID whose key the local `anpio-key` daemon holds: no private bytes in the store, signing over a Unix socket. `--config <service.json>` selects the protected surface (with `--grant`); `--device <id>` binds the device name used by group E2EE |
 | `did show` | Print the identity on file |
 | `did list` | Every identity this machine holds, and what each one is bound to |
 | `did register` | (Re-)publish the DID document to its host and take back a bearer token |
@@ -62,7 +62,9 @@ The exit codes of `did resolve --chain` are worth memorizing separately: **0** c
 
 `did update` writes the successor key into `successor.json` **before any byte goes out**: between the server accepting and the store moving over, that file is the **only** copy of the key the DID has already migrated to. So when the delivery outcome is unknown it **keeps** the staged key and points at `--resume`, rather than discarding it.
 
-**An identity whose key is held by `anpio-key` has two surfaces, and picks one at adopt time**: `--config <service.json>` selects the protected surface (grants, `request_id`, audit), `--key-root` / `--socket` the development socket, and passing both is refused. The development socket covers "sign a whole HTTP request" only: `anp sign` / `anp login` / `did register` / `did publish` work, while `msg` / `contacts` / `group` are refused before anything is attempted. On the protected surface, when the daemon announces `SIGN_ORIGIN_PROOF`, the origin proofs of `msg` (local reads aside) / `contacts` / `group` (E2EE excluded) go to it, and `msg listen` renews the grant before opening the stream when it is about to run out. Still refused: `group e2ee` (needs a device key) and `did update` (needs a freshly minted successor).
+**An identity whose key is held by `anpio-key` has two surfaces, and picks one at adopt time**: `--config <service.json>` selects the protected surface (grants, `request_id`, audit), `--key-root` / `--socket` the development socket, and passing both is refused. The development socket covers "sign a whole HTTP request" only: `anp sign` / `anp login` / `did register` / `did publish` work, while `msg` / `contacts` / `group` are refused before anything is attempted. On the protected surface, when the daemon announces `SIGN_ORIGIN_PROOF`, the origin proofs of `msg` (local reads aside) / `contacts` / `group` (E2EE excluded) go to it, and `msg listen` renews the grant before opening the stream when it is about to run out.
+
+**Group E2EE uses a device assertion**: pass `--device <id>` at adopt time, and when the daemon announces `SIGN_PURPOSE(device_assertion)` it signs both the KeyPackage binding and the `send` device origin proof. The device name must be the document's `{device}-sign`; the client checks the daemon's `public_multibase` byte-for-byte against the document, then has the `anp` crate verify the signature itself. Without `--device` (or without that purpose enabled by the daemon), `group e2ee` refuses before anything is attempted and names the missing half. The only remaining refusal is `did update` (it needs a freshly minted successor, an administrative-surface gap).
 
 ## `msg` — message service
 
@@ -137,6 +139,8 @@ A group's default policy is `open-join`; `admission_mode` inside `--policy` acce
 | `group e2ee send <group_did> (--text \| --body)` | Encrypt a message and have the service order it |
 
 These hit P6 `anp.group.e2ee.v2`. `create` / `add` / `remove` share one three-phase shape (prepare → send → finalize or abort, §13.6): a service refusal aborts, while a transport failure is left to the crate's `reconcile_pending_v2` — at that point whether the service received it is unknown. `send` is the only one that is **not** three-phase. None of these control methods is treated as success unless the answer says `published: true` / `created: true` / `accepted: true`. `group e2ee send --content-type` is the type of the **encrypted content**, which is a different thing from the outer `meta.content_type` that `msg send` has pinned by the spec.
+
+The device key for this family may live in the local store or in `anpio-key` — the latter needs `--device` at attach time, see "An identity whose key is held by `anpio-key`" above.
 
 ## `anp` — the application layer
 
