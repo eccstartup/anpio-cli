@@ -1112,20 +1112,20 @@ async fn main() -> anyhow::Result<()> {
                 profile,
                 force,
                 json,
-            } => cmd_did_attach_anpio_key(
-                &did,
+            } => cmd_did_attach_anpio_key(AttachArgs {
+                did,
                 key_root,
                 socket,
-                kid.as_deref(),
+                kid,
                 config,
                 grant,
-                device.as_deref(),
-                host.as_deref(),
-                agent.as_deref(),
-                profile.as_deref(),
+                device,
+                host,
+                agent,
+                profile,
                 force,
                 json,
-            ),
+            }),
             DidCommand::Show {
                 agent,
                 profile,
@@ -1617,6 +1617,25 @@ async fn cmd_did_create(
     Ok(())
 }
 
+/// Everything `did attach-anpio-key` was given, in one value.
+///
+/// All twelve come from a single clap variant, so a parameter list would only be a second
+/// place for the same fields to drift.
+struct AttachArgs {
+    did: String,
+    key_root: Option<PathBuf>,
+    socket: Option<PathBuf>,
+    kid: Option<String>,
+    config: Option<PathBuf>,
+    grant: Option<String>,
+    device: Option<String>,
+    host: Option<String>,
+    agent: Option<String>,
+    profile: Option<String>,
+    force: bool,
+    json: bool,
+}
+
 /// `did attach-anpio-key` — adopt a DID whose key lives in an `anpio-key` daemon.
 ///
 /// This is the only way an identity enters the store without private bytes: the daemon
@@ -1627,20 +1646,25 @@ async fn cmd_did_create(
 /// The identity is created only after the daemon answers with a document naming this DID
 /// and carrying the key to be used, so a half-attached identity cannot be written: either
 /// the daemon holds the key, or the store is untouched.
-fn cmd_did_attach_anpio_key(
-    did: &str,
-    key_root: Option<PathBuf>,
-    socket: Option<PathBuf>,
-    kid: Option<&str>,
-    config: Option<PathBuf>,
-    grant: Option<String>,
-    device: Option<&str>,
-    host: Option<&str>,
-    agent: Option<&str>,
-    profile: Option<&str>,
-    force: bool,
-    json: bool,
-) -> anyhow::Result<()> {
+fn cmd_did_attach_anpio_key(args: AttachArgs) -> anyhow::Result<()> {
+    let AttachArgs {
+        did,
+        key_root,
+        socket,
+        kid,
+        config,
+        grant,
+        device,
+        host,
+        agent,
+        profile,
+        force,
+        json,
+    } = args;
+    let did = did.as_str();
+    let kid = kid.as_deref();
+    let device = device.as_deref();
+    let (host, agent, profile) = (host.as_deref(), agent.as_deref(), profile.as_deref());
     let parts = split_did(did).ok_or_else(|| {
         anyhow::anyhow!(
             "{did} is not a did:wba E1 DID (did:wba:<authority>:user:<handle>:e1_<fingerprint>); \
@@ -1725,8 +1749,7 @@ fn cmd_did_attach_anpio_key(
             .find(|device| document_has_key(&document, &format!("{did}#{device}-sign")));
         let Some(device) = matched else {
             anyhow::bail!(
-                "{did} publishes no {}; the document publishes {}",
-                format!("{did}#{bare}-sign"),
+                "{did} publishes no {did}#{bare}-sign; the document publishes {}",
                 if document_keyids(&document).is_empty() {
                     "no verification methods".to_string()
                 } else {

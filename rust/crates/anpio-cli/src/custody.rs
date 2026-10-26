@@ -1484,15 +1484,16 @@ fn decode_hex(text: &str) -> Result<Vec<u8>> {
     if !text.len().is_multiple_of(2) {
         bail!("hex text has an odd length ({} characters)", text.len());
     }
-    let mut bytes = Vec::with_capacity(text.len() / 2);
-    for pair in text.as_bytes().chunks_exact(2) {
-        let nibble = |byte: u8| match byte {
-            b'0'..=b'9' => Some(byte - b'0'),
-            b'a'..=b'f' => Some(byte - b'a' + 10),
-            _ => None,
-        };
-        let high = nibble(pair[0]).ok_or_else(|| anyhow!("not lowercase hex: {text:?}"))?;
-        let low = nibble(pair[1]).ok_or_else(|| anyhow!("not lowercase hex: {text:?}"))?;
+    let nibble = |byte: u8| match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    };
+    let hex = text.as_bytes();
+    let mut bytes = Vec::with_capacity(hex.len() / 2);
+    for index in (0..hex.len()).step_by(2) {
+        let high = nibble(hex[index]).ok_or_else(|| anyhow!("not lowercase hex: {text:?}"))?;
+        let low = nibble(hex[index + 1]).ok_or_else(|| anyhow!("not lowercase hex: {text:?}"))?;
         bytes.push((high << 4) | low);
     }
     Ok(bytes)

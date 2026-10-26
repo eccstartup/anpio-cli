@@ -1145,8 +1145,7 @@ mod tests {
             "8b3f4f0e-7a5b-4c47-9c2f-2b6a1d9e0c11",
             a_request("direct.send"),
         )
-        .err()
-        .expect("the development socket cannot make an origin proof")
+        .expect_err("the development socket cannot make an origin proof")
         .to_string();
         assert!(err.contains("development socket"), "{err}");
         assert!(err.contains("--config"), "{err}");
@@ -1182,8 +1181,7 @@ mod tests {
             "8b3f4f0e-7a5b-4c47-9c2f-2b6a1d9e0c11",
             a_request("direct.send"),
         )
-        .err()
-        .expect("the development socket cannot make a device assertion")
+        .expect_err("the development socket cannot make a device assertion")
         .to_string();
         assert!(err.contains("development socket"), "{err}");
         assert!(err.contains("device assertion"), "{err}");
