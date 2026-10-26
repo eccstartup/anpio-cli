@@ -8,6 +8,7 @@
 mod chain;
 mod did;
 mod host;
+mod proof;
 mod session;
 mod store;
 mod update;
