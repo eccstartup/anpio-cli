@@ -1617,6 +1617,9 @@ async fn cmd_did_create(
 /// The identity is created only after the daemon answers with a document naming this DID
 /// and carrying the key to be used, so a half-attached identity cannot be written: either
 /// the daemon holds the key, or the store is untouched.
+// One flag per parameter, which is what a clap-driven command entry point is; grouping them
+// into a struct would only move the same list.
+#[allow(clippy::too_many_arguments)]
 fn cmd_did_attach_anpio_key(
     did: &str,
     key_root: Option<PathBuf>,

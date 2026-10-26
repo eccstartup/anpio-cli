@@ -10,11 +10,12 @@
 //! same content-type check every other hop does (`message::resolve`). So this module is that
 //! adapter and nothing else.
 //!
-//! One thing the adapter *does* have to change is the proof `proofValue`'s encoding: the
-//! walk verifies every document it stands on, and the crate's verifier misreads the base58
-//! form these hosts sign (TODO5 §8-J, third pit). The fetch path already knows that
-//! ([`document_in_crate_form`]), so the fetcher below hands the crate the same bytes the
-//! fetch path would.
+//! One thing the adapter may have to change is the proof `proofValue`'s encoding: the walk
+//! verifies every document it stands on, and a document minted in the older dialect — `z…`
+//! over a signature made without the `@context` fold — is misread by the crate's verifier.
+//! The fetch path already knows that ([`document_in_crate_form`]), so the fetcher below
+//! hands the crate the same bytes the fetch path would. A document in the shape this client
+//! now publishes needs no rewriting.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
@@ -120,12 +121,12 @@ pub async fn resolve_chain(
             fetched.borrow_mut().insert(target.to_string(), document.clone());
             // Handed over normalized: the walk re-verifies each document it lands on, and
             // the crate's verifier reads a base58 `eddsa-jcs-2022` proofValue through a
-            // branch that folds `@context` into the signed bytes, while these hosts sign
-            // without that fold — so raw bytes come back as `invalid_proof` on a document
-            // that is in fact well signed (TODO5 §8-J, third pit). `resolve_did_document`
-            // has already established the document binds under one convention or the
-            // other, so `None` here would mean the two checks disagree about the same
-            // bytes; it is reported rather than unwrapped.
+            // branch that folds `@context` into the signed bytes. A document minted before
+            // that fold existed was signed without it, so raw bytes come back as
+            // `invalid_proof` on a document that is in fact well signed (TODO5 §8-J, third
+            // pit). `resolve_did_document` has already established the document binds under
+            // one convention or the other, so `None` here would mean the two checks disagree
+            // about the same bytes; it is reported rather than unwrapped.
             document_in_crate_form(&document).ok_or_else(|| {
                 format!("the DID document for {target} does not bind to it under either proof convention")
             })

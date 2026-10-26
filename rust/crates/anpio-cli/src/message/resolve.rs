@@ -321,16 +321,20 @@ pub fn document_is_bound(document: &Value) -> bool {
     document_in_crate_form(document).is_some()
 }
 
-/// The same document, in the one form `anp` 1.0.5's own checks accept.
+/// The same document, in a form `anp`'s own checks accept.
 ///
 /// The crate's verdict is asked first and trusted when it answers *yes*, in which case the
-/// document is handed back unchanged. Its only known blind spot is a false *no*: for a
-/// base58-btc (`z…`) `eddsa-jcs-2022` proof it folds the document's `@context` into the
-/// proof options before hashing the signing input, while the DID host this client resolves
-/// through signs that same proof without the fold (ANP-03 §2.5.5 as the host implements
-/// it). A document it rejects is therefore offered again as [`proof_value_as_base64url`] —
-/// the encoding the crate's own generator writes — which selects its legacy branch and
-/// verifies the signature as it was made.
+/// document is handed back unchanged. That is the normal case now: this client, `awiki` and
+/// `anpio-key` all publish the W3C `eddsa-jcs-2022` shape — base58-btc `proofValue`, the
+/// document's `@context` folded into the proof options — which is exactly what `anp` 1.0.6
+/// verifies on its `z` branch.
+///
+/// The fallback is for documents minted before that: a `z…` proof whose signature was made
+/// **without** the fold (the older host/CLI dialect, where only the alphabet was changed).
+/// The crate folds `@context` in before hashing when it sees a `z` proofValue, so it answers
+/// *no* for those; offering them again as [`proof_value_as_base64url`] — the encoding the
+/// crate's own generator writes — selects its legacy branch and verifies the signature as it
+/// was made.
 ///
 /// This never widens what counts as a valid signature: both branches hash the same proof
 /// options minus `proofValue`, over the same document, and both still require the signing
