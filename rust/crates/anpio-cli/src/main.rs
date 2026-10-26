@@ -25,7 +25,7 @@ use anpio_cli::group_e2ee::{
 };
 use anpio_cli::anp::login::login;
 use anpio_cli::anp::{LoginError, Superseded};
-use anpio_cli::custody::{document_has_key, document_keyids, split_did, AnpioKey};
+use anpio_cli::custody::{document_has_key, document_keyids, split_did, AnpioKey, Operation};
 use anpio_cli::identity::{
     create_identity, current_agent_path, deliver, describe_status, document_hash, document_is_superseded,
     fetch_host_service, fetch_profile, fetch_public_profile, list_identities, load_session, load_stored_key,
@@ -1625,7 +1625,7 @@ fn cmd_did_attach_anpio_key(
     // The flag names a fragment; a caller who pasted a whole `did#key-1` is understood
     // rather than refused, because that is what anpio-key's own `list` prints.
     let kid = kid.map(|value| value.rsplit('#').next().unwrap_or(value).to_string());
-    let key = AnpioKey { root: key_root, socket, kid };
+    let key = AnpioKey { root: key_root, socket, kid, ..AnpioKey::default() };
 
     // Fetching the document is the check that the daemon is reachable and actually holds
     // this DID. No key bytes are fetched, because there are none to fetch.
@@ -1983,7 +1983,11 @@ fn cmd_did_show(agent: Option<&str>, profile: Option<&str>, json: bool) -> anyho
     let location = IdentityLocation::resolve(agent, profile)?;
     let identity = Identity::load(&location)?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&identity)?);
+        let mut value = serde_json::to_value(&identity)?;
+        if let Some(custody) = &identity.custody {
+            value["capabilities"] = capability_view(custody);
+        }
+        println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
         println!("did:        {}", identity.did);
         println!("device:     {}", identity.device_id);
@@ -1992,8 +1996,32 @@ fn cmd_did_show(agent: Option<&str>, profile: Option<&str>, json: bool) -> anyho
         println!("created:    {}", identity.created_at);
         match &identity.custody {
             // No key names to list: the point of custody is that there are no key bytes here
-            // to name. What the line can say is which daemon holds the key.
-            Some(Custody::AnpioKey(key)) => println!("key:        held by {}", key.describe()),
+            // to name. What the line can say is which daemon holds the key, and which proofs
+            // this build can actually ask it for.
+            Some(Custody::AnpioKey(key)) => {
+                println!("key:        held by {}", key.describe());
+                match key.capabilities() {
+                    Ok(capabilities) => {
+                        let effective = capabilities.effective();
+                        println!(
+                            "signs:      {}",
+                            if effective.is_empty() {
+                                "nothing this build delegates".to_string()
+                            } else {
+                                effective.join(", ")
+                            }
+                        );
+                        let announced = capabilities.announced_not_effective();
+                        if !announced.is_empty() {
+                            println!(
+                                "daemon:     also announces {} (this build does not use it yet)",
+                                announced.join(", ")
+                            );
+                        }
+                    }
+                    Err(err) => println!("signs:      unknown ({err:#})"),
+                }
+            }
             None => println!(
                 "keys:       {}",
                 identity.keys.keys().cloned().collect::<Vec<_>>().join(", ")
@@ -2008,6 +2036,29 @@ fn cmd_did_show(agent: Option<&str>, profile: Option<&str>, json: bool) -> anyho
         }
     }
     Ok(())
+}
+
+/// What a custody can delegate, for `did show --json`.
+///
+/// Negotiation can fail (daemon stopped, config unreadable); the answer then reports the
+/// cached view with an `error` rather than turning a read-only command into a failure.
+fn capability_view(custody: &Custody) -> Value {
+    match custody.capabilities() {
+        Ok(capabilities) => json!({
+            "operations": capabilities.effective(),
+            "announced": capabilities.announced_operations(),
+            "source": capabilities.source().name(),
+        }),
+        Err(err) => {
+            let known = custody.known_capabilities();
+            json!({
+                "operations": known.effective(),
+                "announced": known.announced_operations(),
+                "source": known.source().name(),
+                "error": format!("{err:#}"),
+            })
+        }
+    }
 }
 
 /// `anpio-cli did list` — every identity this machine holds, and what it is bound to.
@@ -2506,7 +2557,14 @@ async fn cmd_did_update(
     // both halves of it are this process's job. `--resume` is refused with it: a staged
     // successor is a key this client wrote, and an `anpio-key` identity never writes one.
     if let Some(custody) = &identity.custody {
-        return Err(custody.refuse("did update"));
+        custody.require(Operation::DocumentProof, "did update")?;
+        // Reached only once a daemon delegates document proofs; the successor still has to
+        // be minted on its admin plane, and §11 has no such operation (plan §4.4).
+        anyhow::bail!(
+            "did update on an anpio-key identity also needs a successor key minted inside the \
+             daemon; anpio-key's admin plane has no successorship operation yet, so this hop \
+             cannot be completed here"
+        );
     }
 
     if resume {

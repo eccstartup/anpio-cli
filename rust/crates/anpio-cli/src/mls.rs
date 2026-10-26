@@ -35,6 +35,7 @@ use anp::PrivateKeyMaterial;
 use chrono::{Duration, Utc};
 use serde_json::Value;
 
+use crate::custody::Operation;
 use crate::error::{AnpioError, Result};
 use crate::identity::{Identity, IdentityLocation};
 use crate::message::{document_in_crate_form, uuid_v4};
@@ -92,13 +93,12 @@ pub fn store_for(
 /// all — every other MLS operation keeps its keys inside the store (client-mls.md §5 #4).
 pub fn device_signing_key(identity: &Identity) -> Result<(String, PrivateKeyMaterial)> {
     // The MLS device key is minted by `did create` and lives in this store; an `anpio-key`
-    // identity never has one, and the daemon will not sign MLS messages, so this is where
-    // that becomes a sentence instead of a missing-key error.
+    // identity never has one. Delegating the device assertion is a `SIGN_PURPOSE` operation
+    // (stage 2), so refuse through the capability table rather than a missing-key error.
     if let Some(custody) = &identity.custody {
-        return Err(AnpioError::MessageInvalid(format!(
-            "{:#}",
-            custody.refuse("group e2ee")
-        )));
+        custody
+            .require(Operation::Purpose, "group e2ee")
+            .map_err(|err| AnpioError::MessageInvalid(format!("{err:#}")))?;
     }
     let fragment = format!("{}-sign", identity.device_id);
     let key = identity.keys.get(&fragment).ok_or_else(|| {

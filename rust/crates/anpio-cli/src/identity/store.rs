@@ -15,6 +15,8 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::custody::{Capabilities, Operation};
+
 /// The store root's environment override.
 ///
 /// Its own name on purpose: this client shares neither the TS CLI's `CONNECTX_HOME` nor
@@ -272,6 +274,14 @@ pub struct StoredIdentitySummary {
     /// to see in order to fix it.
     pub did: Option<String>,
     pub handle: Option<String>,
+    /// The custody record, when this identity's key is held by `anpio-key`. Absent for a
+    /// self-custodied identity, whose JSON row stays exactly what it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custody: Option<Custody>,
+    /// The operations this build can drive with that custody, from the cache or the
+    /// development-surface baseline — `did list` does not spawn a daemon per row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operations: Option<Vec<String>>,
 }
 
 /// Every `<agent>/<profile>` under the store root that holds an `identity.json`.
@@ -291,12 +301,23 @@ pub fn list_identities() -> Result<Vec<StoredIdentitySummary>> {
             let recorded = fs::read_to_string(&path)
                 .ok()
                 .and_then(|text| serde_json::from_str::<Identity>(&text).ok());
+            let custody = recorded.as_ref().and_then(|identity| identity.custody.clone());
+            let operations = custody.as_ref().map(|custody| {
+                custody
+                    .known_capabilities()
+                    .effective()
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect()
+            });
             out.push(StoredIdentitySummary {
                 agent: agent.clone(),
                 profile,
                 dir,
                 did: recorded.as_ref().map(|identity| identity.did.clone()),
                 handle: recorded.map(|identity| identity.handle),
+                custody,
+                operations,
             });
         }
     }
@@ -342,23 +363,109 @@ pub enum Custody {
 }
 
 impl Custody {
-    /// The error an operation that needs the key **here** has to give.
-    ///
-    /// A key held by `anpio-key` can only be used by handing the daemon a whole HTTP
-    /// request. An origin proof, an MLS device key and a DID document proof are bytes this
-    /// client builds itself, so none of them can be delegated, and the daemon offers no raw
-    /// signing to fall back on. Saying that at the command that needs it is the difference
-    /// between a boundary and a bug report.
-    pub fn refuse(&self, operation: &str) -> anyhow::Error {
+    /// What this custody can delegate, asking the daemon only when the cache is empty and
+    /// a protected config exists.
+    pub fn capabilities(&self) -> Result<Capabilities> {
         match self {
-            Custody::AnpioKey(key) => anyhow::anyhow!(
-                "{operation} needs a signature this client makes itself, and anpio-key signs \
-                 ANP-02 HTTP requests only (it hands out no raw signing). This identity's key \
-                 is held by {}; operations that do work with it: anp show, anp sign, anp login, \
-                 did show, did register, did publish",
-                key.describe()
-            ),
+            Custody::AnpioKey(key) => key.capabilities(),
         }
+    }
+
+    /// What is known without contacting the daemon.
+    pub fn known_capabilities(&self) -> Capabilities {
+        match self {
+            Custody::AnpioKey(key) => key.known_capabilities(),
+        }
+    }
+
+    /// Whether `operation` can be delegated. Negotiates when needed, so this may run one
+    /// `anpio-key data` subprocess; the answer is not cached on disk here.
+    pub fn supports(&self, operation: Operation) -> Result<bool> {
+        Ok(self.capabilities()?.contains(operation))
+    }
+
+    /// Refuse `command` unless the daemon announces `operation`, this build drives it, and
+    /// the identity carries the grant that lets it be used.
+    ///
+    /// Every caller runs this before any network work, which is the point: the refusal is
+    /// a sentence about this identity, not a failure halfway through a send.
+    pub fn require(&self, operation: Operation, command: &str) -> Result<()> {
+        let capabilities = self.capabilities()?;
+        if operation.implemented()
+            && capabilities.contains(operation)
+            && self.has_grant(operation)
+        {
+            return Ok(());
+        }
+        Err(self.denied_with(operation, command, &capabilities))
+    }
+
+    /// The error for an operation this custody cannot perform, without contacting the
+    /// daemon beyond what is already cached.
+    pub fn denied(&self, operation: Operation, command: &str) -> anyhow::Error {
+        self.denied_with(operation, command, &self.known_capabilities())
+    }
+
+    fn has_grant(&self, operation: Operation) -> bool {
+        match self {
+            // The development surface's HTTP signing predates grants; every protected
+            // operation needs one.
+            Custody::AnpioKey(key) => operation == Operation::Http || key.grant.is_some(),
+        }
+    }
+
+    fn denied_with(
+        &self,
+        operation: Operation,
+        command: &str,
+        capabilities: &Capabilities,
+    ) -> anyhow::Error {
+        let Custody::AnpioKey(key) = self;
+        let daemon = key.describe();
+        let offered = capabilities.announced_clause();
+
+        let problem = if !operation.implemented() {
+            if capabilities.contains(operation) {
+                format!(
+                    "{command} needs {}; this build of anpio-cli does not yet delegate {} to \
+                     anpio-key, although {daemon} {offered}, so the missing half is on this client",
+                    operation.purpose(),
+                    operation.daemon_name()
+                )
+            } else {
+                format!(
+                    "{command} needs {}; this build of anpio-cli does not yet delegate {} to \
+                     anpio-key, and {daemon} {offered}",
+                    operation.purpose(),
+                    operation.daemon_name()
+                )
+            }
+        } else if !capabilities.contains(operation) {
+            format!(
+                "{command} needs {}, but {daemon} does not announce {}. {daemon} {offered}",
+                operation.purpose(),
+                operation.daemon_name()
+            )
+        } else if !self.has_grant(operation) {
+            format!(
+                "{command} needs {}. {daemon} announces {}, but this identity records no grant \
+                 for it; ask the administrator to create one, then re-run: anpio-cli \
+                 did attach-anpio-key",
+                operation.purpose(),
+                operation.daemon_name()
+            )
+        } else {
+            format!(
+                "{command} needs {}, which this identity cannot delegate",
+                operation.purpose()
+            )
+        };
+
+        anyhow::anyhow!(
+            "{problem}. Use a self-custodied identity (`anpio-cli did create`) to run it today. \
+             With this identity these still work: anp show, anp sign, anp login, did show, \
+             did register, did publish"
+        )
     }
 }
 
@@ -766,6 +873,79 @@ mod tests {
         // It is exactly the entry the user needs to see in order to fix it.
         assert_eq!(broken.did, None);
         assert_eq!(broken.handle, None);
+    }
+
+    #[test]
+    fn an_anpio_key_identity_written_before_capabilities_still_loads_and_lists_http() {
+        let (_guard, scratch) = isolated("list-custody");
+        let dir = scratch.0.join("alice").join("default");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("identity.json"),
+            r#"{"did":"did:wba:host:user:alice:e1_x","device_id":"alice/default",
+                "agent":"alice","profile":"default","handle":"alice",
+                "did_host":"http://host","created_at":"2026-10-02T00:00:00Z",
+                "keys":{},"did_document":{},
+                "custody":{"kind":"anpio-key","kid":"key-1"}}"#,
+        )
+        .unwrap();
+
+        let found = list_identities().unwrap();
+        assert_eq!(found.len(), 1);
+        let entry = &found[0];
+        assert!(matches!(&entry.custody, Some(Custody::AnpioKey(_))));
+        // The development surface signs HTTP requests and nothing else. Listing does not
+        // start the daemon, so this is the baseline rather than a negotiated answer.
+        assert_eq!(entry.operations.as_deref().unwrap(), ["http".to_string()]);
+    }
+
+    #[test]
+    fn a_self_custodied_row_keeps_its_old_json_shape() {
+        let summary = StoredIdentitySummary {
+            agent: "alice".to_string(),
+            profile: "default".to_string(),
+            dir: PathBuf::from("/tmp/alice/default"),
+            did: Some("did:wba:host:user:alice:e1_x".to_string()),
+            handle: Some("alice".to_string()),
+            custody: None,
+            operations: None,
+        };
+        let value = serde_json::to_value(&summary).unwrap();
+        assert!(value.get("custody").is_none());
+        assert!(value.get("operations").is_none());
+    }
+
+    #[test]
+    fn a_refusal_names_the_missing_operation_and_what_the_daemon_offers() {
+        let custody = Custody::AnpioKey(crate::custody::AnpioKey::default());
+        let err = custody
+            .require(Operation::OriginProof, "msg send")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("msg send"), "{err}");
+        assert!(err.contains("SIGN_ORIGIN_PROOF"), "{err}");
+        assert!(err.contains("only SIGN_HTTP"), "{err}");
+        assert!(err.contains("did create"), "{err}");
+    }
+
+    #[test]
+    fn a_refusal_says_when_the_daemon_has_it_but_this_build_does_not() {
+        let custody = Custody::AnpioKey(crate::custody::AnpioKey {
+            operations: Some(vec!["SIGN_HTTP".to_string(), "SIGN_ORIGIN_PROOF".to_string()]),
+            ..crate::custody::AnpioKey::default()
+        });
+        let err = custody
+            .require(Operation::OriginProof, "msg send")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("does not yet delegate SIGN_ORIGIN_PROOF"), "{err}");
+        assert!(err.contains("missing half is on this client"), "{err}");
+    }
+
+    #[test]
+    fn http_is_available_on_the_development_surface_without_a_grant() {
+        let custody = Custody::AnpioKey(crate::custody::AnpioKey::default());
+        custody.require(Operation::Http, "anp sign").unwrap();
     }
 
     #[test]

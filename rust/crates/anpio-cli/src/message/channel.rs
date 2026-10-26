@@ -17,6 +17,7 @@ use reqwest::Url;
 use serde_json::{Map, Value};
 
 use crate::error::{AnpioError, Result};
+use crate::custody::Operation;
 use crate::identity::Identity;
 
 use super::discovery::{discover_message_service, AnpCapabilities, MessageServiceTarget};
@@ -240,13 +241,12 @@ impl Sender {
     /// layer only ever sees a value that already exists.
     pub fn from_identity(identity: &Identity) -> Result<Self> {
         // Every message this client sends carries an origin proof over bytes it assembles
-        // itself, and `anpio-key` signs whole HTTP requests instead — so an identity whose key
-        // it holds cannot send. Refused here, where the reason is still visible.
+        // itself. Whether the daemon can make one is negotiated, not assumed: the refusal
+        // names the missing operation and what the daemon does announce.
         if let Some(custody) = &identity.custody {
-            return Err(AnpioError::MessageInvalid(format!(
-                "{:#}",
-                custody.refuse("msg send")
-            )));
+            custody
+                .require(Operation::OriginProof, "msg send")
+                .map_err(|err| AnpioError::MessageInvalid(format!("{err:#}")))?;
         }
         let fragment = "key-1";
         let key = identity.keys.get(fragment).ok_or_else(|| {

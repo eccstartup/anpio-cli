@@ -5,17 +5,18 @@
 //! and the daemon rebuilds the signature base itself. That is enough for the surface this
 //! client has in common with it — an ANP-02 login or `anp sign` — and nothing more.
 //!
-//! The boundary is deliberate and is enforced in [`crate::identity::Custody::refuse`]:
-//! message origin proofs, MLS device keys and DID-document proofs are made from bytes this
-//! client assembles, not from a whole HTTP request, so they cannot be delegated to a
-//! daemon whose contract is "sign this request". An identity attached here says so up
-//! front rather than failing halfway through a send.
+//! The boundary is deliberate: message origin proofs, MLS device assertions and DID-document
+//! proofs are made from bytes this client assembles, not from a whole HTTP request. Which of
+//! them a given daemon can make is negotiated rather than assumed — see [`Capabilities`] —
+//! and `Custody::require` refuses the rest before a command starts its network work.
 //!
 //! Everything goes through the `anpio-key` binary: this crate does not link the daemon, and
-//! the daemon's socket protocol is its own (`docs/ADAPTER.md` over there). The binary is
-//! `anpio-key` on `PATH`, or `$ANPIOCLI_ANPIO_KEY`.
+//! the daemon's socket protocol is its own (`docs/ADAPTER.md` over there). The development
+//! surface uses `anpio-key` on `PATH`, or `$ANPIOCLI_ANPIO_KEY`; the protected `data
+//! --config` surface is pinned to the administrator-installed binary and never reads that
+//! override.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -33,7 +34,7 @@ const DEFAULT_BINARY: &str = "anpio-key";
 ///
 /// The DID is not stored here: it is the identity's own, and a second copy could disagree
 /// with `identity.did` — the one name every signature and every document has to agree on.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnpioKey {
     /// `anpio-key --root DIR`, when the daemon does not use its default `~/.anpio-key`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -45,17 +46,237 @@ pub struct AnpioKey {
     /// (binding) key for the DID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kid: Option<String>,
+    /// The administrator-owned protected configuration (`anpio-key data --config`). When
+    /// set, capabilities are negotiated on that protected surface; absent means the
+    /// development socket named by `root` / `socket`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<PathBuf>,
+    /// The grant this identity was issued. Required for every protected operation except
+    /// the development surface's HTTP signing; its presence is not proof that the grant is
+    /// still valid (`GET_GRANT_STATUS` answers that).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant: Option<String>,
+    /// The device name in the DID document (`{device}-sign`, `{device}-agreement`). Needed
+    /// once device assertions are delegated; absent means no device key is bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
+    /// The daemon's last negotiated operation names, cached so an ordinary command does
+    /// not spawn `anpio-key` just to be refused. Unknown names are kept verbatim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operations: Option<Vec<String>>,
+}
+
+/// A proof this client can ask `anpio-key` to produce.
+///
+/// The names are the daemon's (`ADAPTER.md` §11.3), because they are what `GET_CAPABILITIES`
+/// lists; [`Operation::cli_name`] is the short spelling this client prints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Operation {
+    /// RFC 9421 headers over one whole HTTP request (ANP-02 login, `anp sign`).
+    Http,
+    /// ANP origin proof: a digest over `{method, meta, body}` and a signature base over it.
+    OriginProof,
+    /// A fixed-purpose device assertion (MLS KeyPackage binding).
+    Purpose,
+    /// A W3C data-integrity proof over the DID document.
+    DocumentProof,
+    /// A W3C data-integrity proof over another object.
+    ObjectProof,
+    /// An X25519 key agreement.
+    Ecdh,
+}
+
+impl Operation {
+    pub fn daemon_name(self) -> &'static str {
+        match self {
+            Operation::Http => "SIGN_HTTP",
+            Operation::OriginProof => "SIGN_ORIGIN_PROOF",
+            Operation::Purpose => "SIGN_PURPOSE",
+            Operation::DocumentProof => "SIGN_DOCUMENT_PROOF",
+            Operation::ObjectProof => "SIGN_OBJECT_PROOF",
+            Operation::Ecdh => "ECDH",
+        }
+    }
+
+    pub fn cli_name(self) -> &'static str {
+        match self {
+            Operation::Http => "http",
+            Operation::OriginProof => "origin-proof",
+            Operation::Purpose => "purpose",
+            Operation::DocumentProof => "document-proof",
+            Operation::ObjectProof => "object-proof",
+            Operation::Ecdh => "ecdh",
+        }
+    }
+
+    fn from_daemon_name(name: &str) -> Option<Self> {
+        [
+            Operation::Http,
+            Operation::OriginProof,
+            Operation::Purpose,
+            Operation::DocumentProof,
+            Operation::ObjectProof,
+            Operation::Ecdh,
+        ]
+        .into_iter()
+        .find(|operation| operation.daemon_name() == name)
+    }
+
+    /// Whether this build has the calling code that consumes the daemon's result.
+    ///
+    /// A daemon may announce an operation this client cannot drive yet; that is a client
+    /// gap, not a daemon gap, and the two are reported differently. Stage 1 flips this for
+    /// `OriginProof`, stage 2 for `Purpose`, and so on.
+    pub fn implemented(self) -> bool {
+        matches!(self, Operation::Http)
+    }
+
+    pub fn purpose(self) -> &'static str {
+        match self {
+            Operation::Http => "an RFC 9421 signature over one HTTP request",
+            Operation::OriginProof => "an ANP origin proof over bytes this client assembles",
+            Operation::Purpose => "a device assertion for group end-to-end encryption",
+            Operation::DocumentProof => "a W3C proof over the DID document",
+            Operation::ObjectProof => "a W3C proof over another object",
+            Operation::Ecdh => "an X25519 key agreement",
+        }
+    }
+}
+
+/// The six data operations every v2 daemon has today (`ADAPTER.md` §11.2). Used when a
+/// daemon answers `GET_CAPABILITIES` without the `operations` field the capability schema
+/// adds.
+const KNOWN_V2_OPERATIONS: &[&str] = &[
+    "GET_CAPABILITIES",
+    "LIST_AUTHORIZED_KEYS",
+    "GET_GRANT_STATUS",
+    "GET_DOCUMENT",
+    "SIGN_HTTP",
+    "GET_REQUEST_STATUS",
+];
+
+/// Where a capability set came from, which decides how the refusal may phrase it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilitySource {
+    /// Read from `AnpioKey::operations`, written by an earlier negotiation.
+    Cached,
+    /// Just answered by `GET_CAPABILITIES` on the protected surface.
+    Daemon,
+    /// No cache and no protected config: the development socket, which signs HTTP requests.
+    Baseline,
+}
+
+impl CapabilitySource {
+    pub fn name(self) -> &'static str {
+        match self {
+            CapabilitySource::Cached => "cached",
+            CapabilitySource::Daemon => "daemon",
+            CapabilitySource::Baseline => "baseline",
+        }
+    }
+}
+
+/// What this custody can delegate, as negotiated or as cached.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Capabilities {
+    operations: BTreeSet<Operation>,
+    announced: BTreeSet<String>,
+    source: CapabilitySource,
+}
+
+impl Capabilities {
+    fn baseline() -> Self {
+        // The development socket signs whole HTTP requests. The other five v2 names never
+        // reach this client without a protected config, so claiming them here would make
+        // the refusal lie about what the daemon is offering.
+        Self::from_names(&["SIGN_HTTP".to_string()], CapabilitySource::Baseline)
+    }
+
+    fn from_names(names: &[String], source: CapabilitySource) -> Self {
+        let mut operations = BTreeSet::new();
+        let mut announced = BTreeSet::new();
+        for name in names {
+            if let Some(operation) = Operation::from_daemon_name(name) {
+                operations.insert(operation);
+            }
+            announced.insert(name.clone());
+        }
+        Self { operations, announced, source }
+    }
+
+    pub fn contains(&self, operation: Operation) -> bool {
+        self.operations.contains(&operation)
+    }
+
+    pub fn source(&self) -> CapabilitySource {
+        self.source
+    }
+
+    /// The operations this build actually drives, in a stable order.
+    pub fn effective(&self) -> Vec<&'static str> {
+        self.operations
+            .iter()
+            .filter(|operation| operation.implemented())
+            .map(|operation| operation.cli_name())
+            .collect()
+    }
+
+    /// The daemon-announced operations this client knows by name.
+    pub fn announced_operations(&self) -> Vec<&'static str> {
+        self.operations
+            .iter()
+            .map(|operation| operation.cli_name())
+            .collect()
+    }
+
+    /// Everything the daemon announced, including names newer than this client.
+    pub fn announced_names(&self) -> Vec<String> {
+        self.announced.iter().cloned().collect()
+    }
+
+    /// The operations announced but not driven by this build — the honest "why is this
+    /// command still refused?" line.
+    pub fn announced_not_effective(&self) -> Vec<&'static str> {
+        self.operations
+            .iter()
+            .filter(|operation| !operation.implemented())
+            .map(|operation| operation.cli_name())
+            .collect()
+    }
+
+    pub fn announced_clause(&self) -> String {
+        let names = self.announced_names();
+        let list = if names.is_empty() {
+            "nothing".to_string()
+        } else {
+            names.join(", ")
+        };
+        match self.source {
+            CapabilitySource::Baseline => {
+                format!("offers, through its development socket, only {list}")
+            }
+            CapabilitySource::Cached => format!("last announced {list}"),
+            CapabilitySource::Daemon => format!("announces {list}"),
+        }
+    }
 }
 
 impl AnpioKey {
     /// A one-line description for humans and error messages.
     pub fn describe(&self) -> String {
         let mut parts = Vec::new();
+        if let Some(config) = &self.config {
+            parts.push(format!("config {}", config.display()));
+        }
         if let Some(root) = &self.root {
             parts.push(format!("root {}", root.display()));
         }
         if let Some(socket) = &self.socket {
             parts.push(format!("socket {}", socket.display()));
+        }
+        if let Some(device) = &self.device {
+            parts.push(format!("device {device}"));
         }
         let key = match &self.kid {
             Some(kid) => kid.clone(),
@@ -66,6 +287,50 @@ impl AnpioKey {
         } else {
             format!("anpio-key, {key} ({})", parts.join(", "))
         }
+    }
+
+    /// What this daemon can do, asking it only when no cached answer exists.
+    ///
+    /// A cached set is authoritative: if it lacks an operation, this client does not fall
+    /// back to the development surface or to a different operation. A daemon without a
+    /// protected config and without a cache is on the development socket, which is known
+    /// to sign HTTP requests and nothing else — that answer costs no subprocess.
+    pub fn capabilities(&self) -> Result<Capabilities> {
+        if let Some(names) = &self.operations {
+            return Ok(Capabilities::from_names(names, CapabilitySource::Cached));
+        }
+        if self.config.is_some() {
+            return self.query_capabilities();
+        }
+        Ok(Capabilities::baseline())
+    }
+
+    /// What is known without contacting the daemon.
+    pub fn known_capabilities(&self) -> Capabilities {
+        match &self.operations {
+            Some(names) => Capabilities::from_names(names, CapabilitySource::Cached),
+            None => Capabilities::baseline(),
+        }
+    }
+
+    /// Ask the protected surface (`anpio-key data --config`) for its capability set.
+    fn query_capabilities(&self) -> Result<Capabilities> {
+        let config = self
+            .config
+            .as_ref()
+            .expect("query_capabilities is only reached with a protected config");
+        let request = serde_json::to_vec(&serde_json::json!({"operation": "GET_CAPABILITIES"}))?;
+        let path = write_temp_json(&request)?;
+        let args = vec![
+            "data".to_string(),
+            "--config".to_string(),
+            config.display().to_string(),
+            "--file".to_string(),
+            path.display().to_string(),
+        ];
+        let result = self.invoke_protected(&args);
+        let _ = fs::remove_file(&path);
+        parse_capabilities(&result?)
     }
 
     /// The key anpio-key will use when no fragment is named: the document's first
@@ -115,7 +380,7 @@ impl AnpioKey {
         nonce: Option<&str>,
     ) -> Result<BTreeMap<String, String>> {
         let body_file = match body {
-            Some(bytes) => Some(write_body_file(bytes)?),
+            Some(bytes) => Some(write_temp_json(bytes)?),
             None => None,
         };
 
@@ -174,6 +439,31 @@ impl AnpioKey {
             let stderr = stderr.trim();
             bail!(
                 "{binary} {} failed: {}",
+                args.join(" "),
+                if stderr.is_empty() { "no message" } else { stderr }
+            );
+        }
+        Ok(output.stdout)
+    }
+
+    /// Run the protected entry.
+    ///
+    /// Two things are deliberately absent compared with [`Self::invoke`]: `--root` (the
+    /// protected surface refuses it) and `$ANPIOCLI_ANPIO_KEY` (an environment override of
+    /// the binary would be a way around the administrator-pinned config). The config path
+    /// itself is part of the identity record and has no command-level flag.
+    fn invoke_protected(&self, args: &[String]) -> Result<Vec<u8>> {
+        let output = Command::new(DEFAULT_BINARY).args(args).output().map_err(|err| {
+            anyhow!(
+                "could not run {DEFAULT_BINARY}: {err}. The protected entry uses the installed \
+                 binary on PATH; install anpio-key or re-run: anpio-cli did attach-anpio-key"
+            )
+        })?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr = stderr.trim();
+            bail!(
+                "{DEFAULT_BINARY} {} failed: {}",
                 args.join(" "),
                 if stderr.is_empty() { "no message" } else { stderr }
             );
@@ -278,6 +568,49 @@ fn binding_keyid(document: &Value) -> Option<String> {
     }
 }
 
+/// Read a `GET_CAPABILITIES` reply from `anpio-key data`.
+///
+/// The reply is the full v2 `Reply`, not just `data`. A daemon that predates capability
+/// schema 1 answers with its original five fields and no `operations`; that is not an
+/// error, it is the six known data operations.
+fn parse_capabilities(bytes: &[u8]) -> Result<Capabilities> {
+    let reply: Value = serde_json::from_slice(bytes)
+        .context("anpio-key data returned a capability reply that is not JSON")?;
+    let code = reply.get("code").and_then(Value::as_str).unwrap_or("missing code");
+    if code != "OK" {
+        bail!("anpio-key answered GET_CAPABILITIES with {code}");
+    }
+    let data = reply.get("data").cloned().unwrap_or(Value::Null);
+    match data.get("operations") {
+        Some(Value::Array(items)) => {
+            let mut names = Vec::with_capacity(items.len());
+            for item in items {
+                names.push(
+                    item.as_str()
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "anpio-key returned a capability operation that is not a string: \
+                                 {item}"
+                            )
+                        })?
+                        .to_string(),
+                );
+            }
+            Ok(Capabilities::from_names(&names, CapabilitySource::Daemon))
+        }
+        Some(other) => bail!(
+            "anpio-key returned capabilities.operations that is not an array: {other}"
+        ),
+        None => Ok(Capabilities::from_names(
+            &KNOWN_V2_OPERATIONS
+                .iter()
+                .map(|name| name.to_string())
+                .collect::<Vec<_>>(),
+            CapabilitySource::Daemon,
+        )),
+    }
+}
+
 /// The daemon's header format: one `Name: value` per line, values cannot contain
 /// newlines. Parsed strictly — a malformed line means the daemon and this client
 /// disagree, and picking a header out of it would fail later at the peer.
@@ -302,12 +635,13 @@ fn parse_signed_headers(bytes: &[u8], did: &str) -> Result<BTreeMap<String, Stri
     Ok(headers)
 }
 
-/// Write the request body where the daemon can read it, and nowhere else.
+/// Write a JSON request where the daemon can read it, and nowhere else.
 ///
-/// The body of an ANP-02 request is public — a DID, a document, a nonce — but the file is
-/// still written `0600` and removed as soon as the daemon has answered: a predictable
-/// path that outlives the call is a path another process can plant something at.
-fn write_body_file(body: &[u8]) -> Result<PathBuf> {
+/// The body of an ANP-02 request is public — a DID, a document, a nonce — and a capability
+/// request is no secret either, but the file is still written `0600` and removed as soon as
+/// the daemon has answered: a predictable path that outlives the call is a path another
+/// process can plant something at.
+fn write_temp_json(body: &[u8]) -> Result<PathBuf> {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|value| value.as_nanos())
@@ -388,7 +722,7 @@ mod tests {
                 {"id": "did:wba:h:user:a:e1_x#recovery-1"}
             ]
         });
-        let key = AnpioKey { root: None, socket: None, kid: None };
+        let key = AnpioKey::default();
         assert_eq!(
             key.resolved_keyid(&document, "did:wba:h:user:a:e1_x"),
             "did:wba:h:user:a:e1_x#key-1"
@@ -409,5 +743,85 @@ mod tests {
             .to_string();
         assert!(err.contains("Signature"), "{err}");
         assert!(parse_signed_headers(b"no colon here\n", "did:wba:h:u:a:e1_x").is_err());
+    }
+
+    #[test]
+    fn an_old_anpio_key_record_loads_without_the_capability_fields() {
+        let key: AnpioKey =
+            serde_json::from_str(r#"{"root":"/srv/anpio-key","kid":"key-1"}"#).unwrap();
+        assert_eq!(key.config, None);
+        assert_eq!(key.grant, None);
+        assert_eq!(key.device, None);
+        assert_eq!(key.operations, None);
+        assert!(!key.describe().contains("config"));
+    }
+
+    #[test]
+    fn the_development_surface_offers_http_only_without_a_subprocess() {
+        let key = AnpioKey::default();
+        let capabilities = key.capabilities().unwrap();
+        assert_eq!(capabilities.source(), CapabilitySource::Baseline);
+        assert!(capabilities.contains(Operation::Http));
+        assert!(!capabilities.contains(Operation::OriginProof));
+        assert_eq!(capabilities.effective(), ["http"]);
+        assert!(capabilities.announced_not_effective().is_empty());
+    }
+
+    #[test]
+    fn a_cached_capability_set_is_authoritative() {
+        let key = AnpioKey {
+            operations: Some(vec![
+                "SIGN_HTTP".to_string(),
+                "SIGN_ORIGIN_PROOF".to_string(),
+                "SIGN_FROM_THE_FUTURE".to_string(),
+            ]),
+            ..AnpioKey::default()
+        };
+        let capabilities = key.capabilities().unwrap();
+        assert_eq!(capabilities.source(), CapabilitySource::Cached);
+        assert!(capabilities.contains(Operation::OriginProof));
+        // Announced by the daemon, not driven by this build yet.
+        assert_eq!(capabilities.effective(), ["http"]);
+        assert_eq!(
+            capabilities.announced_not_effective(),
+            ["origin-proof"]
+        );
+        assert_eq!(
+            capabilities.announced_names(),
+            ["SIGN_FROM_THE_FUTURE", "SIGN_HTTP", "SIGN_ORIGIN_PROOF"]
+        );
+    }
+
+    #[test]
+    fn a_capability_reply_is_read_from_the_whole_reply() {
+        let capabilities = parse_capabilities(
+            br#"{"version":2,"code":"OK","signing_available":true,
+                 "protected_supported":true,
+                 "data":{"operations":["SIGN_HTTP","SIGN_ORIGIN_PROOF"]}}"#,
+        )
+        .unwrap();
+        assert_eq!(capabilities.source(), CapabilitySource::Daemon);
+        assert!(capabilities.contains(Operation::OriginProof));
+
+        let err = parse_capabilities(
+            br#"{"version":2,"code":"RESOURCE_BUSY","signing_available":false,
+                 "protected_supported":true}"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("RESOURCE_BUSY"), "{err}");
+    }
+
+    #[test]
+    fn a_daemon_without_the_capability_field_gets_the_six_known_operations() {
+        let capabilities = parse_capabilities(
+            br#"{"version":2,"code":"OK","signing_available":true,
+                 "protected_supported":true,"data":{"protocol_version":2}}"#,
+        )
+        .unwrap();
+        assert_eq!(capabilities.source(), CapabilitySource::Daemon);
+        assert!(capabilities.contains(Operation::Http));
+        assert!(!capabilities.contains(Operation::OriginProof));
+        assert_eq!(capabilities.announced_names().len(), KNOWN_V2_OPERATIONS.len());
     }
 }
