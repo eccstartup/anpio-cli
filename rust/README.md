@@ -331,8 +331,11 @@ grant 会在 attach 时就拒，而不是等到第一次发送），并缓存协
 `remove` 的 KeyPackage 绑定与 `send` 的设备 origin proof 都由守护进程按
 `SIGN_PURPOSE(purpose=device_assertion)` 签。设备名必须是文档里 `{device}-sign` 那一条
 （给整条 `did:wba:…#phone-1-sign` 也认），attach 时按文档核对，找不到就拒、并列出文档实际
-发布的片段——不会用 `{agent}/{profile}` 猜一个。签名回来后客户端拿 daemon 给的
-`public_multibase` 与文档逐字节比对，再让 `anp` crate 自己验证签名，两关都过才用。
+发布的片段——不会用 `{agent}/{profile}` 猜一个。选定后它就是这个身份的 `device_id`
+（`store` 的 MLS 作用域、`meta.sender_device_id`、KeyPackage 的 `owner_device_id` 都用文档
+的设备名，P6 要求这三处一致）。KeyPackage 绑定签回来时，客户端先拿 daemon 给的
+`public_multibase` 与文档逐字节比对，再让 `anp` crate 验签；`send` 的 origin proof 由
+crate 用文档里的公钥验签，签错钥同样过不了。
 不给 `--device`（或守护进程没开 `device_assertion`）时，`group e2ee` 照旧拒绝并说清楚缺哪一样。
 MLS 自己的 ratchet 钥仍在本地 store：那是会话状态，不是身份钥。
 

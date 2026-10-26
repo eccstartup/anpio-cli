@@ -192,10 +192,14 @@ CLI 的 `device_id` 是本地槽位（`agent/profile`），DID 文档里的设�
   `device_signing` / `key_agreement` 键；
 - 找不到就拒 `group e2ee`，不要猜一个 `{agent}/{profile}` 拼出来的名字。
 
-> **状态（2026-10-26）：已落地。** `--device` 存进 `Custody::AnpioKey.device`；attach 时在
-> 文档里找 `{did}#{device}-sign`，找不到就拒绝并列出文档实际发布的片段（`--device` 也接受
-> 整串 `did#dev-1-sign`，按文档决定取哪个名字，不靠猜）。签名的设备钥以文档里的
-> `publicKeyMultibase` 为准，daemon 返回的 `public_multibase` 必须与它逐字节相等。
+> **状态（2026-10-26）：已落地。** `--device` 存进 `Custody::AnpioKey.device`，并**成为这个
+> 身份的 `device_id`**——P6 要求 `owner_device_id` = `did_wba_binding.device_id`（其
+> `verification_method` 是该设备的 `signing_key_id`）、wire 上的 `meta.sender_device_id` =
+> KeyPackage 的 `owner_device_id`、MLS store 的作用域也用同一个设备名，本地 `agent/profile`
+> 槽位只是目录名，不是文档认识的设备名。attach 时在文档里找 `{did}#{device}-sign`，找不到就
+> 拒绝并列出文档实际发布的片段（`--device` 也接受整串 `did#dev-1-sign`，按文档决定取哪个
+> 名字，不靠猜）。KeyPackage 绑定签名回来后，daemon 返回的 `public_multibase` 必须与文档里
+> 那条逐字节相等；`send` 的 origin proof 由 crate 用文档公钥验签，钥不对同样签不过。
 > `e2ee_key_id`（`{device}-agreement`）暂不映射：本仓库没有 secure-direct 客户端（§5 阶段 3
 > 是非目标），ECDH 的适配层只为将来的调用者备着。
 

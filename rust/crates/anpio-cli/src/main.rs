@@ -1801,7 +1801,17 @@ fn cmd_did_attach_anpio_key(args: AttachArgs) -> anyhow::Result<()> {
 
     let identity = Identity {
         did: did.to_string(),
-        device_id: format!("{}/{}", location.agent, location.profile),
+        // The document device `--device` selected, not the local `agent/profile` slot: P6
+        // requires every field that carries a device id to name a device the DID document
+        // publishes — `owner_device_id` must equal `did_wba_binding.device_id` (whose
+        // `verification_method` is that device's `signing_key_id`), and the wire's
+        // `meta.sender_device_id` must equal the KeyPackage's `owner_device_id`. The slot
+        // stays the directory name and the `owner_identity_id` the MLS store is scoped by;
+        // it is not a device name the document would know.
+        device_id: key
+            .device
+            .clone()
+            .unwrap_or_else(|| format!("{}/{}", location.agent, location.profile)),
         agent: location.agent.clone(),
         profile: location.profile.clone(),
         handle: parts.handle.clone(),
