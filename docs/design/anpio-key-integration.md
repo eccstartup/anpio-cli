@@ -101,7 +101,7 @@ ANP 的每一种证明都要落到一个具体操作上；下表是这个仓库�
 | 证明点 | 代码 | 签的字节 | 键 | 今天 | 目标操作 / 阶段 |
 | --- | --- | --- | --- | --- | --- |
 | ANP-02 登录、注册 | `anp/request.rs` `Signer::sign_headers` | 整条 HTTP 请求（RFC 9421） | `hot` | 可用（开发 socket） | `SIGN_HTTP`（v2 入口） |
-| 每次 `msg` / `contacts` / `group` 调用 | [channel.rs:371](../../rust/crates/anpio-cli/src/message/channel.rs#L371) `sign_request` | ANP origin proof：`JCS({method, meta, body})` 的 digest，签名基覆盖 `@method` / `@target-uri` / `content-digest`，target 是 `anp:{agent\|group\|service}:{did}` | `key-1` → `hot` | 拒 | `SIGN_ORIGIN_PROOF`，**P1** |
+| 每次 `msg` / `contacts` / `group` 调用 | [channel.rs:371](../../rust/crates/anpio-cli/src/message/channel.rs#L371) `sign_request` | ANP origin proof：`JCS({method, meta, body})` 的 digest，签名基覆盖 `@method` / `@target-uri` / `content-digest`，target 是 `anp://{kind}/{percent-encoded did}` | `key-1` → `hot` | 拒 | `SIGN_ORIGIN_PROOF`，**P1** |
 | `msg listen` 握手 | `message/listen.rs`（复用 `sign_request`） | 同上 | `hot` | 拒 | 同上，**P1** |
 | `group e2ee send` 的 origin proof | [main.rs:4901](../../rust/crates/anpio-cli/src/main.rs#L4901) `signing_as_device` | 同上 | `{device}-sign` → `device_signing` | 拒 | `SIGN_ORIGIN_PROOF`（需角色扩展）或 `SIGN_PURPOSE` 退路，**P2** |
 | KeyPackage 的 `did_wba_binding` | `mls.rs` `generate_key_package`；anp crate 有 `prepare_key_package_v2` / `complete_key_package_v2` 接缝 | `prepared.signing_input()` | `{device}-sign` | 拒 | `SIGN_PURPOSE`（purpose 绑设备断言），**P2** |
@@ -127,12 +127,16 @@ ANP origin proof 真正要签的是：
 ```text
 content-digest = sha-256(JCS({method, meta, body}))
 base           = "@method" · "@target-uri" · "content-digest"
-@target-uri    = anp:{agent|group|service}:{did}     // 由 meta.target 推导
+@target-uri    = anp://{kind}/{percent-encoded did}   // 由 meta.target 推导
 ```
+
+`@target-uri` 由 `anp::proof::build_logical_target_uri` 生成：DID 按 RFC 3986 编码集
+（控制字符、空格与 `!"#$%&'()*+,/:;<=>?@[\]^`{|}`）百分号编码，所以 `did:wba:…` 里的
+冒号是 `%3A`。这串字节同时也是 anpio-key 侧 origin 策略的匹配串（见 §5 阶段 1）。
 
 `meta` 在这个形状里没有位置。两种收口方式：
 
-- **推荐**：把 `origin` 改成 `{method, meta, body, nonce?}`，由 daemon 自己做 JCS 与
+- **推荐（已定稿，见 §9）**：把 `origin` 改成 `{method, meta, body, nonce?}`，由 daemon 自己做 JCS 与
   `@target-uri` 推导。调用方只给事实，签名基仍由 daemon 拼，和 §11.3 的原则一致。
 - 退路：保留 `{method,url,headers,body,nonce}`，规定 `url` 是 logical target、
   `body` 是**已规范化的 SRO 字节**。签名结果相同，但 JCS 由客户端做，边界弱一档；
@@ -252,6 +256,13 @@ session grant、策略 `schema_version: 2`、每条新签名路的独立开关�
 >   `--operation-id` 复用业务幂等键（operation_id / message_id），信封 `id` 仍是新的——
 >   对守护进程而言那就是第二次签名，占第二次配额，这是诚实的记账。等哪天出现自动重试，
 >   日志才该出现；那时的触发点是 `REQUEST_ID_CONFLICT`（ADAPTER §8），不是超时。
+> - **origin 策略能收到单个 DID，不只是类别。** anpio-key 的策略 content 是
+>   `{origin, methods, paths, body}`：`origin` 取三个 `anp://{kind}` 之一，`paths`
+>   放 `@target-uri` 里 `origin` 之后的那一段（`/did%3Awba%3A…`），整项写 `"*"`
+>   表示该类别下任意 DID，但只能单独出现。路径在发布策略时按「解码再交给 anp 的
+>   builder 重编码」校验，非规范编码（裸 DID、小写 `%3a`）直接拒绝——策略要么与签名基
+>   逐字节一致，要么发布不出去。本仓库不需要为此改动：`sign_request` 照旧把
+>   `{method, meta, body}` 交给 daemon。
 > - 端到端（真服务、两个托管身份、私聊 + 群聊 + contacts）与 golden 对照尚未跑；
 >   anpio-key 侧 `SIGN_ORIGIN_PROOF` 的线（commit `b067353`）已落地，但还没有发布版。
 
@@ -363,6 +374,9 @@ config + grant，才算可用；任何一个不满足，拒绝都在联网之前
 ## 9. 开放问题
 
 1. §4.1 的 `SIGN_ORIGIN_PROOF` 形状选哪种？这决定 P1 能否在不弱化边界的前提下开始。
+   → **已定稿**（2026-10-26）：走「推荐」那条，daemon 只收 `{method, meta, body}`，
+   策略侧是 `{origin, methods, paths, body}`，`paths` 可收窄到单个 DID
+   （anpio-key ADAPTER §11.5）。
 2. §4.2 的角色表是否放宽到 `device_signing`？不放宽就用 `SIGN_PURPOSE` 退路，
    并在审计里把这个差异标出来。
 3. session grant 的默认寿命/次数由谁定：管理员预置的模板，还是 CLI 在 attach 时请求？
