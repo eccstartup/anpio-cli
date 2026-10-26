@@ -17,12 +17,12 @@
 use std::path::PathBuf;
 
 use anp::group_e2ee::operations::v2::{
-    abort_commit_v2, add_member_prepare_v2, create_group_prepare_v2, decrypt_received_v2,
-    encrypt_v2, finalize_commit_v2, generate_key_package_v2, process_notice_v2,
-    remove_member_prepare_v2, V2AddMemberInput, V2CreateGroupInput, V2DecryptInput,
-    V2DecryptOutput, V2DidDocument, V2EncryptInput, V2FinalizeInput, V2GenerateKeyPackageInput,
-    V2PreparedAdd, V2PreparedCreate, V2PreparedRemove, V2ProcessNoticeInput,
-    V2ProcessNoticeOutput, V2RemoveMemberInput,
+    abort_commit_v2, add_member_prepare_v2, complete_key_package_v2, create_group_prepare_v2,
+    decrypt_received_v2, encrypt_v2, finalize_commit_v2, generate_key_package_v2,
+    prepare_key_package_v2, process_notice_v2, remove_member_prepare_v2, V2AddMemberInput,
+    V2CreateGroupInput, V2DecryptInput, V2DecryptOutput, V2DidDocument, V2EncryptInput,
+    V2FinalizeInput, V2GenerateKeyPackageInput, V2PreparedAdd, V2PreparedCreate, V2PreparedRemove,
+    V2ProcessNoticeInput, V2ProcessNoticeOutput, V2RemoveMemberInput,
 };
 use anp::group_e2ee::storage::ImCoreSqliteGroupMlsStore;
 use anp::group_e2ee::v2_models::{
@@ -35,7 +35,7 @@ use anp::PrivateKeyMaterial;
 use chrono::{Duration, Utc};
 use serde_json::Value;
 
-use crate::custody::Operation;
+use crate::custody::{Operation, DEVICE_ASSERTION_PURPOSE};
 use crate::error::{AnpioError, Result};
 use crate::identity::{Identity, IdentityLocation};
 use crate::message::{document_in_crate_form, uuid_v4};
@@ -80,6 +80,35 @@ pub fn store_for(
     .map_err(|err| AnpioError::MessageInvalid(format!("opening the MLS store: {err}")))
 }
 
+/// Where this device's signing key lives.
+///
+/// The two arms are the two custody models, not two behaviours: the KeyPackage's binding
+/// must be signed by the key the document publishes as this device's `signing_key_id`, and
+/// only the holder of that key differs.
+pub enum DeviceSigner {
+    /// A key this process read from the identity store (`did create`).
+    Local {
+        keyid: String,
+        key: PrivateKeyMaterial,
+    },
+    /// A key `anpio-key` holds. Only the public half is here; the signature is asked for
+    /// over `SIGN_PURPOSE` and the returned key is checked against the document.
+    Daemon {
+        keyid: String,
+        key: crate::custody::AnpioKey,
+        public: anp::PublicKeyMaterial,
+        public_multibase: String,
+    },
+}
+
+impl DeviceSigner {
+    pub fn keyid(&self) -> &str {
+        match self {
+            DeviceSigner::Local { keyid, .. } | DeviceSigner::Daemon { keyid, .. } => keyid,
+        }
+    }
+}
+
 /// This device's signing key, and the verification method id it is published as.
 ///
 /// P6 §6.4 item 3 wants the KeyPackage's `did_wba_binding.verification_method` to be *this
@@ -89,16 +118,43 @@ pub fn store_for(
 /// half. It is Ed25519 by construction ([`crate::identity::did`]), which is the algorithm the
 /// MLS binding verifies with.
 ///
-/// `generate_key_package_v2` is the one operation in this module that takes a private key at
-/// all — every other MLS operation keeps its keys inside the store (client-mls.md §5 #4).
-pub fn device_signing_key(identity: &Identity) -> Result<(String, PrivateKeyMaterial)> {
-    // The MLS device key is minted by `did create` and lives in this store; an `anpio-key`
-    // identity never has one. Delegating the device assertion is a `SIGN_PURPOSE` operation
-    // (stage 2), so refuse through the capability table rather than a missing-key error.
+/// Under `anpio-key` no private bytes exist here. The device name is the administrator's
+/// choice (`--device` at attach), the public key comes from the DID document, and the
+/// signature comes back through `SIGN_PURPOSE`. Nothing is guessed: an identity without a
+/// bound device name is refused rather than mapped by local slot.
+pub fn device_signer(identity: &Identity) -> Result<DeviceSigner> {
     if let Some(custody) = &identity.custody {
         custody
             .require(Operation::Purpose, "group e2ee")
             .map_err(|err| AnpioError::MessageInvalid(format!("{err:#}")))?;
+        let crate::identity::Custody::AnpioKey(key) = custody;
+        let device = key.device.as_deref().ok_or_else(|| {
+            AnpioError::MessageInvalid(format!(
+                "{} has no anpio-key device binding, so group E2EE has no key to sign with; \
+                 re-run: anpio-cli did attach-anpio-key --device <device-id>",
+                identity.did
+            ))
+        })?;
+        if custody
+            .capabilities()
+            .map_err(|err| AnpioError::MessageInvalid(format!("{err:#}")))?
+            .supports_signing_purpose(DEVICE_ASSERTION_PURPOSE)
+            == Some(false)
+        {
+            return Err(AnpioError::MessageInvalid(format!(
+                "anpio-key does not enable SIGN_PURPOSE for {DEVICE_ASSERTION_PURPOSE}, so it \
+                 cannot sign the KeyPackage binding; ask the anpio-key administrator to turn \
+                 that purpose on"
+            )));
+        }
+        let (keyid, public_multibase, public) =
+            device_signing_method(&identity.did_document, &identity.did, device)?;
+        return Ok(DeviceSigner::Daemon {
+            keyid,
+            key: key.clone(),
+            public,
+            public_multibase,
+        });
     }
     let fragment = format!("{}-sign", identity.device_id);
     let key = identity.keys.get(&fragment).ok_or_else(|| {
@@ -110,7 +166,77 @@ pub fn device_signing_key(identity: &Identity) -> Result<(String, PrivateKeyMate
     let material = PrivateKeyMaterial::from_pem(&key.private_key_pem).map_err(|err| {
         AnpioError::MessageInvalid(format!("cannot read {fragment} from the store: {err}"))
     })?;
-    Ok((format!("{}#{fragment}", identity.did), material))
+    Ok(DeviceSigner::Local {
+        keyid: format!("{}#{fragment}", identity.did),
+        key: material,
+    })
+}
+
+/// The document's `{did}#{device}-sign` entry, as its id, multibase and parsed key.
+///
+/// The multibase string is returned beside the parsed key because the daemon's reply carries
+/// its own `public_multibase`; comparing the two strings is the check that lets this client
+/// use a signature it did not make.
+fn device_signing_method(
+    document: &Value,
+    did: &str,
+    device: &str,
+) -> Result<(String, String, anp::PublicKeyMaterial)> {
+    let keyid = format!("{did}#{device}-sign");
+    let method = document
+        .get("verificationMethod")
+        .and_then(Value::as_array)
+        .and_then(|methods| {
+            methods
+                .iter()
+                .find(|method| method.get("id").and_then(Value::as_str) == Some(keyid.as_str()))
+        })
+        .ok_or_else(|| {
+            AnpioError::MessageInvalid(format!(
+                "{did} publishes no {device}-sign entry; re-run: anpio-cli \
+                 did attach-anpio-key --device <device-id> with a name the document knows"
+            ))
+        })?;
+    let public_multibase = method
+        .get("publicKeyMultibase")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AnpioError::MessageInvalid(format!("{keyid} has no publicKeyMultibase")))?
+        .to_string();
+    let bytes = public_multibase
+        .strip_prefix('z')
+        .and_then(|text| bs58::decode(text).into_vec().ok())
+        .ok_or_else(|| {
+            AnpioError::MessageInvalid(format!(
+                "{keyid} has a publicKeyMultibase this client cannot decode"
+            ))
+        })?;
+    let public = match bytes.as_slice() {
+        // `0xed01`: Ed25519 in multicodec, the encoding `identity::did::multibase` writes.
+        [0xed, 0x01, key @ ..] if key.len() == 32 => {
+            let key: [u8; 32] = key
+                .try_into()
+                .expect("the slice length is checked by the pattern");
+            anp::PublicKeyMaterial::Ed25519(ed25519_dalek::VerifyingKey::from_bytes(&key).map_err(
+                |err| {
+                    AnpioError::MessageInvalid(format!(
+                        "{keyid} holds an Ed25519 key this client cannot read: {err}"
+                    ))
+                },
+            )?)
+        }
+        [0xec, 0x01, ..] => {
+            return Err(AnpioError::MessageInvalid(format!(
+                "{keyid} is the device's agreement key, not its signing key"
+            )))
+        }
+        _ => {
+            return Err(AnpioError::MessageInvalid(format!(
+                "{keyid} is not an Ed25519 Multikey, which is the algorithm the MLS binding \
+                 verifies with"
+            )))
+        }
+    };
+    Ok((keyid, public_multibase, public))
 }
 
 /// One KeyPackage for this device, ready to publish (P6 §7.3).
@@ -128,7 +254,7 @@ pub fn generate_key_package(
     valid_for: Duration,
 ) -> Result<V2GroupKeyPackage> {
     let store = store_for(location, identity)?;
-    let (verification_method, device_key) = device_signing_key(identity)?;
+    let signer = device_signer(identity)?;
     // The crate verifies the issuer's binding itself, with no fallback for the proof
     // encoding its own `z…` branch assumes ([`crate::message::document_in_crate_form`]). So
     // the document goes in already in the form that check accepts; the alternative is a
@@ -140,7 +266,7 @@ pub fn generate_key_package(
     let input = V2GenerateKeyPackageInput {
         owner_did: identity.did.clone(),
         owner_device_id: identity.device_id.clone(),
-        verification_method,
+        verification_method: signer.keyid().to_string(),
         key_package_id: key_package_id.to_string(),
         issued_at: now.to_rfc3339(),
         expires_at: (now + valid_for).to_rfc3339(),
@@ -154,8 +280,48 @@ pub fn generate_key_package(
         request_id: uuid_v4(),
     };
 
-    generate_key_package_v2(&store, input, &document, &device_key)
-        .map_err(|err| AnpioError::MessageInvalid(format!("generating a KeyPackage: {err}")))
+    match signer {
+        DeviceSigner::Local { key, .. } => generate_key_package_v2(&store, input, &document, &key)
+            .map_err(|err| AnpioError::MessageInvalid(format!("generating a KeyPackage: {err}"))),
+        DeviceSigner::Daemon {
+            key: custody,
+            public,
+            public_multibase,
+            ..
+        } => {
+            // The crate builds the binding and hands back the exact bytes to sign; the
+            // daemon signs them under `device_assertion`, which (unlike
+            // `application_assertion`) prefixes nothing — so the signature is over these
+            // bytes, and the crate's own completion verifies it against the document's key.
+            let prepared =
+                prepare_key_package_v2(&store, input, &document, &public).map_err(|err| {
+                    AnpioError::MessageInvalid(format!("preparing a KeyPackage: {err}"))
+                })?;
+            let signed = custody
+                .sign_purpose(
+                    &identity.did,
+                    &uuid_v4(),
+                    DEVICE_ASSERTION_PURPOSE,
+                    None,
+                    prepared.signing_input(),
+                )
+                .map_err(|err| {
+                    AnpioError::MessageInvalid(format!(
+                        "signing the KeyPackage binding with anpio-key: {err:#}"
+                    ))
+                })?;
+            if signed.public_multibase != public_multibase {
+                return Err(AnpioError::MessageInvalid(format!(
+                    "anpio-key signed the KeyPackage binding with {}, but {} publishes {}; \
+                     refusing a binding the document does not vouch for",
+                    signed.public_multibase, identity.did, public_multibase
+                )));
+            }
+            complete_key_package_v2(&store, prepared, &signed.signature).map_err(|err| {
+                AnpioError::MessageInvalid(format!("completing a KeyPackage: {err}"))
+            })
+        }
+    }
 }
 
 /// A fresh `key_package_id` for a publish that was not given one.
@@ -773,11 +939,67 @@ mod tests {
     #[test]
     fn the_binding_key_is_the_devices_signing_key() {
         let identity = identity("test/default");
-        let err = device_signing_key(&identity).unwrap_err();
+        // No `Debug` on the signer: it must not be able to print key material.
+        let err = match device_signer(&identity) {
+            Ok(_) => panic!("an identity with no device key must be refused"),
+            Err(err) => err,
+        };
         assert!(
             err.to_string().contains("test/default-sign"),
             "an identity with no device key must name the fragment it is missing: {err}"
         );
+    }
+
+    /// The daemon signs with whatever key it holds; the only thing that makes the reply
+    /// usable is that the document publishes that key for *this device*. So the resolver
+    /// reads the device's entry, not the first key in the document.
+    #[test]
+    fn the_device_signing_method_is_the_ed25519_entry_the_document_publishes() {
+        let did = "did:wba:example.com:user:test:e1_abc";
+        let signing = PrivateKeyMaterial::Ed25519(ed25519_dalek::SigningKey::generate(
+            &mut rand::rngs::OsRng,
+        ));
+        let anp::PublicKeyMaterial::Ed25519(verifying) = signing.public_key() else {
+            panic!("a device signing key is Ed25519 by construction");
+        };
+        let multibase = format!(
+            "z{}",
+            bs58::encode(
+                [0xed, 0x01]
+                    .iter()
+                    .copied()
+                    .chain(verifying.to_bytes())
+                    .collect::<Vec<_>>()
+            )
+            .into_string()
+        );
+        let document = serde_json::json!({
+            "verificationMethod": [
+                {"id": format!("{did}#key-1"), "publicKeyMultibase": multibase},
+                {"id": format!("{did}#dev-1-sign"), "publicKeyMultibase": multibase},
+                {"id": format!("{did}#dev-1-agreement"),
+                 "publicKeyMultibase": format!("z{}", bs58::encode([0xec, 0x01].iter().copied()
+                     .chain([7u8; 32]).collect::<Vec<_>>()).into_string())},
+            ]
+        });
+        let (keyid, published, public) = device_signing_method(&document, did, "dev-1").unwrap();
+        assert_eq!(keyid, format!("{did}#dev-1-sign"));
+        assert_eq!(published, multibase);
+        assert!(matches!(public, anp::PublicKeyMaterial::Ed25519(_)));
+    }
+
+    #[test]
+    fn an_agreement_key_is_never_taken_for_the_signing_key() {
+        let did = "did:wba:example.com:user:test:e1_abc";
+        let document = serde_json::json!({
+            "verificationMethod": [{
+                "id": format!("{did}#dev-1-sign"),
+                "publicKeyMultibase": format!("z{}", bs58::encode([0xec, 0x01].iter().copied()
+                    .chain([7u8; 32]).collect::<Vec<_>>()).into_string()),
+            }]
+        });
+        let err = device_signing_method(&document, did, "dev-1").unwrap_err();
+        assert!(err.to_string().contains("agreement key"), "{err}");
     }
 
     /// `--text` is §7.4's `text`, and the default content type is the one that goes with it.

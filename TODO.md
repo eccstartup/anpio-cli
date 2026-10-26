@@ -101,16 +101,18 @@ origin proof」都没跑过——卡在 anpio-key 还没有发布版。见
 
 ### 3.4 anpio-key 适配：阶段 2 / 4 / 5
 
-- **阶段 2（P2）**：daemon 侧的 `SIGN_PURPOSE` 已落地，客户端还**拒**托管身份上的
-  `group e2ee`（`mls.rs:94` 的 `device_signing_key` 先查 `Operation::Purpose`）。要做的是
-  `group e2ee publish` / `send` / `create` / `add` / `remove` 走 `SIGN_PURPOSE` + 文档设备键
-  映射，并在完成后核对返回的 `public_multibase`。验收：store 里不再有 `{device}-sign` 的私钥
-  字节。
+- **阶段 2（P2）**：客户端侧已落地（2026-10-26）。`group e2ee` 的 KeyPackage 绑定与
+  `send` 的设备 origin proof 都改为 `SIGN_PURPOSE(device_assertion)` 由 daemon 签，
+  `--device` 映射文档里的设备名并核对 `public_multibase`；custody 的六条数据面操作都有
+  适配层，拒绝按形态分类。**还差**：anpio-key 的 v2 面没有发布版，所以
+  `publish → get-key-package → create → add → send` 全链路没有真守护进程跑过。
 - **阶段 4（P4）**：attach 接受并映射四类键（`key-1` / `hot` / `{device}-sign` /
   `{device}-agreement`），等 daemon 的管理面导入。验收：换台机器只用 24 词助记词恢复，
   登录 / 发消息 / 建会话三条路都通。
 - **阶段 5（P5）**：`did update` 在托管身份上的**拒绝已经落地**并点名管理面
   （`main.rs:2618` 起）；等 anpio-key 管理面出 successorship 之后再接真实迁移。
+- **`SIGN_HTTP` 搬进受保护面**：受保护面只收 `https://` + DNS 主机名，本机的
+  `http://localhost` 登录没有条件；有 https 的 DID 主机可验收时再搬（见设计文档 §4.3）。
 
 守护进程侧仍然开着的账在 anpio-key 仓库的 `TODO.md` 里（P1/P2/P3 收尾、P4、P5、macOS SE 正式
 分发、物理 TPM、无人值守恢复、challenge 格式），不在这里重复。

@@ -101,10 +101,10 @@ ANP 的每一种证明都要落到一个具体操作上；下表是这个仓库�
 | 证明点 | 代码 | 签的字节 | 键 | 今天 | 目标操作 / 阶段 |
 | --- | --- | --- | --- | --- | --- |
 | ANP-02 登录、注册 | `anp/request.rs` `Signer::sign_headers` | 整条 HTTP 请求（RFC 9421） | `hot` | 可用（开发 socket） | `SIGN_HTTP`（v2 入口） |
-| 每次 `msg` / `contacts` / `group` 调用 | [channel.rs:371](../../rust/crates/anpio-cli/src/message/channel.rs#L371) `sign_request` | ANP origin proof：`JCS({method, meta, body})` 的 digest，签名基覆盖 `@method` / `@target-uri` / `content-digest`，target 是 `anp://{kind}/{percent-encoded did}` | `key-1` → `hot` | 拒 | `SIGN_ORIGIN_PROOF`，**P1** |
-| `msg listen` 握手 | `message/listen.rs`（复用 `sign_request`） | 同上 | `hot` | 拒 | 同上，**P1** |
-| `group e2ee send` 的 origin proof | [main.rs:4901](../../rust/crates/anpio-cli/src/main.rs#L4901) `signing_as_device` | 同上 | `{device}-sign` → `device_signing` | 拒 | `SIGN_ORIGIN_PROOF`（需角色扩展）或 `SIGN_PURPOSE` 退路，**P2** |
-| KeyPackage 的 `did_wba_binding` | `mls.rs` `generate_key_package`；anp crate 有 `prepare_key_package_v2` / `complete_key_package_v2` 接缝 | `prepared.signing_input()` | `{device}-sign` | 拒 | `SIGN_PURPOSE`（purpose 绑设备断言），**P2** |
+| 每次 `msg` / `contacts` / `group` 调用 | [channel.rs:371](../../rust/crates/anpio-cli/src/message/channel.rs#L371) `sign_request` | ANP origin proof：`JCS({method, meta, body})` 的 digest，签名基覆盖 `@method` / `@target-uri` / `content-digest`，target 是 `anp://{kind}/{percent-encoded did}` | `key-1` → `hot` | 可用（`SIGN_ORIGIN_PROOF`） | `SIGN_ORIGIN_PROOF`，**P1** |
+| `msg listen` 握手 | `message/listen.rs`（复用 `sign_request`） | 同上 | `hot` | 可用（同上） | 同上，**P1** |
+| `group e2ee send` 的 origin proof | [main.rs:5087](../../rust/crates/anpio-cli/src/main.rs#L5087) `signing_as_daemon_device` | 同上 | `{device}-sign` → `device_signing` | 可用（`SIGN_PURPOSE`，签名由文档公钥核对） | `SIGN_ORIGIN_PROOF`（需角色扩展）或 `SIGN_PURPOSE` 退路，**P2** |
+| KeyPackage 的 `did_wba_binding` | `mls.rs` `generate_key_package`；anp crate 有 `prepare_key_package_v2` / `complete_key_package_v2` 接缝 | `prepared.signing_input()` | `{device}-sign` | 可用（`SIGN_PURPOSE` + `public_multibase` 核对） | `SIGN_PURPOSE`（purpose 绑设备断言），**P2** |
 | MLS commit / 消息加解密 | anp crate，MLS store 自持 | MLS 自己的签名与 ratchet 钥 | 本地 MLS store | 可用（但钥在本地） | **不经过 daemon**，见 §5.3 |
 | DID 文档 proof | `identity/did.rs:352` `resign_document` | W3C Data Integrity over 文档 | `key-1` → `root` | `did publish` 用守护进程的已签文档；`did update` 拒 | `SIGN_DOCUMENT_PROOF`，**P5** |
 | 后继钥铸造 | `cmd_did_update` | 无（生成新钥） | 新 `key-1` | 拒 | 管理面扩展，见 §4.4 |
@@ -164,6 +164,11 @@ base           = "@method" · "@target-uri" · "content-digest"
 - 需要一个新的只读子命令让 CLI 拿到 `GET_CAPABILITIES` 的 `operations` / `purposes` /
   `grant_kinds`，以及 `GET_GRANT_STATUS` 的期限/余量。
 
+> **跟进（2026-10-26）：`SIGN_HTTP` 还没搬进受保护面。** 受保护的 `SIGN_HTTP` 只接受
+> `https://` + DNS 主机名（`HttpRequest` 拒绝数字 IPv4 与无主机的 URL），所以本机的
+> `anp login`（`http://localhost`）在那边没有条件跑。开发 socket 下私钥本来就不在客户端
+> 进程里，边界没有变弱；等有 https 的 DID 主机可以验收时再搬。
+
 ### 4.4 `did update` 缺的不是签名，是「铸钥」
 
 ANP-03 的一跳 = **铸一个后继 `key-1`** + **用旧 `key-1` 签退役文档**。在托管身份上：
@@ -186,6 +191,13 @@ CLI 的 `device_id` 是本地槽位（`agent/profile`），DID 文档里的设�
 - 从 `GET_DOCUMENT` 的设备清单里取 `signing_key_id` / `e2ee_key_id`，映射到 daemon 的
   `device_signing` / `key_agreement` 键；
 - 找不到就拒 `group e2ee`，不要猜一个 `{agent}/{profile}` 拼出来的名字。
+
+> **状态（2026-10-26）：已落地。** `--device` 存进 `Custody::AnpioKey.device`；attach 时在
+> 文档里找 `{did}#{device}-sign`，找不到就拒绝并列出文档实际发布的片段（`--device` 也接受
+> 整串 `did#dev-1-sign`，按文档决定取哪个名字，不靠猜）。签名的设备钥以文档里的
+> `publicKeyMultibase` 为准，daemon 返回的 `public_multibase` 必须与它逐字节相等。
+> `e2ee_key_id`（`{device}-agreement`）暂不映射：本仓库没有 secure-direct 客户端（§5 阶段 3
+> 是非目标），ECDH 的适配层只为将来的调用者备着。
 
 ---
 
@@ -290,6 +302,19 @@ session grant、策略 `schema_version: 2`、每条新签名路的独立开关�
 - publish → get-key-package → create → add → send 全链路；
 - KeyPackage 的绑定签名由文档里的设备钥验证通过；
 - store 中不存在 `{device}-sign` 的私钥字节。
+
+> **状态（2026-10-26）：客户端侧已落地。** 六条数据面操作（`SIGN_HTTP` /
+> `SIGN_ORIGIN_PROOF` / `SIGN_PURPOSE` / `SIGN_OBJECT_PROOF` / `SIGN_DOCUMENT_PROOF` /
+> `ECDH`）在 [custody.rs](../../rust/crates/anpio-cli/src/custody.rs) 都有适配层，拒绝按
+> `RefusalShape`（不支持 / 未授权 / 过期 / 耗尽 / 锁定 / 冲突 / 缺失 / 忙 / 停服 / 策略）
+> 分类，不看错误文案。`publish` / `create` / `add` / `remove` 的 KeyPackage 绑定走
+> `prepare_key_package_v2` → `SIGN_PURPOSE(device_assertion)` → `complete_key_package_v2`，
+> 并核对 daemon 回的 `public_multibase`；`group e2ee send` 的设备 origin proof 走
+> `prepare_rfc9421_origin_proof` → `SIGN_PURPOSE` → `complete_rfc9421_origin_proof`。
+> 还剩两件事：anpio-key 的 v2 面没有发布版，所以「publish → … → send」没有真守护进程可跑；
+> `SIGN_HTTP` 仍在开发 socket（受保护面对 `http://localhost` 的登录没有条件，见 §4.3
+> 末尾的跟进项）。上述操作的开关由管理员按操作逐个打开，客户端只按
+> `GET_CAPABILITIES` 的 `operations` / `signing_purposes` 决定用不用。
 
 ### 阶段 3 —— ECDH / secure-direct（anpio-key P3）
 

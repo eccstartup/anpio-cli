@@ -17,6 +17,7 @@
 //! override.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -29,6 +30,189 @@ use serde_json::Value;
 pub const BINARY_ENV: &str = "ANPIOCLI_ANPIO_KEY";
 
 const DEFAULT_BINARY: &str = "anpio-key";
+
+/// The purpose a device's own signature is made under (`ADAPTER.md` §11.6).
+///
+/// Unlike `application_assertion`, this purpose prefixes nothing: the daemon signs the bytes
+/// it is given. That is what lets `anp`'s prepared origin proofs and KeyPackage bindings be
+/// completed by a signature this process never held the key for.
+pub const DEVICE_ASSERTION_PURPOSE: &str = "device_assertion";
+
+/// The shape of a refusal, classified from its code rather than from its prose.
+///
+/// The names mirror `anpio-key`'s own `Refusal::from_code` (`src/client/v2.rs` over there).
+/// A caller branches on this: an expired grant is renewed or re-issued by the administrator,
+/// a busy daemon is retried, a policy refusal is not retried at all — and none of those
+/// decisions may depend on the wording of a message, which is free to change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusalShape {
+    /// The daemon build does not offer the operation, or its feature switch is off.
+    Unsupported,
+    /// The grant does not cover this operation.
+    NotGranted,
+    /// The grant's lifetime ran out.
+    Expired,
+    /// The grant's uses or renewals ran out.
+    Exhausted,
+    /// The key (or the hardware session behind it) is locked.
+    Locked,
+    /// The `request_id` was already used for different content.
+    Conflict,
+    /// The daemon knows no such request or key.
+    Missing,
+    /// The daemon is at a concurrency or rate limit.
+    Busy,
+    /// The audit or persistence plane is unavailable, so the daemon will not sign.
+    Stopped,
+    /// The administrator's policy (role, principal, key) refuses it.
+    Policy,
+    /// A code this build does not classify; `Refusal::code` keeps it verbatim.
+    Other,
+}
+
+impl RefusalShape {
+    pub fn name(self) -> &'static str {
+        match self {
+            RefusalShape::Unsupported => "unsupported",
+            RefusalShape::NotGranted => "not-granted",
+            RefusalShape::Expired => "expired",
+            RefusalShape::Exhausted => "exhausted",
+            RefusalShape::Locked => "locked",
+            RefusalShape::Conflict => "conflict",
+            RefusalShape::Missing => "missing",
+            RefusalShape::Busy => "busy",
+            RefusalShape::Stopped => "stopped",
+            RefusalShape::Policy => "policy",
+            RefusalShape::Other => "other",
+        }
+    }
+
+    /// What a caller can do about it, in the administrator's terms.
+    pub fn guidance(self) -> &'static str {
+        match self {
+            RefusalShape::Unsupported => {
+                "the daemon does not enable this operation; its own feature switch, or the \
+                 purpose inside it, is off"
+            }
+            RefusalShape::NotGranted => {
+                "the grant does not cover this operation; ask the anpio-key administrator for \
+                 a grant that does, then re-attach with --grant"
+            }
+            RefusalShape::Expired => {
+                "the grant expired; ask the anpio-key administrator for a fresh grant, then \
+                 re-attach with --grant"
+            }
+            RefusalShape::Exhausted => {
+                "the grant's uses or renewals are spent; ask the anpio-key administrator for a \
+                 fresh grant"
+            }
+            RefusalShape::Locked => {
+                "the key is locked; unlock it through anpio-key's administrator path"
+            }
+            RefusalShape::Conflict => {
+                "this request_id was already used for different content; retry under a fresh \
+                 request id"
+            }
+            RefusalShape::Missing => {
+                "the daemon has no such request or key; check that this identity still points \
+                 at the key the administrator registered"
+            }
+            RefusalShape::Busy => "the daemon is busy; retry once it is idle",
+            RefusalShape::Stopped => {
+                "the daemon's audit or persistence plane is unavailable; it will not sign \
+                 until the administrator restores it"
+            }
+            RefusalShape::Policy => {
+                "the administrator's policy refuses this operation for this principal or key"
+            }
+            RefusalShape::Other => "see the code above; this build does not classify it",
+        }
+    }
+
+    pub fn from_code(code: &str) -> Self {
+        match code {
+            "PROTOCOL_VERSION_UNSUPPORTED" | "UNSUPPORTED_OPERATION" | "OPERATION_DISABLED" => {
+                RefusalShape::Unsupported
+            }
+            "GRANT_INVALID" => RefusalShape::NotGranted,
+            "GRANT_EXPIRED" => RefusalShape::Expired,
+            "GRANT_EXHAUSTED" | "GRANT_RENEWALS_EXHAUSTED" => RefusalShape::Exhausted,
+            "KEY_LOCKED" => RefusalShape::Locked,
+            "REQUEST_ID_CONFLICT" => RefusalShape::Conflict,
+            "REQUEST_NOT_FOUND" | "KEY_NOT_FOUND" => RefusalShape::Missing,
+            "RESOURCE_BUSY" => RefusalShape::Busy,
+            "AUDIT_UNAVAILABLE" | "PERSISTENCE_UNAVAILABLE" => RefusalShape::Stopped,
+            "POLICY_DENIED" | "KEY_ROLE_FORBIDDEN" | "PRINCIPAL_DISABLED" => RefusalShape::Policy,
+            _ => RefusalShape::Other,
+        }
+    }
+}
+
+/// One refusal from the daemon, carrying both the raw code and its shape.
+///
+/// `code` is kept because it is the daemon's fact and the only thing an administrator can
+/// grep for in the audit log; `shape` is what this client acts on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refusal {
+    pub operation: String,
+    pub code: String,
+    pub shape: RefusalShape,
+}
+
+impl Refusal {
+    pub fn new(operation: &str, code: &str) -> Self {
+        Self {
+            operation: operation.to_string(),
+            code: code.to_string(),
+            shape: RefusalShape::from_code(code),
+        }
+    }
+}
+
+impl fmt::Display for Refusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "anpio-key refused {} with {} ({}): {}",
+            self.operation,
+            self.code,
+            self.shape.name(),
+            self.shape.guidance()
+        )
+    }
+}
+
+impl std::error::Error for Refusal {}
+
+/// The signature and public key one `SIGN_PURPOSE` produced.
+///
+/// Device assertions sign the payload itself (`device_assertion` has no domain prefix), so
+/// the bytes can be handed to the `anp` crate's `complete_*` seams unchanged. The public key
+/// comes back so the caller can check it really is the key the DID document publishes —
+/// a daemon that signed with a different key must not get its output used.
+#[derive(Debug, Clone)]
+pub struct PurposeSigning {
+    pub signature: Vec<u8>,
+    pub public_multibase: String,
+    pub purpose: Value,
+}
+
+/// A W3C proof the daemon made over an object or a DID document.
+#[derive(Debug, Clone)]
+pub struct SignedProof {
+    /// The input with its `proof` attached.
+    pub value: Value,
+    pub proof: Value,
+    pub created_at: i64,
+    pub signature_base_digest: String,
+}
+
+/// One X25519 agreement. The shared secret is returned once and never persisted.
+#[derive(Debug, Clone)]
+pub struct SharedSecret {
+    pub shared_secret: Vec<u8>,
+    pub peer_fingerprint: String,
+}
 
 /// Which `anpio-key` daemon holds a key, and which key of it signs.
 ///
@@ -64,6 +248,11 @@ pub struct AnpioKey {
     /// not spawn `anpio-key` just to be refused. Unknown names are kept verbatim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operations: Option<Vec<String>>,
+    /// The `signing_purposes` the daemon announced alongside those operations. `None` for a
+    /// record written before this field existed: then a purpose is sent and the daemon's
+    /// own refusal decides, rather than this client guessing the switch is off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signing_purposes: Option<Vec<String>>,
 }
 
 /// One ANP origin proof made by the daemon.
@@ -224,13 +413,22 @@ impl Operation {
         .find(|operation| operation.daemon_name() == name)
     }
 
-    /// Whether this build has the calling code that consumes the daemon's result.
+    /// Whether this build can drive the operation at all.
     ///
-    /// A daemon may announce an operation this client cannot drive yet; that is a client
-    /// gap, not a daemon gap, and the two are reported differently. Stage 1 flips this for
-    /// `OriginProof`, stage 2 for `Purpose`, and so on.
+    /// A daemon may announce an operation this client cannot drive; that is a client gap,
+    /// not a daemon gap, and the two are reported differently. Every §11.3 data operation
+    /// now has an adapter here; a *command* may still refuse one for its own reason (for
+    /// example `did update` on a custodied identity), and that refusal says so by name.
     pub fn implemented(self) -> bool {
-        matches!(self, Operation::Http | Operation::OriginProof)
+        matches!(
+            self,
+            Operation::Http
+                | Operation::OriginProof
+                | Operation::Purpose
+                | Operation::DocumentProof
+                | Operation::ObjectProof
+                | Operation::Ecdh
+        )
     }
 
     pub fn purpose(self) -> &'static str {
@@ -283,6 +481,9 @@ impl CapabilitySource {
 pub struct Capabilities {
     operations: BTreeSet<Operation>,
     announced: BTreeSet<String>,
+    /// `None` when the daemon (or the cached record) did not say; `Some` when it did, even
+    /// when the set is empty.
+    signing_purposes: Option<BTreeSet<String>>,
     source: CapabilitySource,
 }
 
@@ -303,11 +504,40 @@ impl Capabilities {
             }
             announced.insert(name.clone());
         }
-        Self { operations, announced, source }
+        Self {
+            operations,
+            announced,
+            signing_purposes: None,
+            source,
+        }
+    }
+
+    fn with_signing_purposes(mut self, purposes: Option<BTreeSet<String>>) -> Self {
+        self.signing_purposes = purposes;
+        self
     }
 
     pub fn contains(&self, operation: Operation) -> bool {
         self.operations.contains(&operation)
+    }
+
+    /// Whether the daemon enables `SIGN_PURPOSE` for this purpose.
+    ///
+    /// `None` means "not announced". That is not a refusal: an older daemon or a cached
+    /// record from before `signing_purposes` existed gets one request, and its own refusal
+    /// (classified as [`RefusalShape::Unsupported`]) is the answer. Guessing "off" here
+    /// would refuse a working daemon; guessing "on" would only cost that one request.
+    pub fn supports_signing_purpose(&self, purpose: &str) -> Option<bool> {
+        self.signing_purposes
+            .as_ref()
+            .map(|purposes| purposes.contains(purpose))
+    }
+
+    /// The purposes the daemon said are on, when it said.
+    pub fn signing_purposes(&self) -> Option<Vec<&str>> {
+        self.signing_purposes
+            .as_ref()
+            .map(|purposes| purposes.iter().map(String::as_str).collect())
     }
 
     pub fn source(&self) -> CapabilitySource {
@@ -398,7 +628,8 @@ impl AnpioKey {
     /// to sign HTTP requests and nothing else — that answer costs no subprocess.
     pub fn capabilities(&self) -> Result<Capabilities> {
         if let Some(names) = &self.operations {
-            return Ok(Capabilities::from_names(names, CapabilitySource::Cached));
+            return Ok(Capabilities::from_names(names, CapabilitySource::Cached)
+                .with_signing_purposes(self.cached_signing_purposes()));
         }
         if self.config.is_some() {
             return self.query_capabilities();
@@ -409,9 +640,16 @@ impl AnpioKey {
     /// What is known without contacting the daemon.
     pub fn known_capabilities(&self) -> Capabilities {
         match &self.operations {
-            Some(names) => Capabilities::from_names(names, CapabilitySource::Cached),
+            Some(names) => Capabilities::from_names(names, CapabilitySource::Cached)
+                .with_signing_purposes(self.cached_signing_purposes()),
             None => Capabilities::baseline(),
         }
+    }
+
+    fn cached_signing_purposes(&self) -> Option<BTreeSet<String>> {
+        self.signing_purposes
+            .as_ref()
+            .map(|purposes| purposes.iter().cloned().collect())
     }
 
     /// Ask the protected surface (`anpio-key data --config`) for its capability set.
@@ -551,23 +789,167 @@ impl AnpioKey {
         meta: &Value,
         body: &Value,
     ) -> Result<OriginProofSigning> {
-        self.config.as_ref().ok_or_else(|| {
-            anyhow!(
-                "{did} reaches anpio-key over its development socket, which cannot make an ANP \
-                 origin proof; re-run: anpio-cli did attach-anpio-key --config \
-                 <service.json>"
-            )
-        })?;
-        let grant = self.grant.as_ref().ok_or_else(|| {
-            anyhow!(
-                "{did} has no anpio-key grant, so the daemon has no authorization for \
-                 SIGN_ORIGIN_PROOF; ask the anpio-key administrator for a session grant, then \
-                 re-run: anpio-cli did attach-anpio-key --grant <grant-id>"
-            )
-        })?;
-
+        let grant = self.protected_grant(did, Operation::OriginProof)?;
         let request = Self::origin_proof_request(grant, request_id, method, meta, body);
         origin_proof_from_data(self.protected_request(&request)?)
+    }
+
+    /// The request one `SIGN_PURPOSE` sends.
+    ///
+    /// No key, DID or kid: the purpose picks the key, and the daemon's grant decides which
+    /// purpose may be used. `domain` is only legal for `application_assertion`, so it is
+    /// omitted rather than sent as null when the caller has none.
+    pub fn purpose_request(
+        grant: &str,
+        request_id: &str,
+        purpose: &str,
+        domain: Option<&str>,
+        payload: &[u8],
+    ) -> Value {
+        let mut request = serde_json::json!({
+            "operation": "SIGN_PURPOSE",
+            "grant_id": grant,
+            "request_id": request_id,
+            "purpose": purpose,
+            "payload": encode_hex(payload),
+        });
+        if let Some(domain) = domain {
+            request["domain"] = Value::String(domain.to_string());
+        }
+        request
+    }
+
+    /// Ask the daemon for a device (or application) assertion over `payload`.
+    ///
+    /// `device_assertion` signs the payload itself, so the two callers this client has —
+    /// the MLS `did_wba_binding` and the `group e2ee send` origin proof — can complete the
+    /// `anp` crate's prepared objects with the bytes unchanged. The returned public key is
+    /// checked by the caller against the DID document before the signature is used.
+    pub fn sign_purpose(
+        &self,
+        did: &str,
+        request_id: &str,
+        purpose: &str,
+        domain: Option<&str>,
+        payload: &[u8],
+    ) -> Result<PurposeSigning> {
+        let grant = self.protected_grant(did, Operation::Purpose)?;
+        let request = Self::purpose_request(grant, request_id, purpose, domain, payload);
+        purpose_from_data(self.protected_request(&request)?)
+    }
+
+    /// The request one `SIGN_OBJECT_PROOF` sends: the object, and nothing that names a key.
+    pub fn object_proof_request(grant: &str, request_id: &str, object: &Value) -> Value {
+        serde_json::json!({
+            "operation": "SIGN_OBJECT_PROOF",
+            "grant_id": grant,
+            "request_id": request_id,
+            "object": object,
+        })
+    }
+
+    /// Ask the daemon for a W3C data-integrity proof over an arbitrary object.
+    pub fn sign_object_proof(
+        &self,
+        did: &str,
+        request_id: &str,
+        object: &Value,
+    ) -> Result<SignedProof> {
+        let grant = self.protected_grant(did, Operation::ObjectProof)?;
+        let request = Self::object_proof_request(grant, request_id, object);
+        signed_proof_from_data(self.protected_request(&request)?)
+    }
+
+    /// The request one `SIGN_DOCUMENT_PROOF` sends.
+    ///
+    /// The daemon re-checks that the document's `id` is the grant's DID and that the key is
+    /// still published in it; this client cannot relax or redirect either of those.
+    pub fn document_proof_request(
+        grant: &str,
+        request_id: &str,
+        document: &Value,
+        proof_purpose: Option<&str>,
+        domain: Option<&str>,
+        challenge: Option<&str>,
+    ) -> Value {
+        let mut request = serde_json::json!({
+            "operation": "SIGN_DOCUMENT_PROOF",
+            "grant_id": grant,
+            "request_id": request_id,
+            "document": document,
+        });
+        for (name, value) in [
+            ("proof_purpose", proof_purpose),
+            ("domain", domain),
+            ("challenge", challenge),
+        ] {
+            if let Some(value) = value {
+                request[name] = Value::String(value.to_string());
+            }
+        }
+        request
+    }
+
+    /// Ask the daemon to proof a whole DID document it holds the root key for.
+    pub fn sign_document_proof(
+        &self,
+        did: &str,
+        request_id: &str,
+        document: &Value,
+        proof_purpose: Option<&str>,
+        domain: Option<&str>,
+        challenge: Option<&str>,
+    ) -> Result<SignedProof> {
+        let grant = self.protected_grant(did, Operation::DocumentProof)?;
+        let request = Self::document_proof_request(
+            grant,
+            request_id,
+            document,
+            proof_purpose,
+            domain,
+            challenge,
+        );
+        signed_proof_from_data(self.protected_request(&request)?)
+    }
+
+    /// The request one `ECDH` sends: one peer public key, as lowercase hex.
+    pub fn ecdh_request(grant: &str, request_id: &str, peer: &str) -> Value {
+        serde_json::json!({
+            "operation": "ECDH",
+            "grant_id": grant,
+            "request_id": request_id,
+            "peer": peer,
+        })
+    }
+
+    /// Derive one X25519 shared secret with the key-agreement key the grant names.
+    ///
+    /// The secret is returned once and is not written anywhere; the caller's protocol
+    /// decides what to do with it. This client has no secure-direct path yet, so the
+    /// adapter exists for the capability the daemon offers rather than for a command here.
+    pub fn ecdh(&self, did: &str, request_id: &str, peer: &[u8; 32]) -> Result<SharedSecret> {
+        let grant = self.protected_grant(did, Operation::Ecdh)?;
+        let request = Self::ecdh_request(grant, request_id, &encode_hex(peer));
+        shared_secret_from_data(self.protected_request(&request)?)
+    }
+
+    /// The guard every protected operation starts with: a protected surface, then a grant.
+    fn protected_grant(&self, did: &str, operation: Operation) -> Result<&str> {
+        if self.config.is_none() {
+            bail!(
+                "{did} reaches anpio-key over its development socket, which cannot make {}. \
+                 Re-run: anpio-cli did attach-anpio-key --config <service.json>",
+                operation.purpose()
+            );
+        }
+        self.grant.as_deref().ok_or_else(|| {
+            anyhow!(
+                "{did} has no anpio-key grant, so the daemon has no authorization for {}. Ask \
+                 the anpio-key administrator for a grant that covers it, then re-run: \
+                 anpio-cli did attach-anpio-key --grant <grant-id>",
+                operation.daemon_name()
+            )
+        })
     }
 
     /// One `anpio-key data --config` call, returning the reply's `data`.
@@ -910,6 +1292,27 @@ fn parse_capabilities(bytes: &[u8]) -> Result<Capabilities> {
         bail!("anpio-key answered GET_CAPABILITIES with {code}");
     }
     let data = reply.get("data").cloned().unwrap_or(Value::Null);
+    let signing_purposes = match data.get("signing_purposes") {
+        Some(Value::Array(items)) => {
+            let mut purposes = BTreeSet::new();
+            for item in items {
+                purposes.insert(
+                    item.as_str()
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "anpio-key returned a signing purpose that is not a string: {item}"
+                            )
+                        })?
+                        .to_string(),
+                );
+            }
+            Some(purposes)
+        }
+        Some(other) => {
+            bail!("anpio-key returned capabilities.signing_purposes that is not an array: {other}")
+        }
+        None => None,
+    };
     match data.get("operations") {
         Some(Value::Array(items)) => {
             let mut names = Vec::with_capacity(items.len());
@@ -925,18 +1328,20 @@ fn parse_capabilities(bytes: &[u8]) -> Result<Capabilities> {
                         .to_string(),
                 );
             }
-            Ok(Capabilities::from_names(&names, CapabilitySource::Daemon))
+            Ok(Capabilities::from_names(&names, CapabilitySource::Daemon)
+                .with_signing_purposes(signing_purposes))
         }
-        Some(other) => bail!(
-            "anpio-key returned capabilities.operations that is not an array: {other}"
-        ),
+        Some(other) => {
+            bail!("anpio-key returned capabilities.operations that is not an array: {other}")
+        }
         None => Ok(Capabilities::from_names(
             &KNOWN_V2_OPERATIONS
                 .iter()
                 .map(|name| name.to_string())
                 .collect::<Vec<_>>(),
             CapabilitySource::Daemon,
-        )),
+        )
+        .with_signing_purposes(signing_purposes)),
     }
 }
 
@@ -951,10 +1356,13 @@ fn parse_signed_headers(bytes: &[u8], did: &str) -> Result<BTreeMap<String, Stri
         // A daemon on another platform may print CRLF; the value, not the line ending, is
         // what goes on the wire.
         let line = line.trim_end_matches('\r');
-        let (name, value) = line.split_once(": ").ok_or_else(|| {
-            anyhow!("anpio-key returned a malformed signature header: {line:?}")
-        })?;
-        if headers.insert(name.to_string(), value.to_string()).is_some() {
+        let (name, value) = line
+            .split_once(": ")
+            .ok_or_else(|| anyhow!("anpio-key returned a malformed signature header: {line:?}"))?;
+        if headers
+            .insert(name.to_string(), value.to_string())
+            .is_some()
+        {
             bail!("anpio-key returned {name} twice, so the signature cannot be trusted");
         }
     }
@@ -964,7 +1372,133 @@ fn parse_signed_headers(bytes: &[u8], did: &str) -> Result<BTreeMap<String, Stri
     Ok(headers)
 }
 
-/// The `data` of a reply, or the refusal's code as the error.
+/// Read the `data` of a `SIGN_PURPOSE` reply.
+///
+/// The signature is hex on the wire; it is decoded here so the `anp` crate's `complete_*`
+/// seams take bytes. An Ed25519 signature is exactly 64 bytes, and a length check before
+/// the caller tries to complete anything turns a daemon bug into a clear refusal.
+fn purpose_from_data(data: Value) -> Result<PurposeSigning> {
+    let signature = decode_hex(
+        data.get("signature")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("anpio-key returned a purpose signature without signature"))?,
+    )
+    .context("anpio-key returned a purpose signature that is not lowercase hex")?;
+    if signature.len() != 64 {
+        bail!(
+            "anpio-key returned a {}-byte purpose signature; an Ed25519 signature is 64 bytes",
+            signature.len()
+        );
+    }
+    let public_multibase = data
+        .get("public_multibase")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("anpio-key returned a purpose signature without public_multibase"))?
+        .to_string();
+    if !public_multibase.starts_with('z') {
+        bail!(
+            "anpio-key returned public_multibase {public_multibase:?}, which is not base58-btc \
+             multibase"
+        );
+    }
+    let purpose = data
+        .get("purpose")
+        .cloned()
+        .ok_or_else(|| anyhow!("anpio-key returned a purpose signature without its purpose"))?;
+    Ok(PurposeSigning {
+        signature,
+        public_multibase,
+        purpose,
+    })
+}
+
+/// Read the `data` of a `SIGN_OBJECT_PROOF` / `SIGN_DOCUMENT_PROOF` reply.
+fn signed_proof_from_data(data: Value) -> Result<SignedProof> {
+    let proof = data
+        .get("proof")
+        .filter(|proof| proof.is_object())
+        .cloned()
+        .ok_or_else(|| anyhow!("anpio-key returned a proof without a proof object"))?;
+    let value = data
+        .get("value")
+        .cloned()
+        .ok_or_else(|| anyhow!("anpio-key returned a proof without the signed value"))?;
+    let created_at = data
+        .get("created_at")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| anyhow!("anpio-key returned a proof without created_at"))?;
+    let signature_base_digest = data
+        .get("signature_base_digest")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("anpio-key returned a proof without signature_base_digest"))?
+        .to_string();
+    Ok(SignedProof {
+        value,
+        proof,
+        created_at,
+        signature_base_digest,
+    })
+}
+
+/// Read the `data` of an `ECDH` reply.
+fn shared_secret_from_data(data: Value) -> Result<SharedSecret> {
+    let shared_secret = decode_hex(
+        data.get("shared_secret")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("anpio-key returned an ECDH result without shared_secret"))?,
+    )
+    .context("anpio-key returned an ECDH shared secret that is not lowercase hex")?;
+    if shared_secret.len() != 32 {
+        bail!(
+            "anpio-key returned a {}-byte X25519 shared secret; the curve's output is 32 bytes",
+            shared_secret.len()
+        );
+    }
+    let peer_fingerprint = data
+        .get("peer_fingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("anpio-key returned an ECDH result without peer_fingerprint"))?
+        .to_string();
+    Ok(SharedSecret {
+        shared_secret,
+        peer_fingerprint,
+    })
+}
+
+/// Lowercase hex, the wire spelling of every binary field in `ADAPTER.md` §11.3.
+fn encode_hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut text = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        text.push(DIGITS[(byte >> 4) as usize] as char);
+        text.push(DIGITS[(byte & 0x0f) as usize] as char);
+    }
+    text
+}
+
+/// Strict lowercase hex: uppercase, odd length and non-hex characters are all refused.
+///
+/// The daemon writes lowercase, so anything else is a daemon this client does not
+/// understand rather than a value to normalise.
+fn decode_hex(text: &str) -> Result<Vec<u8>> {
+    if !text.len().is_multiple_of(2) {
+        bail!("hex text has an odd length ({} characters)", text.len());
+    }
+    let mut bytes = Vec::with_capacity(text.len() / 2);
+    for pair in text.as_bytes().chunks_exact(2) {
+        let nibble = |byte: u8| match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            _ => None,
+        };
+        let high = nibble(pair[0]).ok_or_else(|| anyhow!("not lowercase hex: {text:?}"))?;
+        let low = nibble(pair[1]).ok_or_else(|| anyhow!("not lowercase hex: {text:?}"))?;
+        bytes.push((high << 4) | low);
+    }
+    Ok(bytes)
+}
+
+/// The `data` of a reply, or a [`Refusal`] carrying the daemon's code and its shape.
 ///
 /// Only `OK` carries an answer. Every other code means the operation did not happen, so a
 /// caller that read a `data` object out of one anyway would be acting on something the
@@ -977,7 +1511,7 @@ fn reply_data(bytes: &[u8], operation: &str) -> Result<Value> {
         .and_then(Value::as_str)
         .unwrap_or("missing code");
     if code != "OK" {
-        bail!("anpio-key refused {operation} with {code}");
+        return Err(Refusal::new(operation, code).into());
     }
     Ok(reply.get("data").cloned().unwrap_or(Value::Null))
 }
@@ -1217,15 +1751,156 @@ mod tests {
         assert_eq!(data["grant_id"], "g-1");
 
         let refused = json!({"version": 2, "code": "GRANT_EXPIRED", "signing_available": false});
-        let err = reply_data(refused.to_string().as_bytes(), "SIGN_ORIGIN_PROOF")
-            .unwrap_err()
-            .to_string();
-        assert_eq!(err, "anpio-key refused SIGN_ORIGIN_PROOF with GRANT_EXPIRED");
+        let err = reply_data(refused.to_string().as_bytes(), "SIGN_ORIGIN_PROOF").unwrap_err();
+        assert!(
+            err.to_string().contains("GRANT_EXPIRED"),
+            "the raw code stays in the message: {err}"
+        );
+        let refusal = err
+            .downcast_ref::<Refusal>()
+            .expect("a refusal carries its shape, not just a string");
+        assert_eq!(refusal.shape, RefusalShape::Expired);
+        assert_eq!(refusal.operation, "SIGN_ORIGIN_PROOF");
 
         assert!(reply_data(b"not json", "GET_GRANT_STATUS")
             .unwrap_err()
             .to_string()
             .contains("not JSON"));
+    }
+
+    /// Every code the daemon can refuse with maps to the shape a caller branches on.
+    /// Text never decides this: the same sentence with a different code is a different
+    /// answer.
+    #[test]
+    fn a_refusal_is_classified_by_its_code() {
+        for (code, shape) in [
+            ("PROTOCOL_VERSION_UNSUPPORTED", RefusalShape::Unsupported),
+            ("UNSUPPORTED_OPERATION", RefusalShape::Unsupported),
+            ("OPERATION_DISABLED", RefusalShape::Unsupported),
+            ("GRANT_INVALID", RefusalShape::NotGranted),
+            ("GRANT_EXPIRED", RefusalShape::Expired),
+            ("GRANT_EXHAUSTED", RefusalShape::Exhausted),
+            ("GRANT_RENEWALS_EXHAUSTED", RefusalShape::Exhausted),
+            ("KEY_LOCKED", RefusalShape::Locked),
+            ("REQUEST_ID_CONFLICT", RefusalShape::Conflict),
+            ("REQUEST_NOT_FOUND", RefusalShape::Missing),
+            ("KEY_NOT_FOUND", RefusalShape::Missing),
+            ("RESOURCE_BUSY", RefusalShape::Busy),
+            ("AUDIT_UNAVAILABLE", RefusalShape::Stopped),
+            ("PERSISTENCE_UNAVAILABLE", RefusalShape::Stopped),
+            ("POLICY_DENIED", RefusalShape::Policy),
+            ("KEY_ROLE_FORBIDDEN", RefusalShape::Policy),
+            ("PRINCIPAL_DISABLED", RefusalShape::Policy),
+            ("SOMETHING_NEW", RefusalShape::Other),
+        ] {
+            assert_eq!(RefusalShape::from_code(code), shape, "{code}");
+        }
+        assert_eq!(
+            Refusal::new("ECDH", "KEY_LOCKED").shape,
+            RefusalShape::Locked
+        );
+    }
+
+    #[test]
+    fn the_remaining_operation_requests_carry_facts_and_no_key_selector() {
+        let purpose =
+            AnpioKey::purpose_request("grant-1", "r", "device_assertion", None, &[0x00, 0xff]);
+        assert_eq!(purpose["operation"], "SIGN_PURPOSE");
+        assert_eq!(purpose["payload"], "00ff");
+        assert!(
+            purpose.get("domain").is_none(),
+            "device_assertion must not carry a domain"
+        );
+        for field in ["did", "kid", "key_id", "passphrase"] {
+            assert!(purpose.get(field).is_none(), "{field}");
+        }
+        let application = AnpioKey::purpose_request(
+            "grant-1",
+            "r",
+            "application_assertion",
+            Some("chat.alpha"),
+            &[1],
+        );
+        assert_eq!(application["domain"], "chat.alpha");
+
+        let object = AnpioKey::object_proof_request("g", "r", &json!({"a": 1}));
+        assert_eq!(object["operation"], "SIGN_OBJECT_PROOF");
+        assert_eq!(object["object"]["a"], 1);
+        assert!(object.get("did").is_none() && object.get("kid").is_none());
+
+        let document = AnpioKey::document_proof_request(
+            "g",
+            "r",
+            &json!({"id": "did:wba:h:user:a:e1_x"}),
+            Some("assertionMethod"),
+            None,
+            Some("c"),
+        );
+        assert_eq!(document["operation"], "SIGN_DOCUMENT_PROOF");
+        assert_eq!(document["proof_purpose"], "assertionMethod");
+        assert_eq!(document["challenge"], "c");
+        assert!(
+            document.get("domain").is_none(),
+            "an absent field stays absent"
+        );
+
+        let peer = [0x11u8; 32];
+        let ecdh = AnpioKey::ecdh_request("g", "r", &encode_hex(&peer));
+        assert_eq!(ecdh["operation"], "ECDH");
+        assert_eq!(ecdh["peer"].as_str().unwrap().len(), 64);
+        assert!(ecdh.get("did").is_none() && ecdh.get("kid").is_none());
+    }
+
+    #[test]
+    fn a_purpose_reply_is_read_only_from_a_well_formed_signature() {
+        let mut signature = vec![0u8; 64];
+        signature[0] = 0xab;
+        let data = json!({
+            "signature": encode_hex(&signature),
+            "public_multibase": "z6Mkexample",
+            "purpose": {"purpose": "device_assertion"},
+        });
+        let signed = purpose_from_data(data).unwrap();
+        assert_eq!(signed.signature, signature);
+        assert_eq!(signed.public_multibase, "z6Mkexample");
+
+        let short = json!({
+            "signature": "00",
+            "public_multibase": "z6Mkexample",
+            "purpose": {"purpose": "device_assertion"},
+        });
+        let err = purpose_from_data(short).unwrap_err().to_string();
+        assert!(err.contains("64 bytes"), "{err}");
+
+        let upper = json!({
+            "signature": "AB".repeat(64),
+            "public_multibase": "z6Mkexample",
+            "purpose": {"purpose": "device_assertion"},
+        });
+        assert!(
+            purpose_from_data(upper)
+                .unwrap_err()
+                .to_string()
+                .contains("lowercase hex"),
+            "uppercase hex is a different wire shape, not a value to normalise"
+        );
+    }
+
+    #[test]
+    fn an_ecdh_reply_must_hold_a_curve_sized_secret() {
+        let secret = json!({
+            "shared_secret": encode_hex(&[7u8; 32]),
+            "peer_fingerprint": "sha256:aa",
+        });
+        let shared = shared_secret_from_data(secret).unwrap();
+        assert_eq!(shared.shared_secret, vec![7u8; 32]);
+        assert_eq!(shared.peer_fingerprint, "sha256:aa");
+
+        let short = json!({"shared_secret": "00", "peer_fingerprint": "sha256:aa"});
+        assert!(shared_secret_from_data(short)
+            .unwrap_err()
+            .to_string()
+            .contains("32 bytes"));
     }
 
     #[test]
@@ -1316,10 +1991,13 @@ mod tests {
         let capabilities = key.capabilities().unwrap();
         assert_eq!(capabilities.source(), CapabilitySource::Cached);
         assert!(capabilities.contains(Operation::OriginProof));
-        // Origin proof is driven now; purpose is still a client gap, and the unknown name is
-        // kept verbatim rather than guessed at.
-        assert_eq!(capabilities.effective(), ["http", "origin-proof"]);
-        assert_eq!(capabilities.announced_not_effective(), ["purpose"]);
+        // Every announced operation this build knows how to drive is effective; the unknown
+        // name is kept verbatim rather than guessed at.
+        assert_eq!(
+            capabilities.effective(),
+            ["http", "origin-proof", "purpose"]
+        );
+        assert!(capabilities.announced_not_effective().is_empty());
         assert_eq!(
             capabilities.announced_names(),
             [
@@ -1349,6 +2027,39 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("RESOURCE_BUSY"), "{err}");
+    }
+
+    #[test]
+    fn a_capability_reply_also_says_which_purposes_are_enabled() {
+        let capabilities = parse_capabilities(
+            br#"{"version":2,"code":"OK","signing_available":true,
+                 "protected_supported":true,
+                 "data":{"operations":["SIGN_PURPOSE","SIGN_HTTP"],
+                         "signing_purposes":["device_assertion"]}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            capabilities.supports_signing_purpose("device_assertion"),
+            Some(true)
+        );
+        assert_eq!(
+            capabilities.supports_signing_purpose("application_assertion"),
+            Some(false),
+            "the daemon said which purposes are on, so the other one is off"
+        );
+        assert_eq!(
+            capabilities.signing_purposes(),
+            Some(vec!["device_assertion"])
+        );
+
+        // An older daemon does not say. That is unknown, not off: one request gets sent
+        // and the daemon's own OPERATION_DISABLED is the answer.
+        let old = parse_capabilities(
+            br#"{"version":2,"code":"OK","signing_available":true,
+                 "protected_supported":true,"data":{"protocol_version":2}}"#,
+        )
+        .unwrap();
+        assert_eq!(old.supports_signing_purpose("device_assertion"), None);
     }
 
     #[test]

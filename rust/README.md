@@ -257,7 +257,7 @@ tests/cli_surface.rs` 里逐字列着今天每一个页面，删一个或改一�
 | 命令 | 位置参数 | 旗标（默认值） |
 | --- | --- | --- |
 | `did create` | — | `--host <URL>`（必填）、`--handle <NAME>`（必填）、`--agent`（缺省=handle）、`--profile`（`default`） |
-| `did attach-anpio-key` | — | `--did <DID>`（必填）、`--config <PATH>`、`--grant <GRANT-ID>`（要 `--config`）、`--key-root <DIR>`、`--socket <PATH>`（与 `--config` 互斥）、`--kid <FRAGMENT>`、`--host <URL>`、`--agent`（缺省=handle）、`--profile`、`--force`、`--json` |
+| `did attach-anpio-key` | — | `--did <DID>`（必填）、`--config <PATH>`、`--grant <GRANT-ID>`（要 `--config`）、`--device <ID>`、`--key-root <DIR>`、`--socket <PATH>`（与 `--config` 互斥）、`--kid <FRAGMENT>`、`--host <URL>`、`--agent`（缺省=handle）、`--profile`、`--force`、`--json` |
 | `did show` | — | `--agent`、`--profile`、`--json` |
 | `did list` | — | `--json` |
 | `did register` | — | `--agent`、`--profile` |
@@ -324,9 +324,17 @@ grant 会在 attach 时就拒，而不是等到第一次发送），并缓存协
 `msg listen` 开流前会查 `GET_GRANT_STATUS`，一小时内有到期而 grant 还能续时按
 `RENEW_GRANT` 续一次（daemon 按策略上限截断），续不到就把管理员要做的事写进错误。
 
-**不能的**：`group e2ee` 与 `did update`。前者要 `SIGN_PURPOSE` 与设备钥（阶段 2），后者要
-铸后继钥、退役文档还得由 key-1 签（管理面缺口）。拒绝发生在动手之前，并列出这条身份**能**
-做什么、缺的是 daemon 那一半还是本 build 这一半。
+**不能的**：`did update`。它要铸后继钥、退役文档还得由 key-1 签（管理面缺口）。拒绝发生在
+动手之前，并列出这条身份**能**做什么、缺的是 daemon 那一半还是本 build 这一半。
+
+**群端到端加密（`group e2ee`）**：给 `--device <ID>` 时，`publish` / `create` / `add` /
+`remove` 的 KeyPackage 绑定与 `send` 的设备 origin proof 都由守护进程按
+`SIGN_PURPOSE(purpose=device_assertion)` 签。设备名必须是文档里 `{device}-sign` 那一条
+（给整条 `did:wba:…#phone-1-sign` 也认），attach 时按文档核对，找不到就拒、并列出文档实际
+发布的片段——不会用 `{agent}/{profile}` 猜一个。签名回来后客户端拿 daemon 给的
+`public_multibase` 与文档逐字节比对，再让 `anp` crate 自己验证签名，两关都过才用。
+不给 `--device`（或守护进程没开 `device_assertion`）时，`group e2ee` 照旧拒绝并说清楚缺哪一样。
+MLS 自己的 ratchet 钥仍在本地 store：那是会话状态，不是身份钥。
 
 环境：`$ANPIOCLI_ANPIO_KEY` 指定二进制（只影响开发 socket；受保护入口钉在管理员装的二进制上），
 `--key-root` / `--socket` 指定守护进程的库（缺省交给 `anpio-key` 自己的 `~/.anpio-key`）。

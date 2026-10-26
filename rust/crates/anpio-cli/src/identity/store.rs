@@ -943,18 +943,17 @@ mod tests {
     }
 
     #[test]
-    fn a_refusal_says_when_the_daemon_has_it_but_this_build_does_not() {
+    fn a_refusal_says_when_the_daemon_has_the_operation_but_not_this_grant() {
         let custody = Custody::AnpioKey(crate::custody::AnpioKey {
             operations: Some(vec!["SIGN_HTTP".to_string(), "SIGN_PURPOSE".to_string()]),
-            grant: Some("grant-1".to_string()),
             ..crate::custody::AnpioKey::default()
         });
         let err = custody
             .require(Operation::Purpose, "group e2ee")
             .unwrap_err()
             .to_string();
-        assert!(err.contains("does not yet delegate SIGN_PURPOSE"), "{err}");
-        assert!(err.contains("missing half is on this client"), "{err}");
+        assert!(err.contains("records no grant"), "{err}");
+        assert!(err.contains("SIGN_PURPOSE"), "{err}");
     }
 
     #[test]

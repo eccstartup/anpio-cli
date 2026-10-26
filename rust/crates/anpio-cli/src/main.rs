@@ -55,9 +55,9 @@ use anpio_cli::message::{
     PUBLISH_KEY_PACKAGE, SYNC_DELTA, TRANSPORT_PROTECTED,
 };
 use anpio_cli::mls::{
-    abort_commit, application_plaintext, device_signing_key, finalize_commit, generate_key_package,
+    abort_commit, application_plaintext, device_signer, finalize_commit, generate_key_package,
     new_key_package_id, prepare_add, prepare_create, prepare_remove, send_message, AddInput,
-    CreateInput, KEY_PACKAGE_VALID_DAYS, RemoveInput, SendInput,
+    CreateInput, DeviceSigner, KEY_PACKAGE_VALID_DAYS, RemoveInput, SendInput,
 };
 use anpio_cli::messages::{
     records_from, Conversation, Direction, MessageStore, Record as MessageRecord, RecordingView,
@@ -292,6 +292,14 @@ enum DidCommand {
         /// The grant this identity signs under, issued by the anpio-key administrator.
         #[arg(long, requires = "config")]
         grant: Option<String>,
+        /// This machine's device name in the DID document (`{device}-sign`,
+        /// `{device}-agreement`), for the paths that sign as a device (group E2EE).
+        ///
+        /// Left out, those paths refuse and say so: the local `{agent}/{profile}` is not a
+        /// device name, and mapping one to the other would point at a key the document may
+        /// not publish.
+        #[arg(long, value_name = "ID")]
+        device: Option<String>,
         /// The DID host's URL, when the DID's authority is not the host to publish to.
         #[arg(long)]
         host: Option<String>,
@@ -1098,6 +1106,7 @@ async fn main() -> anyhow::Result<()> {
                 kid,
                 config,
                 grant,
+                device,
                 host,
                 agent,
                 profile,
@@ -1110,6 +1119,7 @@ async fn main() -> anyhow::Result<()> {
                 kid.as_deref(),
                 config,
                 grant,
+                device.as_deref(),
                 host.as_deref(),
                 agent.as_deref(),
                 profile.as_deref(),
@@ -1624,6 +1634,7 @@ fn cmd_did_attach_anpio_key(
     kid: Option<&str>,
     config: Option<PathBuf>,
     grant: Option<String>,
+    device: Option<&str>,
     host: Option<&str>,
     agent: Option<&str>,
     profile: Option<&str>,
@@ -1646,6 +1657,7 @@ fn cmd_did_attach_anpio_key(
         kid,
         config,
         grant,
+        device: device.map(str::to_string),
         ..AnpioKey::default()
     };
 
@@ -1671,8 +1683,15 @@ fn cmd_did_attach_anpio_key(
         }
         // Cache the negotiated set here so an ordinary command answers "can this identity
         // sign?" without spawning a daemon. An empty announcement (a daemon too old to have
-        // the field) is cached as what it actually is: the baseline six operations.
-        key.operations = Some(key.capabilities()?.announced_names());
+        // the field) is cached as what it actually is: the baseline six operations. The
+        // purposes are cached beside them for the paths that need a *purpose* switch
+        // (`device_assertion`); an absent list stays absent, so the daemon's own refusal
+        // decides rather than this client assuming the switch is off.
+        let capabilities = key.capabilities()?;
+        key.operations = Some(capabilities.announced_names());
+        key.signing_purposes = capabilities
+            .signing_purposes()
+            .map(|purposes| purposes.into_iter().map(str::to_string).collect());
         (document, keyid)
     } else {
         let document = key.document(did)?;
@@ -1689,6 +1708,33 @@ fn cmd_did_attach_anpio_key(
                 available.join(", ")
             }
         );
+    }
+
+    // A device binding is only stored once the document shows the key it names. Two
+    // spellings are accepted because both are things a person pastes — the device name and
+    // the whole fragment — and the document decides which one it is, so neither is a guess.
+    if let Some(given) = key.device.clone() {
+        let bare = given.rsplit('#').next().unwrap_or(&given).to_string();
+        let candidates = [
+            bare.clone(),
+            bare.trim_end_matches("-sign").to_string(),
+            given.clone(),
+        ];
+        let matched = candidates
+            .into_iter()
+            .find(|device| document_has_key(&document, &format!("{did}#{device}-sign")));
+        let Some(device) = matched else {
+            anyhow::bail!(
+                "{did} publishes no {}; the document publishes {}",
+                format!("{did}#{bare}-sign"),
+                if document_keyids(&document).is_empty() {
+                    "no verification methods".to_string()
+                } else {
+                    document_keyids(&document).join(", ")
+                }
+            );
+        };
+        key.device = Some(device);
     }
 
     // `did create` defaults the agent to the handle; so does this, and for the same reason:
@@ -5038,10 +5084,17 @@ async fn cmd_group_e2ee_send(
     // sending *device's* key rather than the DID root's. The service compares the proof's
     // `keyid` against the DID document's `signing_key_id` for `meta.sender_device_id`, and
     // `key-1` loses that comparison — so the sender is re-cut here, same DID, device key.
-    let (device_keyid, device_key) = device_signing_key(&identity)?;
-    let sender = group_channel
-        .sender
-        .signing_as_device(device_keyid, device_key);
+    // Which custody holds that key is [`device_signer`]'s call: a local `{device}-sign`, or
+    // `anpio-key` signing the prepared proof under `device_assertion`.
+    let signer = device_signer(&identity)?;
+    let sender = match signer {
+        DeviceSigner::Local { keyid, key } => group_channel.sender.signing_as_device(keyid, key),
+        DeviceSigner::Daemon {
+            keyid, key, public, ..
+        } => group_channel
+            .sender
+            .signing_as_daemon_device(keyid, key, public),
+    };
 
     let response = call(
         &client,

@@ -10,7 +10,10 @@
 //! 3. The **same** `meta` goes to the signer and to the envelope builder, so neither can
 //!    sign one thing and send another.
 
-use anp::proof::{generate_rfc9421_origin_proof, Rfc9421OriginProofGenerationOptions};
+use anp::proof::{
+    complete_rfc9421_origin_proof, generate_rfc9421_origin_proof, prepare_rfc9421_origin_proof,
+    Rfc9421OriginProofGenerationOptions,
+};
 use anp::PrivateKeyMaterial;
 use chrono::{SecondsFormat, Utc};
 use reqwest::Url;
@@ -225,6 +228,13 @@ pub enum SenderKey {
     Local(PrivateKeyMaterial),
     /// The daemon holds the key; each proof is one protected `SIGN_ORIGIN_PROOF` call.
     AnpioKey(AnpioKey),
+    /// The daemon holds **this device's** signing key. The proof is prepared here from the
+    /// document's public key, signed by the daemon under `device_assertion`, and completed by
+    /// checking the signature against that same public key.
+    AnpioKeyDevice {
+        key: AnpioKey,
+        public: anp::PublicKeyMaterial,
+    },
 }
 
 pub struct Sender {
@@ -315,6 +325,27 @@ impl Sender {
             profile: self.profile.clone(),
             device_id: self.device_id.clone(),
             signing_key: SenderKey::Local(signing_key),
+        }
+    }
+
+    /// The same device proof, made by `anpio-key` instead of by a key read here.
+    ///
+    /// `keyid` and `public` both come from the identity's own DID document
+    /// ([`crate::mls::device_signer`] resolves them), so the proof this run sends names — and
+    /// verifies against — exactly what the service will compare `meta.sender_device_id` to.
+    pub fn signing_as_daemon_device(
+        &self,
+        keyid: String,
+        key: AnpioKey,
+        public: anp::PublicKeyMaterial,
+    ) -> Self {
+        Self {
+            did: self.did.clone(),
+            keyid,
+            agent: self.agent.clone(),
+            profile: self.profile.clone(),
+            device_id: self.device_id.clone(),
+            signing_key: SenderKey::AnpioKeyDevice { key, public },
         }
     }
 }
@@ -458,6 +489,37 @@ pub fn sign_request(sender: &Sender, id: &str, request: CallRequest) -> Result<A
                 signed.signature_input,
                 signed.signature,
             )
+        }
+        // The crate's own prepared proof is what the daemon signs: the signature base is
+        // built here from the same `meta` the envelope carries, and the completion step
+        // verifies the bytes that came back against the document's key. A daemon that
+        // signed with another key therefore fails before anything is sent.
+        SenderKey::AnpioKeyDevice { key, public } => {
+            let prepared = prepare_rfc9421_origin_proof(
+                &method,
+                &meta_value,
+                &body_value,
+                public,
+                &sender.keyid,
+                Rfc9421OriginProofGenerationOptions::default(),
+            )
+            .map_err(|err| AnpioError::MessageInvalid(format!("signing {method}: {err}")))?;
+            let signed = key
+                .sign_purpose(
+                    &sender.did,
+                    id,
+                    crate::custody::DEVICE_ASSERTION_PURPOSE,
+                    None,
+                    prepared.signing_input(),
+                )
+                .map_err(|err| {
+                    AnpioError::MessageInvalid(format!("signing {method} with anpio-key: {err:#}"))
+                })?;
+            let proof =
+                complete_rfc9421_origin_proof(prepared, &signed.signature).map_err(|err| {
+                    AnpioError::MessageInvalid(format!("completing {method}'s proof: {err}"))
+                })?;
+            (proof.content_digest, proof.signature_input, proof.signature)
         }
     };
 
@@ -1087,6 +1149,44 @@ mod tests {
         .expect("the development socket cannot make an origin proof")
         .to_string();
         assert!(err.contains("development socket"), "{err}");
+        assert!(err.contains("--config"), "{err}");
+    }
+
+    /// The device cut under `anpio-key` is still one proof, made from the document's key:
+    /// the prepared signature base goes to `SIGN_PURPOSE`, not to a local key. The
+    /// development socket cannot make one, so the refusal names that — no fallback.
+    #[test]
+    fn a_daemon_device_proof_needs_the_protected_surface() {
+        let sender = Sender::from_identity(&anpio_key_identity(AnpioKey {
+            operations: Some(vec![
+                "SIGN_ORIGIN_PROOF".to_string(),
+                "SIGN_PURPOSE".to_string(),
+            ]),
+            grant: Some("grant-1".to_string()),
+            ..AnpioKey::default()
+        }))
+        .expect("a granted daemon that announces the operations is allowed to try");
+
+        let material = PrivateKeyMaterial::Ed25519(ed25519_dalek::SigningKey::generate(
+            &mut rand::rngs::OsRng,
+        ));
+        let device = sender.signing_as_daemon_device(
+            format!("{}#test/default-sign", sender.did),
+            AnpioKey::default(),
+            material.public_key(),
+        );
+        assert_eq!(device.did, sender.did, "the DID on the wire does not move");
+
+        let err = sign_request(
+            &device,
+            "8b3f4f0e-7a5b-4c47-9c2f-2b6a1d9e0c11",
+            a_request("direct.send"),
+        )
+        .err()
+        .expect("the development socket cannot make a device assertion")
+        .to_string();
+        assert!(err.contains("development socket"), "{err}");
+        assert!(err.contains("device assertion"), "{err}");
         assert!(err.contains("--config"), "{err}");
     }
 
