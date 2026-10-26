@@ -3944,6 +3944,25 @@ async fn cmd_msg_listen(
     // command rather than as a stream that never connects.
     let location = own.location()?;
     let identity = Identity::load(&location)?;
+
+    // A listener signs on every reconnect, so a grant that runs out mid-run ends the stream
+    // hours after the user walked away from it. This is the one moment to notice, and to
+    // say what the administrator would have to do if it cannot be renewed.
+    if let Some(Custody::AnpioKey(key)) = identity.custody.as_ref() {
+        if key.config.is_some() {
+            if let Some(renewed) = key.ensure_runway()? {
+                let when = chrono::DateTime::from_timestamp(renewed.expiry, 0)
+                    .map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+                    .unwrap_or_else(|| format!("{} (unix seconds)", renewed.expiry));
+                eprintln!(
+                    "renewed anpio-key grant {} until {when} so the listener keeps signing on \
+                     reconnect",
+                    renewed.grant_id
+                );
+            }
+        }
+    }
+
     let client = http_client()?;
     let channel = open_channel(&client, &identity, allow_private).await?;
     let device = device_of(&channel.sender, options.device.as_deref())?;

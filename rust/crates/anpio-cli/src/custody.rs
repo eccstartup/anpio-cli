@@ -114,6 +114,59 @@ impl GrantStatus {
     }
 }
 
+/// When a long-running command renews, and how far out it asks for.
+///
+/// A listener re-signs on every reconnect, so a grant that runs out mid-run ends the stream.
+/// Renewing an hour before expiry is early enough that the reconnect after it signs, and
+/// late enough that starting a listener twice in an afternoon does not spend a renewal each
+/// time. The request is deliberately further out than the window: the daemon clamps it to
+/// the policy's ceiling, so this asks for "as long as the administrator allowed" without
+/// this client having to know that number.
+pub const GRANT_RENEW_WINDOW_SECS: i64 = 3_600;
+pub const GRANT_RENEW_REQUEST_SECS: i64 = 86_400;
+
+/// Whether `status` can carry a command that will still be signing later, and if not, why.
+///
+/// Split from the daemon calls so the decision is testable: every refusal here names what
+/// the administrator would have to change, because none of it is something this client can
+/// fix by trying again.
+fn runway_plan(status: &GrantStatus, now: i64) -> Result<bool> {
+    if !status.usable() {
+        bail!(
+            "anpio-key reports grant {} as {} with {} of {} uses left, so this command's first \
+             signature would already fail. Ask the anpio-key administrator for a fresh grant, \
+             then: anpio-cli did attach-anpio-key --grant <grant-id>",
+            status.grant_id,
+            status.state,
+            status.remaining_uses(),
+            status.max_uses
+        );
+    }
+    if status.expiry - now >= GRANT_RENEW_WINDOW_SECS {
+        return Ok(false);
+    }
+    if status.kind != "session" {
+        bail!(
+            "grant {} is a `{}` grant that expires in {} seconds; only a session grant can be \
+             renewed, so a listener started on it will stop signing when it expires. Ask the \
+             anpio-key administrator for a session grant",
+            status.grant_id,
+            status.kind,
+            status.expiry - now
+        );
+    }
+    if status.renewals >= status.max_renewals {
+        bail!(
+            "grant {} expires in {} seconds and has used all {} of its renewals. Ask the \
+             anpio-key administrator for a fresh session grant",
+            status.grant_id,
+            status.expiry - now,
+            status.max_renewals
+        );
+    }
+    Ok(true)
+}
+
 /// A proof this client can ask `anpio-key` to produce.
 ///
 /// The names are the daemon's (`ADAPTER.md` §11.3), because they are what `GET_CAPABILITIES`
@@ -598,6 +651,32 @@ impl AnpioKey {
             .context("anpio-key returned a renewed grant this client cannot read")
     }
 
+    /// Make sure this grant can still sign later, renewing it when it is about to run out.
+    ///
+    /// Returns the renewed grant when a renewal happened, so the caller can say what the
+    /// grant now reaches — the daemon may have clamped the request to the policy's ceiling,
+    /// which is shorter than the caller asked for and worth showing. `Ok(None)` means the
+    /// grant was already good enough and no daemon call beyond the status read was made.
+    pub fn ensure_runway(&self) -> Result<Option<GrantStatus>> {
+        let now = unix_now()?;
+        let status = self.grant_status()?;
+        if !runway_plan(&status, now)? {
+            return Ok(None);
+        }
+        let renewed = self.renew_grant(now + GRANT_RENEW_REQUEST_SECS)?;
+        if !renewed.usable() || renewed.expiry <= now {
+            bail!(
+                "anpio-key renewed grant {} but it is still {} with {} seconds left; a listener \
+                 started now would stop signing immediately. Ask the anpio-key administrator to \
+                 check the policy's lifetime ceiling",
+                renewed.grant_id,
+                renewed.state,
+                renewed.expiry - now
+            );
+        }
+        Ok(Some(renewed))
+    }
+
     /// The DID document and key of an authorized key, read through the protected surface.
     ///
     /// The development surface has a `document` entry; the protected one does not. There the
@@ -895,6 +974,19 @@ fn parse_signed_headers(bytes: &[u8], did: &str) -> Result<BTreeMap<String, Stri
     Ok(headers)
 }
 
+/// Unix seconds, for comparing against the daemon's clock.
+///
+/// A machine whose clock is wrong gets a refusal from the daemon rather than a verdict from
+/// here: this only decides whether to *ask* for a renewal, never whether a signature is
+/// valid.
+fn unix_now() -> Result<i64> {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("the system clock is before the Unix epoch")?
+        .as_secs();
+    i64::try_from(seconds).context("the system clock is past 292 billion years")
+}
+
 /// Write a JSON request where the daemon can read it, and nowhere else.
 ///
 /// The body of an ANP-02 request is public — a DID, a document, a nonce — and a capability
@@ -1102,6 +1194,42 @@ mod tests {
         };
         assert_eq!(exhausted.remaining_uses(), 0);
         assert!(!exhausted.usable(), "an exhausted grant signs nothing");
+    }
+
+    #[test]
+    fn a_long_run_renews_only_when_the_grant_is_about_to_run_out() {
+        let base = GrantStatus {
+            grant_id: "g-1".to_string(),
+            key_id: "k-1".to_string(),
+            state: "active".to_string(),
+            expiry: 2_000_000,
+            kind: "session".to_string(),
+            max_uses: 100,
+            used_uses: 10,
+            max_renewals: 2,
+            renewals: 0,
+        };
+        let now = 1_000_000;
+
+        assert!(
+            !runway_plan(&base, now).unwrap(),
+            "a grant with a day left is not renewed"
+        );
+
+        let soon = GrantStatus { expiry: now + 600, ..base.clone() };
+        assert!(runway_plan(&soon, now).unwrap(), "ten minutes left is renewed");
+
+        let single_use = GrantStatus { kind: "request".to_string(), ..soon.clone() };
+        let err = runway_plan(&single_use, now).unwrap_err().to_string();
+        assert!(err.contains("session grant"), "{err}");
+
+        let spent = GrantStatus { renewals: 2, ..soon.clone() };
+        let err = runway_plan(&spent, now).unwrap_err().to_string();
+        assert!(err.contains("renewals"), "{err}");
+
+        let exhausted = GrantStatus { state: "exhausted".to_string(), ..base.clone() };
+        let err = runway_plan(&exhausted, now).unwrap_err().to_string();
+        assert!(err.contains("fresh grant"), "{err}");
     }
 
     #[test]
