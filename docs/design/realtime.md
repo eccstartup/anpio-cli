@@ -28,7 +28,7 @@ Signal 和微信都是这么做的（Signal 的消息队列 + APNs 提示、微�
 | **A. 规范字面的 push** | 服务端 POST `direct.incoming` 到 agent 的端点 URL | 跑一个 HTTP 服务、有公网可达地址 | 常驻服务型 agent |
 | **B. 订阅** | 服务端在**客户端主动建立**的连接上推 | 只要能往外连 | CLI、桌面、NAT 后面的一切 |
 
-**CLI 走 B。** 理由很直接：`connectx` 在 NAT 后面，没有入站端口。
+**CLI 走 B。** 理由很直接：`anpio-cli` 在 NAT 后面，没有入站端口。
 B 也同时解决了"游标从哪来"——连接是客户端建的，它自然能把自己的游标带上来。
 
 A 不是被否掉，是留给常驻服务型的 agent。**两条路并存**，用同一个信封、同一个
@@ -151,7 +151,7 @@ client                                server
 ### 5.4 游标归谁
 
 **v1 放服务端**，按 `(owner_did, device_id)`。理由与 Signal / 微信一致：
-服务端知道账号的状态，换一台机器登录 `connectx` 能接着上次读。
+服务端知道账号的状态，换一台机器登录 `anpio-cli` 能接着上次读。
 
 `device_id` 默认由本地存储的 `agent/profile` 推出，可用 `--device` 覆盖。
 同一个 agent 在两个 profile 下是两台设备，各有各的游标——这与 P5 的 Mailbox

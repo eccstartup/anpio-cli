@@ -304,6 +304,8 @@ ALTER TABLE deliveries ADD COLUMN recipient_device_id TEXT;
 
    照记代价：官方 **TS SDK 没有 `group_e2ee`**，`connectx` 走 (a) 需要自己写 Rust crate →
    Node 的 napi 绑定。**这条不影响 v1**——P5 / P6 的客户端密码学 v1 都不做。
+   （`connectx` 已于 2026-10-03 退役删除，napi 那条代价随之消失；密码学仍在设备侧，
+   今天的落点是 Rust 客户端的 `mls.rs`，见 [client-mls.md](client-mls.md)。）
 2. ~~**限流的形状**~~（2026-10-01 定：本服务给默认值。§7.3 L598 只要求"按 hop / service 级
    认证限流"，没给数值，属部署策略。默认＝按**调用方 DID**计数的令牌桶，数值走配置，
    给一个保守默认；跨域时外层 hop 认证已提供调用方身份，同域时用 `meta.sender_did`）。

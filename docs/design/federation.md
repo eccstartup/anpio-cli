@@ -82,7 +82,7 @@ replay cache；L143 是验证流程里的第 8 步。core 的 `verifyHttpMessage
 
 **选择**：外层认证按「请求有没有带 `Signature-Input`」触发。带了就八步必过，任一步
 失败即 401；没带就当作本地调用，只认 `origin_proof`。**这是本服务的选择**——
-§6.2 的要求落在「服务到服务调用」上，而本地 `connectx` 客户端不是服务（P8 §9.2 L588
+§6.2 的要求落在「服务到服务调用」上，而本地 `anpio-cli` 客户端不是服务（P8 §9.2 L588
 的"Agent 直达模式"也明说客户端自己做外层认证**不属于 v1 MTI**，所以 CLI 不该有它）。
 
 **代价要说清楚**：一个跨域调用方可以不带外层身份，我们无法把它与本地客户端分辨开。
@@ -263,11 +263,11 @@ C5b 那行 `direct.incoming` 入队本来就是白跑的一趟：后台 worker �
    方**决定，本服务只能配成一致。落地就是 `ANPIOCLI_KEY_ID`：完整 DID URL，且必须挂在
    `serviceDid` 下——配置层会拒掉别的，因为不一致时我们签出去的每一份请求都会被对端按第 6
    步拒成 `forbidden_did`，而那个错误看起来像对端的问题。
-3. **私钥从哪来。** `ANPIOCLI_KEY_FILE`（`config.ts` L206）早就解析了却没人用。
-   C11 就是它的第一个消费者：读一把 Ed25519 私钥（hex 或 PEM，与 `connectx --key` 认的
-   同两种），按 ANP-02 §3.1.2 造 `Signature-Input` + `Signature` + `Content-Digest`。
-   core 现有的签名器**不能**直接用——它是 ANP-02 的 DID 服务登录流程，不是通用外层的
-   （见 `crypto/signer.ts`）。
+3. **私钥从哪来。** `ANPIOCLI_KEY_FILE`（`config.ts` L408）配一把 Ed25519 私钥，
+   两种写法：裸 hex，或以 `-----BEGIN` 开头的 PEM。C11 落地的消费者是
+   `federation/signing.ts`：按 ANP-02 §3.1.2 造 `Signature-Input` + `Signature` +
+   `Content-Digest`。core 的登录签名器**不能**直接拿来用——它是 ANP-02 的 DID 服务
+   登录流程，不是通用外层的（见 `crypto/signer.ts`）。
 
 ## 5. 群与附件的跨域落点
 

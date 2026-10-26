@@ -81,7 +81,7 @@ AnpioAgent listening on http://127.0.0.1:8787
 ## 3. 备一个身份
 
 `anpio-cli` 的身份存在自己的 store 根下（`$ANPIOCLI_HOME`，缺省 `~/.anpio-cli`），
-按 agent + profile 隔离。它**不碰**旧 `connectx` 的 `~/.connectx/`。建一个：
+按 agent + profile 隔离。旧客户端留下的 `~/.connectx/` 不会被读取。建一个：
 
 ```bash
 anpio-cli did create --host http://localhost:8000 --handle alice

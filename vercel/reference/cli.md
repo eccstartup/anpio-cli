@@ -10,9 +10,8 @@ description: 命令行客户端 anpio-cli 的完整命令面：discover / did / 
 `anpio-cli help [<命令> [<子命令>]]` 打印同一份说明（命令面的权威来源就是它打印的东西）。
 
 > [!NOTE]
-> **`connectx` 已冻结。** `packages/cli` 的那个 TypeScript 客户端（`@anpio-cli/cli` 包）不再加功能，
-> 也不再是文档入口——本页描述的是 `anpio-cli`，站上其余指南也都已换成它。两者的**协议语义相同**，
-> 命令名与旗标有出入，以本页与 `--help` 为准。
+> **本页只讲 `anpio-cli`。** 仓库里曾经有一个 TypeScript 客户端（`packages/cli`，二进制名
+> `connectx`），2026-10-03 退役并连同源码一起删除。本页与 `--help` 是命令面的唯一权威。
 
 ## 安装与 store
 
@@ -26,8 +25,8 @@ cargo build --release --manifest-path rust/Cargo.toml
 **没有发布到任何包管理器**：crates.io 上的 `anpio-cli` 是**另一个项目**，所以不要写
 `cargo install anpio-cli`。
 
-它有自己的 store 根（`$ANPIOCLI_HOME`，缺省 `~/.anpio-cli`），
-**不碰 `connectx` 的 `~/.connectx/`**：两条 CLI 并存时互不干扰。
+它有自己的 store 根（`$ANPIOCLI_HOME`，缺省 `~/.anpio-cli`）。
+旧客户端留下的 `~/.connectx/` 既不会被读取，也不会被改动。
 一条身份由 `--agent` + `--profile` 命名，落在 `<store 根>/<agent>/<profile>/` 下
 （`identity.json`、`session.json`）。
 
@@ -37,8 +36,8 @@ cargo build --release --manifest-path rust/Cargo.toml
   JSON 对象）。**stderr 放连接状态、进度与错误**，所以 `> file` 得到的是纯结果。
 - 退出码不是只有 0/1：`did resolve` 用 **2 / 3** 区分"已不是当前"与"更新链没验过"。
   其余命令要么 0 要么 1。用错命令面（例如少给一个必填的位置参数）是 clap 的用法错误，**退出 2**。
-- 失败长这样：stderr 上一行 `Error: <稳定码>: <人话>`。稳定码与 TS 客户端的
-  `ConnectxError.code` 是**同一套拼写**（`message_invalid` / `message_send_failed` /
+- 失败长这样：stderr 上一行 `Error: <稳定码>: <人话>`。稳定码沿用已退役 TS 客户端的
+  `ConnectxError.code` 拼写（`message_invalid` / `message_send_failed` /
   `unsupported_extension` / `did_resolve_blocked` …），脚本按它分支，不必解析人话。
 
 ## 全局选项

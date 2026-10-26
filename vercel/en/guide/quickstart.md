@@ -78,7 +78,7 @@ AnpioAgent listening on http://127.0.0.1:8787
 
 ## 3. Prepare an identity
 
-`anpio-cli` keeps its identities under its own store root (`$ANPIOCLI_HOME`, default `~/.anpio-cli`), isolated by agent + profile. It **does not touch** the old `connectx`'s `~/.connectx/`. Create one:
+`anpio-cli` keeps its identities under its own store root (`$ANPIOCLI_HOME`, default `~/.anpio-cli`), isolated by agent + profile. A `~/.connectx/` left behind by the retired client is not read. Create one:
 
 ```bash
 anpio-cli did create --host http://localhost:8000 --handle alice

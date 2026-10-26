@@ -1,4 +1,4 @@
-# 客户端侧群 MLS（B2）—— 设备侧的密码学，内嵌进 `connectx`
+# 客户端侧群 MLS（B2）—— 设备侧的密码学，内嵌进 `connectx`（已退役）
 
 [e2ee-group.md](e2ee-group.md) 写的是**本服务**在 P6 里的位置：排序、一份公开投影、两台柜子，
 一行 MLS 都没有。那份文档从头到尾站在**没有密码学的那一边**。
@@ -13,11 +13,15 @@
 > `CONNECTX_HOME` 下的 store** 是当时那份计划，**已经取消**：MLS 只在 Rust crate 里，
 > 所以不做 napi 壳，**直接由 Rust 客户端调**（[TODO5.md](../../TODO5.md) §3 那句"B2 的 napi
 > 壳整条取消——不是'要写两次'，是'换一种方式拿 MLS'"）。今天的事实是：
-> store 在 `$ANPIOCLI_HOME/<agent>/<profile>/mls/`（**不是** `CONNECTX_HOME`，两个客户端
-> 的 store 根是分开的），实现是 [`rust/crates/anpio-cli/src/mls.rs`](../../rust/crates/anpio-cli/src/mls.rs)，
+> store 在 `$ANPIOCLI_HOME/<agent>/<profile>/mls/`（**不是** `CONNECTX_HOME`，那个客户端的
+> store 根已随它一起退役），实现是 [`rust/crates/anpio-cli/src/mls.rs`](../../rust/crates/anpio-cli/src/mls.rs)，
 > **已经真的在跑**（`publish` / `get-key-package` / `create` / `add` / `remove` / `send` 与收包路径）。
 > 保留下来的读法是 §2 / §2.1 那张 crate 函数对照表与 §5 的四个坑——它们与实现无关，仍然成立。
 > 这个目录里的**兄弟** `messages.db` 单独一份：[client-messages.md](client-messages.md)。
+>
+> **2026-10-03 起 `connectx` 本身也退役并删除了**（[cli.md](cli.md) §1），所以下面把
+> `connectx` / `packages/cli` 当现役主体的段落只作历史读；现役客户端是 Rust 的
+> `anpio-cli`，MLS 就在它里面。
 
 ## 1. 为什么有这一块
 
@@ -31,7 +35,7 @@ MLS runtime）。
 
 > **P6 的服务端半边，从来没有被一个真客户端驱动过。**
 
-做 MLS 的那一半在设备侧，而设备侧今天是这样：
+做 MLS 的那一半在设备侧，而设备侧当时（2026-10-01）是这样：
 
 - `packages/cli/src/commands/` 有 `group.ts`（P4）与 `msg.ts`（P3），**没有**任何 `group.e2ee.*`；
 - `packages/core` 是协议原语的 TS 移植（[vendored-core.md](vendored-core.md)，来源

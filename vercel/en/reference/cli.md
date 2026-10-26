@@ -8,7 +8,7 @@ description: "The complete command surface of the anpio-cli command-line client 
 `anpio-cli` is this repository's command-line client, written in Rust, with its source under `rust/crates/anpio-cli/`. Every command has the form `anpio-cli <command> [subcommand] [arguments] [options]`, and `anpio-cli help [<command> [<subcommand>]]` prints the same description (the authority on the command surface is exactly what it prints).
 
 > [!NOTE]
-> **`connectx` is frozen.** The TypeScript client in `packages/cli` (the `@anpio-cli/cli` package) no longer gains features and is no longer the documentation entry point — this page describes `anpio-cli`, and the rest of this site has been switched to it too. The two speak the **same protocol**; the command names and flags differ, so take this page and `--help` as authoritative.
+> **This page documents `anpio-cli` only.** The repository used to ship a TypeScript client in `packages/cli` (binary `connectx`); it was retired and deleted on 2026-10-03. This page and `--help` are the only authority on the command surface.
 
 ## Install and store
 
@@ -22,7 +22,7 @@ cargo build --release --manifest-path rust/Cargo.toml
 It is **not published to any package manager**: the `anpio-cli` on crates.io is a **different
 project**, so do not write `cargo install anpio-cli`.
 
-It keeps its own store root (`$ANPIOCLI_HOME`, default `~/.anpio-cli`) and **does not touch `connectx`'s `~/.connectx/`**, so the two CLIs coexist without interfering. An identity is named by `--agent` + `--profile` and lands under `<store root>/<agent>/<profile>/` (`identity.json`, `session.json`).
+It keeps its own store root (`$ANPIOCLI_HOME`, default `~/.anpio-cli`). A `~/.connectx/` left behind by the retired client is neither read nor modified. An identity is named by `--agent` + `--profile` and lands under `<store root>/<agent>/<profile>/` (`identity.json`, `session.json`).
 
 ## Output and exit code conventions
 

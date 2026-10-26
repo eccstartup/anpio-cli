@@ -160,7 +160,8 @@ v1 只提供 `DidServiceLocator` 与 `DidKeyResolver` 两个实现。**接口先
 
 ### 6.3 硬约束：调用点不许判类型
 
-**`packages/cli` 与 `packages/service` 里不得出现"这是 DID 还是账户 id"的分支。**
+**`packages/service` 里不得出现"这是 DID 还是账户 id"的分支**（原话还包括当时与它并列的
+`packages/cli`，那个包已随客户端退役删除）。
 一旦有 `if (isDid(x))`，门就关上了。**所有身份都交给 locator / resolver**，
 由它们决定怎么处理。
 

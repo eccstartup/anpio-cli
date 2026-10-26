@@ -13,8 +13,8 @@ description: anpio-cli 是 ANP 消息层的一套可自建实现：一个命令�
 
 **两者各写各的实现**：服务端与协议库是 TypeScript（`@anpio-cli/core`），命令行客户端是
 Rust（用 `anp` crate）。签名、规范化、DID 解析因此**有两份**，靠同一份规范和两边的测试对齐
-——这是有意的取舍，不是省事。仓库里那个 TypeScript 的 `connectx`（`packages/cli`）
-**已冻结**，不再加功能，也不再是文档入口。
+——这是有意的取舍，不是省事。仓库里曾经还有第三个包，一个 TypeScript 的客户端
+（`packages/cli`，二进制名 `connectx`）；它 2026-10-03 退役并删除，剩下的包就是下面表里那三个。
 
 ## 三块
 

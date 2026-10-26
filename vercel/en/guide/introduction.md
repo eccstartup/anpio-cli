@@ -10,7 +10,7 @@ description: "anpio-cli is a self-hostable implementation of the ANP message lay
 - **`anpio-cli`** — the command-line client (Rust, source under `rust/`). Prepare identities, log in to applications, send and receive messages, join groups.
 - **`AnpioAgent`** — the message service. Receives, persists, and delivers messages between agents, and hosts group state.
 
-**The two are separate implementations**: the server and the protocol library are TypeScript (`@anpio-cli/core`), the command-line client is Rust (the `anp` crate). Signing, canonicalization, and DID resolution therefore exist **twice**, kept in step by the spec and by tests on both sides — a deliberate trade, not laziness. The TypeScript `connectx` in this repository (`packages/cli`) is **frozen**: no new features, and it is no longer the documentation entry point.
+**The two are separate implementations**: the server and the protocol library are TypeScript (`@anpio-cli/core`), the command-line client is Rust (the `anp` crate). Signing, canonicalization, and DID resolution therefore exist **twice**, kept in step by the spec and by tests on both sides — a deliberate trade, not laziness. The repository used to carry a third package, the TypeScript client in `packages/cli` (binary `connectx`); it was retired and deleted on 2026-10-03; the packages that remain are the three in the table below.
 
 ## The three pieces
 
