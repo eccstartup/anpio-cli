@@ -287,7 +287,7 @@ ALTER TABLE deliveries ADD COLUMN recipient_device_id TEXT;
 ## 9. 已定的三件事
 
 1. ~~**客户端侧的密码学放哪。**~~（2026-10-01 定：**(a) 内嵌进 `connectx`，与官方 SDK 同向**。
-   与 [TODO1.md](../../TODO1.md) 的 `D4` 是同一个问题——X3DH-like、Double Ratchet 以及 P6 的
+   与「客户端侧的密码学放哪」是同一个问题——X3DH-like、Double Ratchet 以及 P6 的
    MLS 都在设备侧跑。依据是官方 SDK 自己的走向：
 
    - 官方 Rust SDK 明写群 MLS **是库调用、不是 `anp-mls` 子进程调用**（`rust/README.md`

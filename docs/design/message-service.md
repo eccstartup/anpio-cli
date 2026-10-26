@@ -790,7 +790,7 @@ Profile"的答案，混进一个 `x_` 值就把它变成另一个问题了。扩
 | `direct.get_history` | `{peer_did, since_seq?, limit?}` | `{messages: [...], has_more}` |
 | `sync.delta` | `{since, limit?, device_id?}` | `{messages: [{seq, method, params}], next_since, has_more, aged_out}` |
 
-`aged_out` 是"窗外还有多少"（2026-10-03 用户裁定，TODO7 §3）：这一页够不着、调用方的游标
+`aged_out` 是"窗外还有多少"（2026-10-03 用户裁定）：这一页够不着、调用方的游标
 也还没跨过的行数。它是诊断，不进分页——`messages` / `next_since` / `has_more` 一个都不因它
 改；它只让"真的没有了"与"有，但全在窗口外"分得开。见 §14 的窗口那一段。
 
@@ -857,7 +857,7 @@ ANP 按 DID 寻址，而人（以及转述人话的 agent）手里拿的是名�
 而"我"在服务端已经有一个确定答案了——就是这条请求的 **已验证签名者**。
 所以行由 `owner_did`（`meta.sender_did`）分行：一个身份的备注对另一个身份
 **天然不可见**，这是结构上的，不靠文件权限；本地也不必再存第二份并与服务端保持同步。
-（对比 TODO6 §3.3 最初的设想——`<store root>/contacts.json`——那份东西的可见性是靠
+（对比最初的设想——`<store root>/contacts.json`——那份东西的可见性是靠
 `0600` 得到的，而"整机一张"与"每个 agent 一张"的粒度之争在服务端取值下根本不会出现：
 粒度是**身份**。）
 
@@ -963,7 +963,7 @@ subjectOf(did)     // did:wba → 去掉变化的那一段（钥指纹），其�
 **第四个扩展 Profile**，答的是 §9.4 那个问题的另一半：**"我给这个群起了什么名"**。
 群自己的名字协议里**有**——`group_profile.display_name`，住在群的 Host 上，由
 `group.update_profile` 改，**每个成员看到的都是它**（P4 §7.4）。所以这不是一份缺失的
-信息，而是一件**相反**的东西：只有我看得见的那个称呼。TODO6 §4.2 把它与
+信息，而是一件**相反**的东西：只有我看得见的那个称呼。这一层与
 `group members` 的名字（§4.2 ②，改名册里那串 DID）并列为两件事。
 
 **为什么另起一本，不并进 `contacts`。** 通讯录那本键的另一头是一个 **agent**——

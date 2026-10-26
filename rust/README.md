@@ -1,6 +1,6 @@
 # `anpio-cli` —— Rust 客户端
 
-[TODO5.md](../TODO5.md) 落地的那个客户端。**与服务端分开**：`packages/service` 继续是 TS 的
+2026-10-02 起从零用 Rust 写的那个客户端（TS 客户端退役之后，这是唯一的客户端）。**与服务端分开**：`packages/service` 继续是 TS 的
 ANPMessageService，这一份是它的客户端。**它有自己的 store 根**（`ANPIOCLI_HOME`，缺省
 `~/.anpio-cli`）。
 
@@ -126,7 +126,7 @@ cargo run --manifest-path rust/Cargo.toml -- discover http://127.0.0.1:8787
   与"对端拒绝了"（`message_send_failed`）分开——两句话要能分开，脚本才分得出"该换个对端"
   和"这次没成"。这两条各有单测咬住，真主机那半在
   `scripts/e2e.sh --with-awiki` 里断言。
-- **`contacts list | add | set-remark | remove | resolve`** —— 名字 ↔ DID 那一层（TODO6 §3）。
+- **`contacts list | add | set-remark | remove | resolve`** —— 名字 ↔ DID 那一层。
   表不在本地文件里，在**本仓 `packages/service` 的库**里（`x_anpiocli.contacts.v1`），
   按**请求的已验证签名者** `owner_did` 分行，所以一个身份的备注对另一个身份天然不可见，
   不需要文件权限来保证。行按 **`subject`** 存、不按 `did`——`did update` 会把 DID 挪走
@@ -154,7 +154,7 @@ cargo run --manifest-path rust/Cargo.toml -- discover http://127.0.0.1:8787
   `sync_state.applied_seq`。录制挂在 `ListenView` 上（`RecordingView`），所以**到消费侧才落库**，
   终端看到的东西一个字不变；写失败只在 stderr 说一句、不退出——那一行的游标没有前进，
   下次重连服务端会重放。P6 的 §12 帧走**设备队列**，没有交付号，所以它只落行、不动游标。
-  文件明文 0600，**按密钥对待**（TODO4 §E）：没有导出命令，备份它就是备份聊天记录。
+  文件明文 0600，**按密钥对待**：没有导出命令，备份它就是备份聊天记录。
 - **读那一侧：`messages.db` 的读，与 `msg fetch`** —— `inbox` / `history` / `show` 都只有
   `MessageStore` 的查询，**一个连接都不开**：`open_read_only` 不解析服务、不建文件，
   真没有就答"这儿还没有"。所以这一族的**可断言行为**是断网照答（e2e 里真把服务端杀掉再读
@@ -172,7 +172,7 @@ cargo run --manifest-path rust/Cargo.toml -- discover http://127.0.0.1:8787
   `update-profile --name` 改的是**群自己的名字** `group_profile.display_name`（§7.4），
   正文是 `group_profile_patch`（RFC 7386 合并，§8.7.2），要走 `permissions.update_profile`——
   这是 CLI 里唯一能写群名的地方；`group info` 把它读出来。
-  **`members` 的名字有两档**（TODO6 §4.2）：默认读一次通讯录（`contacts.list`），
+  **`members` 的名字有两档**：默认读一次通讯录（`contacts.list`），
   认得的成员在 DID 后面跟**你给他起的备注**——名字挂在 `subject` 上（§3.2），
   对端换钥也不会丢；认不得的就只出 DID，那正是 `--names` 存在的理由，
   它逐个别名成员去**各自的主机**取对方给自己起的名字。两处都只做**非 `--json`** 的那一档：
@@ -182,7 +182,7 @@ cargo run --manifest-path rust/Cargo.toml -- discover http://127.0.0.1:8787
   （协议里根本没有昵称，见 `me show | set` 那条）。所以对端主机不是 awiki 时，这个成员就
   退回只出 DID，末尾打一行 `note: N member(s) could not be named`——**不是失败**，
   可执行的那一半（DID）照样在。
-  **`set-remark` 是同一件事的另一半**（TODO6 §4.2）：`update-profile --name` 写的是**群自己的**
+  **`set-remark` 是同一件事的另一半**：`update-profile --name` 写的是**群自己的**
   名字，存在群的主机上、对所有人一样；`set-remark <group_did> <名字>` 起的是**只有我看得见**的
   那个，存进服务里另一张表（`x_anpiocli.group_remarks.v1`，`docs/design/message-service.md` §9.5），
   `group info` 把它印在 `name:` 的下一行。
@@ -193,8 +193,7 @@ cargo run --manifest-path rust/Cargo.toml -- discover http://127.0.0.1:8787
   `--clear` 是同一个动词的取反（对照 `contacts add --clear-remark`，不为清空另开一条子命令），
   服务**不检查**这个群是否托管在本机——"记得一个联邦那头的群"恰恰是本地这本册子该管的事。
   **端到端要打本仓的 `packages/service`**：本机 awiki host 对 `group create` 回 HTTP 401，
-  是它自己不许 public RPC 建群的策略（`group.remote_create_not_allowed`），
-  详见 [TODO5.md](../TODO5.md) §6 Phase 1。
+  是它自己不许 public RPC 建群的策略（`group.remote_create_not_allowed`）。
 - **`group e2ee publish | get-key-package | create | add | remove | send`** —— P6 `anp.group.e2ee.v2`。
   `src/mls.rs` 是设备半边（造 KeyPackage、跑 prepare/finalize/abort），`src/group_e2ee.rs`
   是线上半边（请求体的形状）。前两条是**服务作用域**的 KeyPackage 方法；
@@ -216,9 +215,8 @@ cargo run --manifest-path rust/Cargo.toml -- discover http://127.0.0.1:8787
   leaf 落 `active`、包转 `consumed`；`e2ee remove` → 目标 leaf 转 `terminal`、其余 leaf 进到
   epoch 2、被移除的设备收到 `final-notice`；`e2ee send` → 回 `accepted: true`、收件进设备队列、
   只推 `group_event_seq`），控制方法都**不动** P4 的 `group_state_version`。
-  做法见 [TODO5.md](../TODO5.md) §6 Phase 3。
 - **`examples/phase0_key_package.rs`** —— Phase 0 的 spike，仍可复跑（它是怎么验证 crate
-  能驱动 P6 设备半边的记录，结论在 TODO5 §6）：
+  能驱动 P6 设备半边的记录）：
 
 ```bash
 cargo run --manifest-path rust/Cargo.toml --example phase0_key_package -- /tmp/anpiocli-spike
@@ -229,7 +227,7 @@ cargo run --manifest-path rust/Cargo.toml --example phase0_key_package -- /tmp/a
 上面那些是**为什么**；从这里往下是**怎么用**：先一次说清所有命令共有的东西，再逐族列旗标
 与默认值。`anpio-cli <族> --help` / `anpio-cli <族> <子命令> --help` 打印同一份东西。
 
-**这一层是定稿的（2026-10-02，TODO6 §7）。** 下面这张表与六个族的表共同组成命令面的契约，
+**这一层是定稿的（2026-10-02）。** 下面这张表与六个族的表共同组成命令面的契约，
 **权威是 `--help`**，文档与它不一致时以 `--help` 为准（不一致本身就是 bug）。"定稿"在这里
 指一件具体的事：**加命令是加法，改名与删命令是破坏性的**——`rust/crates/anpio-cli/
 tests/cli_surface.rs` 里逐字列着今天每一个页面，删一个或改一个名字，那一格就红，
@@ -360,7 +358,7 @@ grant 会在 attach 时就拒，而不是等到第一次发送），并缓存协
 `msg history` 要的是**一个 DID**，不是一个名字：名字只活在服务端的通讯录里，收名字就等于
 让这条读命令联网。手上有名字就先 `contacts resolve`。同理，`msg read` 是**本地写**——
 已读状态只有**一个**归属，就在这一台机器的 `messages.db` 里，所以服务端的
-`inbox.mark_read` 不再有客户端（TODO7 §4，2026-10-03 裁定）。
+`inbox.mark_read` 不再有客户端（2026-10-03 裁定）。
 
 失败时说什么：
 
@@ -503,8 +501,9 @@ grant 会在 attach 时就拒，而不是等到第一次发送），并缓存协
 身份这块只剩"换设备"，而它核下来是**对端没有这条路**（本机 awiki host 对改设备清单回
 `device_*_not_supported`，`replace_did` 回 `not_supported`），不是待办。
 命令面本身没有测试长的第三档之外的东西：覆盖是库侧单测 + `scripts/e2e.sh`（真服务、真
-socket、真 WebSocket），顺序见 TODO5 §6 的 Phase 3/4。
+socket、真 WebSocket）。
 
 > 本仓的 `packages/e2e`（对着真服务跑 `connectx` 命令函数的那套 TS 端到端）2026-10-03
 > 随 TS 客户端一起删了。它没覆盖这个客户端，所以这里少掉的不是这条；少掉的那一条独有覆盖
-> （跨域中继的 `groupFederation`）记在 [TODO7.md](../TODO7.md) §5。
+> （跨域中继的 `groupFederation`）2026-10-03 搬进了
+> `packages/service/src/federation/crossDomain.test.ts`。

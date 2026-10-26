@@ -4,14 +4,14 @@
 一行 MLS 都没有。那份文档从头到尾站在**没有密码学的那一边**。
 
 这份写另一边。做 MLS 的那一半在设备上，而它在本仓库里**一行都不存在**：
-[TODO4.md](../../TODO4.md) §B2 记的就是它——"Rust crate → Node 的 napi 绑定"。
+当时记的方案就是它——"Rust crate → Node 的 napi 绑定"。
 
 口径是**方案，不是落地记录**。下面的函数名、版本、形状都核过，但一行代码还没写；动手第一步
 见 §8。
 
-> **2026-10-02 读法更正（TODO5 §1、§3）。** §3 与 §4 里那个 **`packages/mls` napi crate +
+> **2026-10-02 读法更正。** §3 与 §4 里那个 **`packages/mls` napi crate +
 > `CONNECTX_HOME` 下的 store** 是当时那份计划，**已经取消**：MLS 只在 Rust crate 里，
-> 所以不做 napi 壳，**直接由 Rust 客户端调**（[TODO5.md](../../TODO5.md) §3 那句"B2 的 napi
+> 所以不做 napi 壳，**直接由 Rust 客户端调**（当时的说法是"B2 的 napi
 > 壳整条取消——不是'要写两次'，是'换一种方式拿 MLS'"）。今天的事实是：
 > store 在 `$ANPIOCLI_HOME/<agent>/<profile>/mls/`（**不是** `CONNECTX_HOME`，那个客户端的
 > store 根已随它一起退役），实现是 [`rust/crates/anpio-cli/src/mls.rs`](../../rust/crates/anpio-cli/src/mls.rs)，
@@ -66,7 +66,7 @@ Host 判不了的 `delta` 对不对、Commit 是不是正确，全部落在这�
 `pending_commit_id` 就是那条关联句柄。**服务端早就是这个形状，客户端库天然接得上**——这是这份
 方案里唯一一处不用设计的接缝。
 
-### 2.1 在 1.0.5 上重核（2026-10-02，TODO5 落地时）
+### 2.1 在 1.0.5 上重核（2026-10-02）
 
 上面那张表是在 **0.9.0** 的检出上核的。pin 定了 **1.0.5** 之后，在
 `origin/release/0929`（那一支的 `rust/Cargo.toml` 才是 `version = "1.0.5"`；`origin/master`
@@ -94,7 +94,7 @@ Host 判不了的 `delta` 对不对、Commit 是不是正确，全部落在这�
 
 **官方自己的位置**（`rust/README.md`）：MLS **是库调用，不是 `anp-mls` 子进程调用**；"MLS state
 is kept behind `anp::group_e2ee::storage` store implementations **rather than a subprocess or
-CLI JSON command surface**"。这也正是 [TODO1.md](../../TODO1.md) `D4` 裁定 (a) 的依据。
+CLI JSON command surface**"。这也正是「内嵌在客户端」那条裁定 (a) 的依据。
 
 **反面教材也在同一份 README 附近**：官方 monorepo 里 MLS **只**存在于 Rust crate；Python / TS /
 Dart / Java 四套 SDK 都没有，Go 只剩一个驱动已被移除的一次性二进制。所以**没有现成绑定可借**——
@@ -158,7 +158,7 @@ MLS，只搬运。
 
 - **广告闸门**：P6 不得进 `anp.get_capabilities`，直到 MLS 的 `anp_did_wba_device_binding`
   `ExtensionType` 有稳定注册 code point。落在 `capabilities.ts` 的 `WITHHELD_PROFILES`，
-  [TODO4.md](../../TODO4.md) `B1` 管着。
+  [TODO.md](../../TODO.md) §3.1。
 - **代码闸门**：上游把这件事做成了**运行时**开关。`0xF0A1` 那个常量是编译期的
   （`DID_WBA_DEVICE_BINDING_EXTENSION_REGISTERED_V2 = false`），但 v2 的**每个操作**都收一个
   `draft_extension_negotiated: bool`，传 true 就能跑。
@@ -173,7 +173,7 @@ MLS，只搬运。
 1. **库在关键路径上，但不依赖那个 code point。** code point 决定的是"能不能对外声明"，不是
    "能不能本地跑"——上游自己就是这么切的（运行时 flag）。
 2. **服务端 P6 需要它。** 571 行受理逻辑目前只有合成输入。真客户端一接上，等于补上唯一缺的那条
-   验收路径。这与 [TODO4.md](../../TODO4.md) §A3 是同一手：**同族问题上，把 stub 换成真东西
+   验收路径。这与服务端 P6 的那一步是同一手：**同族问题上，把 stub 换成真东西
    立刻暴露了一批只有真链路才看得见的问题**。
 3. **发版面可以后置。** §5 第 2 条那套预编译矩阵只在 P6 真要发的时候才需要；在那之前，开发机 +
    CI 上编一份就够。
@@ -181,7 +181,7 @@ MLS，只搬运。
 **等着开的代价也写清楚**：服务端 P6 继续只有合成输入，而 MLS 那半边——最容易出错的那一半——
 到真开工时才开始积累。
 
-## 8. 动手前必须先做的三件事 ~~（2026-10-02 已做完，TODO5 落地时）~~
+## 8. 动手前必须先做的三件事 ~~（2026-10-02 已做完）~~
 
 1. **fetch。** ✔ 已 `git fetch origin --tags`。本机 `/Users/eccstartup/code/github/anp` 的工作
    分支仍在 `master`（`16298fd`，落后 origin/master **93 个提交**），但**没有 checkout**——

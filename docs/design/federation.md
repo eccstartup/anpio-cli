@@ -173,7 +173,7 @@ MTI 第 14 项（§10 L661）。
 三族里最后接上的，因为它比前两族多一个前置条件：
 
 - `group.*` 里那十一条的判断要先解析 `group_did` 的文档才做得了——而那份文档在 B1b 之前
-  **还没有人发布**。B1b 把"谁来发布群 DID 文档"这件事裁定成**本服务自己**（TODO3 §0），
+  **还没有人发布**。B1b 把"谁来发布群 DID 文档"这件事裁定成**本服务自己**（2026-10-02 裁定），
   A1–A3 铸出群钥、造出文档、把文档挂上 `GET …/g/<id>/did.json`，这一族才接得上。
 - 接上之后还有一处前两族没有的判据：住在**自己命名空间**里的群（`serviceDid:g:<id>`）直接
   落在本地（`relayFor` 里的 `isOwnGroupDid`）。放它出站的那趟解析要么被
@@ -281,7 +281,7 @@ C5b 那行 `direct.incoming` 入队本来就是白跑的一趟：后台 worker �
 [groups.md](groups.md) §2 选的形状 `group_did = serviceDid + ":g:" + <id>` 天然是
 可解析的（`did:web:host:g:XXXX` → `https://host/g/XXXX/did.json`）。这条形状决定了**发布
 义务跟着群走**：文档要住在那个 URL 上，就只能由 `group_did` 里的那个域发布——也就是
-**本服务自己**（TODO3 §0 的裁定）。B1b 之前记在这里的"缺口"因此收了：本服务现在发布
+**本服务自己**（2026-10-02 的裁定）。B1b 之前记在这里的"缺口"因此收了：本服务现在发布
 **自己名下**的群文档（A1 铸钥、A2 造文档、A3 挂路由）。**剩下的那一半与 message-service.md
 §13 仍是同一条接缝**：本服务**自己**的 `serviceDid` 文档仍由 DID 文档托管方
 （`awiki-open-server`）发布，见 §4 第 2 点。
@@ -349,18 +349,18 @@ Grant 的键已经是 `(message_id, attachment_id, object_uri)`，多存一列�
    `ServiceLocator` 本来就不假设是谁发的），以及本服务自己的 `serviceDid` 文档仍由
    `awiki-open-server` 托管（下面第 2 条）。**部署侧另有一条硬前提**：`did:web` 一律要求
    https，所以 `ANPIOCLI_PUBLIC_URL` 是 http 的部署（含本仓库的默认值）其群文档解析不出来，
-   `ANPIOCLI_ALLOWED_DID_HOSTS` 也得写进对端域（TODO3 §B）。
+   `ANPIOCLI_ALLOWED_DID_HOSTS` 也得写进对端域（见 [TODO.md](../../TODO.md) §3.2）。
 2. **`serviceDid` 文档由 DID Service 发布——这是分层，不是缺口**（§4 第 2 点）。
    2026-10-02 的裁定把两个服务切开：**DID server 只管身份，本服务承载社交应用**。身份文档
    因此**有意**留在 `awiki-open-server` 那一侧，本服务不发布它；外层 `keyid` 的 fragment 由
-   发布方决定，本服务用 `ANPIOCLI_KEY_ID` 配成一致。同一裁定也把 TODO2 A7 那条收了口：一份
+   发布方决定，本服务用 `ANPIOCLI_KEY_ID` 配成一致。同一裁定也把「条目指向谁」那条收了口：一份
    身份文档里 `ANPMessageService` 条目指向谁，是**身份所有者**的声明，不是 DID server 的
    裁决——awiki 原先那两条"必须等于服务器自己"的相等检查正是把两层焊在了一起，fork 的
-   `AWIKI_ALLOW_PEER_DECLARED_MESSAGE_SERVICE` 把它拆开（[TODO4.md](../../TODO4.md) §C）。
+   `AWIKI_ALLOW_PEER_DECLARED_MESSAGE_SERVICE` 把它拆开。
 3. **被取代 DID 的拒绝需要 P2 连续性来源**：§6.7 / §7.2 L492 要求重建签名重试，而
    "哪个 DID 取代了哪个"的权威答案在 P2。[groups.md](groups.md) §12 记的是同一条。
 4. **上面这些验到了什么程度。** B1b 落地时，跨域转发只有方法级测试，对端是一个回答
-   "文档指向哪"的 stub。TODO4 §A3 把 stub 换成了第二台真的 `AnpioAgent`：同一台机器、
+   "文档指向哪"的 stub。2026-10-02 把 stub 换成了第二台真的 `AnpioAgent`：同一台机器、
    两个端口、`ANPIOCLI_DID_DEV_HOSTS` 那条联调口，A 域的 agent 对 B 域命名空间里的群发
    `group.send`（请求交给 A，`meta.target.did` 是 B 的群 DID），验三件事——转发真的发生
    （B 有群、有名册、有那条消息行，A 一条群行都没有）、B 签的回执在 A 域用**从网络上取回来

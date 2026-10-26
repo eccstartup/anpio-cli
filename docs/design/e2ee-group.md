@@ -29,7 +29,7 @@ P6 是本仓库面对的四个 Profile 里最反直觉的一个：**它把密码
 
 **推论（这条决定了 C13 的形状）**：owner 的 MLS runtime 在**客户端**，与 P5 的
 X3DH/Double Ratchet 同侧。§11.10.3 L1376 说 Host "默认**不要求**持久化可解密群消息的
-MLS 私有状态"——本服务选**不持久化**，于是 [TODO1.md](../../TODO1.md) 的 `D4` 从"P6 才有影响"
+MLS 私有状态"——本服务选**不持久化**，于是「客户端密码学放哪」那条裁定从"P6 才有影响"
 变成"P6 直接依赖它"。同一台设备要跑两种密码学，答案只能有一个。
 
 ## 2. 状态耦合：本服务只当见证者
@@ -346,7 +346,7 @@ worker 那一层再加一个已阻塞队列的集合，把"队头失败、它后
 之间如果正好有一次 `group.e2ee.send` 入队了信封，而 worker 还没跑到它，那么 `remove` 把 leaf
 转成 `terminal` 之后，那条信封会落进"按序投完"的例外，被投给这台已经撤销的设备。窗口是
 `[撤销, remove]`，只影响一台正在被移除的设备。收窄它需要在 remove 那一刻也去读一次文档
-（`remove` 的受理路径上没有网络调用），那是 [TODO2](../TODO2.md) A3b 之后的事。
+（`remove` 的受理路径上没有网络调用），这件事还没做。
 
 **"不投"刻意不动那一行**：既不改投、也不重排。重排会把它记成"我失败了"，而它其实只是在
 "等我"——到期那一天由 owner 的 Remove 或保留上限来了结。
@@ -623,7 +623,7 @@ Host 无法区分"第一次进群"与"重新加入"（§10.3 L1066 的触发条�
    ——"P6 v2 public release is blocked until the draft MLS extension has a stable registered
    codepoint"（`rust/src/group_e2ee/v2_errors.rs:84`）。本仓库照抄这个位置：
    **代码可以写，`anp.get_capabilities` 里 P6 不得作为稳定 Profile 出现**，直到上游公布
-   稳定 codepoint。（[TODO1.md](../../TODO1.md) 的 `D2` 已按此裁定。）
+   稳定 codepoint。（本仓库已按此裁定，见 [TODO.md](../../TODO.md) §3.1。）
 2. ~~**群 DID 文档未发布**~~（2026-10-02 收）：`get_key_package` 之外的所有
    group-addressed 方法都要先解析 `group_did` 找 Host，而那份文档此前没有人发布。B1b 把
    发布义务落在**群自己所在的域**（`group_did = serviceDid + ":g:" + <id>`，本服务发布自己
@@ -635,9 +635,9 @@ Host 无法区分"第一次进群"与"重新加入"（§10.3 L1066 的触发条�
 ## 14. 已定的两件事
 
 1. ~~**客户端侧的密码学放哪**~~（2026-10-01 定：**(a) 内嵌**，见 [e2ee-direct.md](e2ee-direct.md)
-   §9.1 —— 与 [TODO1.md](../../TODO1.md) 的 `D4` 同一个问题、同一个答案。owner 的 MLS 状态、
+   §9.1 —— 与「客户端侧的密码学放哪」同一个问题、同一个答案。owner 的 MLS 状态、
    KeyPackage 私钥、epoch secret **全都**在设备侧，本服务一行都没有；官方方向是库调用而非子进程）。
-   **方案见 [client-mls.md](client-mls.md)**（[TODO4.md](../../TODO4.md) §B2，2026-10-02 落）——
+   **方案见 [client-mls.md](client-mls.md)**（2026-10-02 定）——
    那一块今天在本仓库里一行都不存在，是 P6 唯一还空着的一半。
 2. ~~**被移除 leaf 的应用信封是投完还是取消**~~（2026-10-01 用户裁定：**按序投完 (a)**。
    用户同时指出一个事实，记在这里：**已经送达并被读到的消息，无法再收回**——最终通知只能
