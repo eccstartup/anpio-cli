@@ -81,6 +81,39 @@ pub struct OriginProofSigning {
     pub expires: Option<i64>,
 }
 
+/// A grant as `GET_GRANT_STATUS` / `RENEW_GRANT` report it.
+///
+/// The daemon's reply carries more (policy, boot epoch, principal); these are the fields a
+/// caller can act on, and unknown ones are ignored rather than mirrored, so a daemon that
+/// adds a field does not break this client.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct GrantStatus {
+    pub grant_id: String,
+    pub key_id: String,
+    /// `active`, `expired`, `exhausted` or `revoked`.
+    pub state: String,
+    /// Unix seconds.
+    pub expiry: i64,
+    /// `request` or `session`; only a session grant can be renewed.
+    pub kind: String,
+    pub max_uses: u32,
+    pub used_uses: u32,
+    pub max_renewals: u32,
+    pub renewals: u32,
+}
+
+impl GrantStatus {
+    /// Uses left before the grant is exhausted, zero when it already is.
+    pub fn remaining_uses(&self) -> u32 {
+        self.max_uses.saturating_sub(self.used_uses)
+    }
+
+    /// Whether signing may start at all: an expired or exhausted grant fails every call.
+    pub fn usable(&self) -> bool {
+        self.state == "active" && self.remaining_uses() > 0
+    }
+}
+
 /// A proof this client can ask `anpio-key` to produce.
 ///
 /// The names are the daemon's (`ADAPTER.md` §11.3), because they are what `GET_CAPABILITIES`
@@ -465,7 +498,7 @@ impl AnpioKey {
         meta: &Value,
         body: &Value,
     ) -> Result<OriginProofSigning> {
-        let config = self.config.as_ref().ok_or_else(|| {
+        self.config.as_ref().ok_or_else(|| {
             anyhow!(
                 "{did} reaches anpio-key over its development socket, which cannot make an ANP \
                  origin proof; re-run: anpio-cli did attach-anpio-key --config \
@@ -481,7 +514,27 @@ impl AnpioKey {
         })?;
 
         let request = Self::origin_proof_request(grant, request_id, method, meta, body);
-        let path = write_temp_json(&serde_json::to_vec(&request)?)?;
+        origin_proof_from_data(self.protected_request(&request)?)
+    }
+
+    /// One `anpio-key data --config` call, returning the reply's `data`.
+    ///
+    /// The request file is written `0600` and deleted as soon as the daemon has answered;
+    /// only `OK` carries a `data` object, because every other code means the operation did
+    /// not happen and a caller must not proceed as if it had.
+    fn protected_request(&self, request: &Value) -> Result<Value> {
+        let operation = request
+            .get("operation")
+            .and_then(Value::as_str)
+            .unwrap_or("request")
+            .to_string();
+        let config = self.config.as_ref().ok_or_else(|| {
+            anyhow!(
+                "this anpio-key identity names no protected config, so {operation} cannot be \
+                 requested; re-run: anpio-cli did attach-anpio-key --config <service.json>"
+            )
+        })?;
+        let path = write_temp_json(&serde_json::to_vec(request)?)?;
         let args = vec![
             "data".to_string(),
             "--config".to_string(),
@@ -491,7 +544,112 @@ impl AnpioKey {
         ];
         let result = self.invoke_protected(&args);
         let _ = fs::remove_file(&path);
-        parse_origin_proof(&result?)
+        let bytes = result?;
+        let reply: Value = serde_json::from_slice(&bytes)
+            .with_context(|| format!("anpio-key returned a {operation} reply that is not JSON"))?;
+        let code = reply
+            .get("code")
+            .and_then(Value::as_str)
+            .unwrap_or("missing code");
+        if code != "OK" {
+            bail!("anpio-key refused {operation} with {code}");
+        }
+        Ok(reply.get("data").cloned().unwrap_or(Value::Null))
+    }
+
+    /// The grant this identity signs under, by name.
+    fn grant_id(&self) -> Result<&str> {
+        self.grant.as_deref().ok_or_else(|| {
+            anyhow!(
+                "this anpio-key identity records no grant; ask the anpio-key administrator for \
+                 one, then re-run: anpio-cli did attach-anpio-key --grant <grant-id>"
+            )
+        })
+    }
+
+    /// What the daemon says about this grant right now.
+    ///
+    /// Presence of a grant id is not proof it is usable: expiry, uses and renewals are the
+    /// daemon's facts, and this is the one call that asks for them.
+    pub fn grant_status(&self) -> Result<GrantStatus> {
+        let grant = self.grant_id()?;
+        let data = self.protected_request(&serde_json::json!({
+            "operation": "GET_GRANT_STATUS",
+            "grant_id": grant,
+        }))?;
+        serde_json::from_value(data)
+            .context("anpio-key returned a grant status this client cannot read")
+    }
+
+    /// Ask to extend the grant to `expiry`.
+    ///
+    /// The daemon clamps the answer to the policy's ceilings, so a request further out than
+    /// the policy allows is answered with the largest expiry it will grant rather than
+    /// refused. An exhausted grant cannot be renewed, and a `request`-kind grant cannot
+    /// either; both come back as a refusal code.
+    pub fn renew_grant(&self, expiry: i64) -> Result<GrantStatus> {
+        let grant = self.grant_id()?;
+        let data = self.protected_request(&serde_json::json!({
+            "operation": "RENEW_GRANT",
+            "grant_id": grant,
+            "expiry": expiry,
+        }))?;
+        serde_json::from_value(data)
+            .context("anpio-key returned a renewed grant this client cannot read")
+    }
+
+    /// The DID document and key of an authorized key, read through the protected surface.
+    ///
+    /// The development surface has a `document` entry; the protected one does not. There the
+    /// document is reached the way ADAPTER §11.3 defines it: list the principal's authorized
+    /// keys, pick the one for this DID, then fetch its document — the same two calls any
+    /// other protected client makes.
+    pub fn authorized_document(&self, did: &str) -> Result<(Value, String)> {
+        let keys = self.protected_request(&serde_json::json!({
+            "operation": "LIST_AUTHORIZED_KEYS",
+        }))?;
+        let entry = keys
+            .get("keys")
+            .and_then(Value::as_array)
+            .and_then(|items| {
+                items
+                    .iter()
+                    .find(|item| item.get("did").and_then(Value::as_str) == Some(did))
+            })
+            .ok_or_else(|| {
+                anyhow!(
+                    "anpio-key authorizes no key for {did} under this principal; ask the \
+                     administrator to register it, or check the DID"
+                )
+            })?;
+        let key_id = entry
+            .get("key_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("anpio-key listed a key without a key_id"))?;
+        let kid = entry
+            .get("kid")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("anpio-key listed a key without a kid"))?;
+        if let Some(wanted) = &self.kid {
+            if wanted != kid {
+                bail!(
+                    "anpio-key authorizes {kid} for {did}, not {wanted}; drop --kid to use the \
+                     authorized key"
+                );
+            }
+        }
+        let data = self.protected_request(&serde_json::json!({
+            "operation": "GET_DOCUMENT",
+            "key_id": key_id,
+        }))?;
+        let document = data.get("document").cloned().unwrap_or(Value::Null);
+        if document.get("id").and_then(Value::as_str) != Some(did) {
+            bail!(
+                "anpio-key returned a document whose id is not {did}; refusing to attach a key \
+                 to an identity it does not name"
+            );
+        }
+        Ok((document, format!("{did}#{kid}")))
     }
 
     fn invoke(&self, args: &[String]) -> Result<Vec<u8>> {
@@ -645,21 +803,12 @@ fn binding_keyid(document: &Value) -> Option<String> {
     }
 }
 
-/// Read a `SIGN_ORIGIN_PROOF` reply from `anpio-key data`.
+/// Read the `data` of a `SIGN_ORIGIN_PROOF` reply.
 ///
-/// A refusal is a code, not an empty result: the daemon answers `OK` only after it signed,
-/// so anything else means no proof exists and the caller must not send one.
-fn parse_origin_proof(bytes: &[u8]) -> Result<OriginProofSigning> {
-    let reply: Value = serde_json::from_slice(bytes)
-        .context("anpio-key returned an origin-proof reply that is not JSON")?;
-    let code = reply
-        .get("code")
-        .and_then(Value::as_str)
-        .unwrap_or("missing code");
-    if code != "OK" {
-        bail!("anpio-key refused SIGN_ORIGIN_PROOF with {code}");
-    }
-    let data = reply.get("data").cloned().unwrap_or(Value::Null);
+/// Every field is required: a proof missing its digest or its base is not a partial answer,
+/// it is an answer this client cannot use — and sending the envelope without one would
+/// produce a request the peer refuses for a reason that has nothing to do with the peer.
+fn origin_proof_from_data(data: Value) -> Result<OriginProofSigning> {
     let text = |name: &str| {
         data.get(name)
             .and_then(Value::as_str)
@@ -903,23 +1052,56 @@ mod tests {
     }
 
     #[test]
-    fn an_origin_proof_reply_is_read_only_when_the_daemon_says_ok() {
-        let ok = br#"{"version":2,"code":"OK","data":{"request_id":"r","content_digest":"sha-256=:AA==:","signature_input":"sig1=(\"@method\": \"direct.send\")","signature":"sig1=:AA==:","created":1700000000,"expires":null}}"#;
-        let signed = parse_origin_proof(ok).unwrap();
+    fn an_origin_proof_reply_is_read_only_when_the_daemon_names_every_part() {
+        let data = json!({
+            "request_id": "r",
+            "content_digest": "sha-256=:AA==:",
+            "signature_input": "sig1=(\"@method\": \"direct.send\")",
+            "signature": "sig1=:AA==:",
+            "created": 1_700_000_000_i64,
+            "expires": Value::Null,
+        });
+        let signed = origin_proof_from_data(data).unwrap();
         assert_eq!(signed.content_digest, "sha-256=:AA==:");
         assert!(signed.signature_input.starts_with("sig1=("));
         assert_eq!(signed.signature, "sig1=:AA==:");
         assert_eq!(signed.created, 1_700_000_000);
         assert_eq!(signed.expires, None);
 
-        let refused = br#"{"version":2,"code":"FEATURE_DISABLED"}"#;
-        let err = parse_origin_proof(refused).unwrap_err().to_string();
-        assert!(err.contains("refused SIGN_ORIGIN_PROOF"), "{err}");
-        assert!(err.contains("FEATURE_DISABLED"), "{err}");
-
-        let short = br#"{"version":2,"code":"OK","data":{"created":1}}"#;
-        let err = parse_origin_proof(short).unwrap_err().to_string();
+        let short = json!({"created": 1});
+        let err = origin_proof_from_data(short).unwrap_err().to_string();
         assert!(err.contains("content_digest"), "{err}");
+    }
+
+    #[test]
+    fn a_grant_status_reads_the_fields_a_caller_acts_on() {
+        let status: GrantStatus = serde_json::from_value(json!({
+            "grant_id": "g-1",
+            "principal_id": "p-1",
+            "key_id": "k-1",
+            "policy_id": "pol",
+            "policy_version": 2,
+            "boot_epoch": 3,
+            "expiry": 1_800_000_000_i64,
+            "kind": "session",
+            "created_at": 1_700_000_000_i64,
+            "max_uses": 100,
+            "used_uses": 99,
+            "max_renewals": 2,
+            "renewals": 1,
+            "state": "active"
+        }))
+        .unwrap();
+        assert_eq!(status.remaining_uses(), 1);
+        assert!(status.usable());
+
+        let exhausted = GrantStatus {
+            state: "exhausted".to_string(),
+            used_uses: 100,
+            ..status
+        };
+        assert_eq!(exhausted.remaining_uses(), 0);
+        assert!(!exhausted.usable(), "an exhausted grant signs nothing");
     }
 
     #[test]

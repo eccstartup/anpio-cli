@@ -338,3 +338,54 @@ fn the_skill_only_names_commands_the_binary_has() {
         }
     }
 }
+
+/// One identity points at one anpio-key surface, and the parser is where that is decided.
+///
+/// `--config` selects the protected surface (grants, audit, origin proofs); `--key-root`
+/// and `--socket` select the development one, which cannot sign what a send needs. A
+/// caller that passes both is asking for an identity whose surface would depend on which
+/// later command ran, so the parser refuses it before any store is opened. And a grant is
+/// only meaningful on the protected surface, so `--grant` without `--config` is refused
+/// there too — never silently dropped.
+#[test]
+fn attach_pins_one_anpio_key_surface() {
+    let home = Home::new("attach-surface");
+    let did = "did:wba:example.com:user:alice:e1_abc";
+
+    let both = run(
+        &home,
+        &[
+            "did",
+            "attach-anpio-key",
+            "--did",
+            did,
+            "--config",
+            "/etc/anpio-key/service.json",
+            "--key-root",
+            "/var/lib/anpio-key/root",
+        ],
+    );
+    assert_eq!(both.status.code(), Some(2), "a usage error, not a refusal from the command");
+    assert!(
+        text(&both.stderr).contains("cannot be used with"),
+        "{}",
+        text(&both.stderr)
+    );
+
+    let grant_alone = run(
+        &home,
+        &["did", "attach-anpio-key", "--did", did, "--grant", "g-1"],
+    );
+    assert_eq!(grant_alone.status.code(), Some(2));
+    assert!(
+        text(&grant_alone.stderr).contains("--config"),
+        "{}",
+        text(&grant_alone.stderr)
+    );
+
+    assert!(
+        files_under(&home.0).is_empty(),
+        "a usage error must not write an identity: {:?}",
+        files_under(&home.0)
+    );
+}

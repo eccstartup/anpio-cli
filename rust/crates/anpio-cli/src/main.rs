@@ -283,6 +283,15 @@ enum DidCommand {
         /// The key fragment (`key-1`, `recovery-1`, …); the daemon's default key if omitted.
         #[arg(long)]
         kid: Option<String>,
+        /// anpio-key's protected v2 surface (`data --config`), an administrator-owned file.
+        ///
+        /// Mutually exclusive with `--key-root` / `--socket`: one identity points at one
+        /// surface, so a command can never choose between them at signing time.
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["key_root", "socket"])]
+        config: Option<PathBuf>,
+        /// The grant this identity signs under, issued by the anpio-key administrator.
+        #[arg(long, requires = "config")]
+        grant: Option<String>,
         /// The DID host's URL, when the DID's authority is not the host to publish to.
         #[arg(long)]
         host: Option<String>,
@@ -1087,6 +1096,8 @@ async fn main() -> anyhow::Result<()> {
                 key_root,
                 socket,
                 kid,
+                config,
+                grant,
                 host,
                 agent,
                 profile,
@@ -1097,6 +1108,8 @@ async fn main() -> anyhow::Result<()> {
                 key_root,
                 socket,
                 kid.as_deref(),
+                config,
+                grant,
                 host.as_deref(),
                 agent.as_deref(),
                 profile.as_deref(),
@@ -1609,6 +1622,8 @@ fn cmd_did_attach_anpio_key(
     key_root: Option<PathBuf>,
     socket: Option<PathBuf>,
     kid: Option<&str>,
+    config: Option<PathBuf>,
+    grant: Option<String>,
     host: Option<&str>,
     agent: Option<&str>,
     profile: Option<&str>,
@@ -1625,12 +1640,45 @@ fn cmd_did_attach_anpio_key(
     // The flag names a fragment; a caller who pasted a whole `did#key-1` is understood
     // rather than refused, because that is what anpio-key's own `list` prints.
     let kid = kid.map(|value| value.rsplit('#').next().unwrap_or(value).to_string());
-    let key = AnpioKey { root: key_root, socket, kid, ..AnpioKey::default() };
+    let mut key = AnpioKey {
+        root: key_root,
+        socket,
+        kid,
+        config,
+        grant,
+        ..AnpioKey::default()
+    };
 
     // Fetching the document is the check that the daemon is reachable and actually holds
-    // this DID. No key bytes are fetched, because there are none to fetch.
-    let document = key.document(did)?;
-    let keyid = key.resolved_keyid(&document, did);
+    // this DID. No key bytes are fetched, because there are none to fetch. Which entry
+    // answers depends on the surface: the development socket publishes `document`, while
+    // the protected one reaches it through LIST_AUTHORIZED_KEYS + GET_DOCUMENT.
+    let (document, keyid) = if key.config.is_some() {
+        let (document, keyid) = key.authorized_document(did)?;
+        if key.grant.is_some() {
+            let status = key.grant_status()?;
+            if !status.usable() {
+                anyhow::bail!(
+                    "anpio-key reports grant {} as {} with {} of {} uses left; attaching it \
+                     would produce an identity that cannot sign. Ask the administrator for a \
+                     fresh grant",
+                    status.grant_id,
+                    status.state,
+                    status.remaining_uses(),
+                    status.max_uses
+                );
+            }
+        }
+        // Cache the negotiated set here so an ordinary command answers "can this identity
+        // sign?" without spawning a daemon. An empty announcement (a daemon too old to have
+        // the field) is cached as what it actually is: the baseline six operations.
+        key.operations = Some(key.capabilities()?.announced_names());
+        (document, keyid)
+    } else {
+        let document = key.document(did)?;
+        let keyid = key.resolved_keyid(&document, did);
+        (document, keyid)
+    };
     if !document_has_key(&document, &keyid) {
         let available = document_keyids(&document);
         anyhow::bail!(
@@ -1704,7 +1752,18 @@ fn cmd_did_attach_anpio_key(
     println!();
     println!("signs with: anpio-cli anp sign --nonce <nonce> --target <url>");
     println!("logs in as: anpio-cli anp login --target <url> --nonce <nonce>");
-    println!("refused:    msg/group/update (anpio-key signs HTTP requests, not origin proofs)");
+    if let Some(custody) = &identity.custody {
+        let capabilities = custody.known_capabilities();
+        println!("signs:      {}", capabilities.effective().join(", "));
+        if capabilities.contains(Operation::OriginProof) {
+            println!("msg/group:  on — origin proofs are delegated to anpio-key");
+        } else {
+            println!(
+                "refused:    msg/group/update — this surface does not announce \
+                 SIGN_ORIGIN_PROOF"
+            );
+        }
+    }
     Ok(())
 }
 
