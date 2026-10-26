@@ -15,3 +15,8 @@ objects/
 **/.vitepress/cache/
 
 .DS_Store
+
+# 只是为了在沙箱里读到才复制进来的，不随仓库分发。
+opc-src/
+scripts/opc-*.sh
+testruns/
