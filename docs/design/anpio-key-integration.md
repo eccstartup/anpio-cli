@@ -311,6 +311,10 @@ session grant、策略 `schema_version: 2`、每条新签名路的独立开关�
 > `prepare_key_package_v2` → `SIGN_PURPOSE(device_assertion)` → `complete_key_package_v2`，
 > 并核对 daemon 回的 `public_multibase`；`group e2ee send` 的设备 origin proof 走
 > `prepare_rfc9421_origin_proof` → `SIGN_PURPOSE` → `complete_rfc9421_origin_proof`。
+> 六个数据面操作的 `data` 都是请求状态信封 `{request_id, state, result}`（ADAPTER.md
+> §3.1、§8），适配层只在 `completed` 且带 `result` 时取结果，并核对 `request_id` 与发出的
+> 那个一致；`completed` 无结果按 `OUTCOME_UNKNOWN` 拒绝，其它状态要求先查该请求，
+> 不许换 id 重签。
 > 还剩两件事：anpio-key 的 v2 面没有发布版，所以「publish → … → send」没有真守护进程可跑；
 > `SIGN_HTTP` 仍在开发 socket（受保护面对 `http://localhost` 的登录没有条件，见 §4.3
 > 末尾的跟进项）。上述操作的开关由管理员按操作逐个打开，客户端只按

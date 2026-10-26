@@ -198,13 +198,14 @@ pub struct PurposeSigning {
 }
 
 /// A W3C proof the daemon made over an object or a DID document.
+///
+/// `value` is the input with the proof attached; `proof` is that proof on its own. The
+/// daemon's own creation time and signing-input digest stay in its audit trail, not in
+/// the reply, so neither is mirrored here — the proof already carries its `created`.
 #[derive(Debug, Clone)]
 pub struct SignedProof {
-    /// The input with its `proof` attached.
     pub value: Value,
     pub proof: Value,
-    pub created_at: i64,
-    pub signature_base_digest: String,
 }
 
 /// One X25519 agreement. The shared secret is returned once and never persisted.
@@ -791,7 +792,7 @@ impl AnpioKey {
     ) -> Result<OriginProofSigning> {
         let grant = self.protected_grant(did, Operation::OriginProof)?;
         let request = Self::origin_proof_request(grant, request_id, method, meta, body);
-        origin_proof_from_data(self.protected_request(&request)?)
+        origin_proof_from_data(self.protected_signing_request(&request, request_id)?)
     }
 
     /// The request one `SIGN_PURPOSE` sends.
@@ -835,7 +836,7 @@ impl AnpioKey {
     ) -> Result<PurposeSigning> {
         let grant = self.protected_grant(did, Operation::Purpose)?;
         let request = Self::purpose_request(grant, request_id, purpose, domain, payload);
-        purpose_from_data(self.protected_request(&request)?)
+        purpose_from_data(self.protected_signing_request(&request, request_id)?)
     }
 
     /// The request one `SIGN_OBJECT_PROOF` sends: the object, and nothing that names a key.
@@ -857,7 +858,7 @@ impl AnpioKey {
     ) -> Result<SignedProof> {
         let grant = self.protected_grant(did, Operation::ObjectProof)?;
         let request = Self::object_proof_request(grant, request_id, object);
-        signed_proof_from_data(self.protected_request(&request)?)
+        signed_proof_from_data(self.protected_signing_request(&request, request_id)?)
     }
 
     /// The request one `SIGN_DOCUMENT_PROOF` sends.
@@ -909,7 +910,7 @@ impl AnpioKey {
             domain,
             challenge,
         );
-        signed_proof_from_data(self.protected_request(&request)?)
+        signed_proof_from_data(self.protected_signing_request(&request, request_id)?)
     }
 
     /// The request one `ECDH` sends: one peer public key, as lowercase hex.
@@ -930,7 +931,7 @@ impl AnpioKey {
     pub fn ecdh(&self, did: &str, request_id: &str, peer: &[u8; 32]) -> Result<SharedSecret> {
         let grant = self.protected_grant(did, Operation::Ecdh)?;
         let request = Self::ecdh_request(grant, request_id, &encode_hex(peer));
-        shared_secret_from_data(self.protected_request(&request)?)
+        shared_secret_from_data(self.protected_signing_request(&request, request_id)?)
     }
 
     /// The guard every protected operation starts with: a protected surface, then a grant.
@@ -980,6 +981,21 @@ impl AnpioKey {
         let result = self.invoke_protected(&args);
         let _ = fs::remove_file(&path);
         reply_data(&result?, &operation)
+    }
+
+    /// One protected signing request, unwrapped from the `RequestStatus` it answers with.
+    ///
+    /// Every signing operation answers with the daemon's request state — `{request_id,
+    /// state, result}` (`ADAPTER.md` §3.1, §8) — rather than with the result alone. The
+    /// status also names the request, and a different id would mean this client is about
+    /// to use somebody else's outcome.
+    fn protected_signing_request(&self, request: &Value, request_id: &str) -> Result<Value> {
+        let operation = request
+            .get("operation")
+            .and_then(Value::as_str)
+            .unwrap_or("request");
+        let data = self.protected_request(request)?;
+        signing_result(data, operation, request_id)
     }
 
     /// The grant this identity signs under, by name.
@@ -1254,7 +1270,7 @@ fn binding_keyid(document: &Value) -> Option<String> {
     }
 }
 
-/// Read the `data` of a `SIGN_ORIGIN_PROOF` reply.
+/// Read the completed result of a `SIGN_ORIGIN_PROOF` reply.
 ///
 /// Every field is required: a proof missing its digest or its base is not a partial answer,
 /// it is an answer this client cannot use — and sending the envelope without one would
@@ -1372,7 +1388,7 @@ fn parse_signed_headers(bytes: &[u8], did: &str) -> Result<BTreeMap<String, Stri
     Ok(headers)
 }
 
-/// Read the `data` of a `SIGN_PURPOSE` reply.
+/// Read the completed result of a `SIGN_PURPOSE` reply.
 ///
 /// The signature is hex on the wire; it is decoded here so the `anp` crate's `complete_*`
 /// seams take bytes. An Ed25519 signature is exactly 64 bytes, and a length check before
@@ -1412,7 +1428,7 @@ fn purpose_from_data(data: Value) -> Result<PurposeSigning> {
     })
 }
 
-/// Read the `data` of a `SIGN_OBJECT_PROOF` / `SIGN_DOCUMENT_PROOF` reply.
+/// Read the completed result of a `SIGN_OBJECT_PROOF` / `SIGN_DOCUMENT_PROOF` reply.
 fn signed_proof_from_data(data: Value) -> Result<SignedProof> {
     let proof = data
         .get("proof")
@@ -1423,24 +1439,10 @@ fn signed_proof_from_data(data: Value) -> Result<SignedProof> {
         .get("value")
         .cloned()
         .ok_or_else(|| anyhow!("anpio-key returned a proof without the signed value"))?;
-    let created_at = data
-        .get("created_at")
-        .and_then(Value::as_i64)
-        .ok_or_else(|| anyhow!("anpio-key returned a proof without created_at"))?;
-    let signature_base_digest = data
-        .get("signature_base_digest")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("anpio-key returned a proof without signature_base_digest"))?
-        .to_string();
-    Ok(SignedProof {
-        value,
-        proof,
-        created_at,
-        signature_base_digest,
-    })
+    Ok(SignedProof { value, proof })
 }
 
-/// Read the `data` of an `ECDH` reply.
+/// Read the completed result of an `ECDH` reply.
 fn shared_secret_from_data(data: Value) -> Result<SharedSecret> {
     let shared_secret = decode_hex(
         data.get("shared_secret")
@@ -1497,6 +1499,38 @@ fn decode_hex(text: &str) -> Result<Vec<u8>> {
         bytes.push((high << 4) | low);
     }
     Ok(bytes)
+}
+
+/// The result of one signing operation, unwrapped from its `RequestStatus` envelope.
+///
+/// `SIGN_*` and `ECDH` answer with `{request_id, state, result}` (`ADAPTER.md` §3.1,
+/// §8). Only `completed` carries an outcome: `completed` with no result is the daemon
+/// saying it can no longer deliver it, which is `OUTCOME_UNKNOWN` — not an empty answer,
+/// and not permission to sign again under a new id. Any other state means the question
+/// is still open and must be settled by querying the request id.
+fn signing_result(data: Value, operation: &str, request_id: &str) -> Result<Value> {
+    let state = data.get("state").and_then(Value::as_str).ok_or_else(|| {
+        anyhow!("anpio-key answered {operation} without a request state: {data}")
+    })?;
+    match data.get("request_id").and_then(Value::as_str) {
+        Some(echo) if echo == request_id => {}
+        Some(echo) => bail!(
+            "anpio-key answered {operation} for request {echo}, not for the {request_id} this \
+             client sent"
+        ),
+        None => bail!("anpio-key answered {operation} without echoing the request id"),
+    }
+    match state {
+        "completed" => match data.get("result").filter(|result| !result.is_null()) {
+            Some(result) => Ok(result.clone()),
+            None => Err(Refusal::new(operation, "OUTCOME_UNKNOWN").into()),
+        },
+        other => bail!(
+            "anpio-key left {operation} in request state {other}: this answer carries no \
+             signed result. Query request {request_id} before retrying, and do not re-sign \
+             under a new request id"
+        ),
+    }
 }
 
 /// The `data` of a reply, or a [`Refusal`] carrying the daemon's code and its shape.
@@ -1767,6 +1801,68 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("not JSON"));
+    }
+
+    /// A signing reply is the daemon's request state around the result, not the result
+    /// alone (`ADAPTER.md` §3.1, §8). Reading the envelope as if it were the result is
+    /// how a client ends up with "the daemon returned no signature" for a daemon that
+    /// answered perfectly.
+    #[test]
+    fn a_signing_reply_is_the_completed_result_of_its_request_status() {
+        let completed = json!({
+            "request_id": "r-1",
+            "state": "completed",
+            "result": {
+                "request_id": "r-1",
+                "signature": "ab",
+                "public_multibase": "z6Mk",
+                "purpose": "device_assertion"
+            }
+        });
+        let result = signing_result(completed, "SIGN_PURPOSE", "r-1").unwrap();
+        assert_eq!(result["signature"], "ab");
+
+        // completed with no result: the outcome exists in the audit trail but can no
+        // longer be delivered, and the status does not authorize a second signature.
+        let delivered = json!({"request_id": "r-1", "state": "completed", "result": null});
+        let err = signing_result(delivered, "ECDH", "r-1").unwrap_err();
+        assert!(err.to_string().contains("OUTCOME_UNKNOWN"), "{err}");
+        assert_eq!(
+            err.downcast_ref::<Refusal>().map(|refusal| refusal.shape),
+            Some(RefusalShape::Other)
+        );
+
+        // still in flight: the caller must query the id rather than re-sign.
+        let reserved = json!({"request_id": "r-1", "state": "reserved"});
+        let err = signing_result(reserved, "SIGN_PURPOSE", "r-1").unwrap_err();
+        assert!(err.to_string().contains("reserved"), "{err}");
+
+        // an answer for a different request is not this request's outcome.
+        let other = json!({"request_id": "r-2", "state": "completed", "result": {}});
+        let err = signing_result(other, "SIGN_PURPOSE", "r-1").unwrap_err();
+        assert!(err.to_string().contains("r-2"), "{err}");
+
+        // no envelope at all: not the shape the protocol defines.
+        let stateless = json!({"request_id": "r-1", "result": {}});
+        let err = signing_result(stateless, "SIGN_PURPOSE", "r-1").unwrap_err();
+        assert!(err.to_string().contains("request state"), "{err}");
+    }
+
+    #[test]
+    fn a_proof_reply_is_the_value_with_its_proof() {
+        let data = json!({
+            "request_id": "r-1",
+            "value": {"id": "did:wba:h:user:a:e1_x", "proof": {"type": "DataIntegrityProof"}},
+            "proof": {"type": "DataIntegrityProof", "proofValue": "z3"}
+        });
+        let signed = signed_proof_from_data(data).unwrap();
+        assert_eq!(signed.value["proof"]["type"], "DataIntegrityProof");
+        assert_eq!(signed.proof["proofValue"], "z3");
+
+        let err = signed_proof_from_data(json!({"value": {}}))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("proof"), "{err}");
     }
 
     /// Every code the daemon can refuse with maps to the shape a caller branches on.
