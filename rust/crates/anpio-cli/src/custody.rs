@@ -597,17 +597,7 @@ impl AnpioKey {
         ];
         let result = self.invoke_protected(&args);
         let _ = fs::remove_file(&path);
-        let bytes = result?;
-        let reply: Value = serde_json::from_slice(&bytes)
-            .with_context(|| format!("anpio-key returned a {operation} reply that is not JSON"))?;
-        let code = reply
-            .get("code")
-            .and_then(Value::as_str)
-            .unwrap_or("missing code");
-        if code != "OK" {
-            bail!("anpio-key refused {operation} with {code}");
-        }
-        Ok(reply.get("data").cloned().unwrap_or(Value::Null))
+        reply_data(&result?, &operation)
     }
 
     /// The grant this identity signs under, by name.
@@ -974,6 +964,24 @@ fn parse_signed_headers(bytes: &[u8], did: &str) -> Result<BTreeMap<String, Stri
     Ok(headers)
 }
 
+/// The `data` of a reply, or the refusal's code as the error.
+///
+/// Only `OK` carries an answer. Every other code means the operation did not happen, so a
+/// caller that read a `data` object out of one anyway would be acting on something the
+/// daemon did not say — and for `SIGN_ORIGIN_PROOF` that something is a signature.
+fn reply_data(bytes: &[u8], operation: &str) -> Result<Value> {
+    let reply: Value = serde_json::from_slice(bytes)
+        .with_context(|| format!("anpio-key returned a {operation} reply that is not JSON"))?;
+    let code = reply
+        .get("code")
+        .and_then(Value::as_str)
+        .unwrap_or("missing code");
+    if code != "OK" {
+        bail!("anpio-key refused {operation} with {code}");
+    }
+    Ok(reply.get("data").cloned().unwrap_or(Value::Null))
+}
+
 /// Unix seconds, for comparing against the daemon's clock.
 ///
 /// A machine whose clock is wrong gets a refusal from the daemon rather than a verdict from
@@ -1194,6 +1202,30 @@ mod tests {
         };
         assert_eq!(exhausted.remaining_uses(), 0);
         assert!(!exhausted.usable(), "an exhausted grant signs nothing");
+    }
+
+    #[test]
+    fn a_reply_is_data_only_when_the_daemon_says_ok() {
+        let ok = json!({
+            "version": 2,
+            "code": "OK",
+            "signing_available": true,
+            "protected_supported": true,
+            "data": {"grant_id": "g-1", "state": "active"}
+        });
+        let data = reply_data(ok.to_string().as_bytes(), "GET_GRANT_STATUS").unwrap();
+        assert_eq!(data["grant_id"], "g-1");
+
+        let refused = json!({"version": 2, "code": "GRANT_EXPIRED", "signing_available": false});
+        let err = reply_data(refused.to_string().as_bytes(), "SIGN_ORIGIN_PROOF")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(err, "anpio-key refused SIGN_ORIGIN_PROOF with GRANT_EXPIRED");
+
+        assert!(reply_data(b"not json", "GET_GRANT_STATUS")
+            .unwrap_err()
+            .to_string()
+            .contains("not JSON"));
     }
 
     #[test]
