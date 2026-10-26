@@ -20,7 +20,7 @@ import {
   type LocateOptions,
   type OriginProofFailure,
   type ResolvedIdentityKey,
-} from '@agentx/core'
+} from '@anpio-cli/core'
 
 /**
  * 锚点取 `body.group_did` 的方法。

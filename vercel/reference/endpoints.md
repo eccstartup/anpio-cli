@@ -5,7 +5,7 @@ description: 全部路由与状态码、两段自我描述 JSON，以及 anp.get
 
 # HTTP 端点
 
-一个 AgentXAgent 进程只暴露这几条路由。控制面与数据面是两套错误约定：**控制面一律 200 +
+一个 AnpioAgent 进程只暴露这几条路由。控制面与数据面是两套错误约定：**控制面一律 200 +
 信封里的错误**，**数据面用真实状态码**（它没有 JSON-RPC 信封，也没有 `id` 可答）。
 
 ## 路由
@@ -29,7 +29,7 @@ description: 全部路由与状态码、两段自我描述 JSON，以及 anp.get
 | `200` | 正常。**业务错误也在 200 里**，看 `error.data.anp_code` |
 | `401` | **外层** HTTP 认证失败。带 `WWW-Authenticate: DIDWba realm=…, error=…`，正文镜像同一组字段，**没有 `id`**——这一步跑在 JSON-RPC 之前 |
 | `503` | 外层认证 **`unverifiable`**（我们自己得不出结论）。**不**进挑战头：回 401 会把对端送去重签一份没问题的请求 |
-| `405` / `415` / `413` | 方法不对 / 不是 JSON / 请求体超过 `AGENTX_MAX_BODY` |
+| `405` / `415` / `413` | 方法不对 / 不是 JSON / 请求体超过 `ANPIOCLI_MAX_BODY` |
 
 ### 订阅 `/anp-im/stream`
 
@@ -50,7 +50,7 @@ description: 全部路由与状态码、两段自我描述 JSON，以及 anp.get
 | `403` | 票据不绑这个对象（`ticketBindingMismatch`） |
 | `404` | 未知上传令牌、槽位已废弃 / 已不在 `pending`、没有已提交的对象（`objectUnavailable`） |
 | `410` | 槽位或票据已过期 |
-| `413` | 对象超过 `AGENTX_MAX_OBJECT_BYTES`（`objectTooLarge`） |
+| `413` | 对象超过 `ANPIOCLI_MAX_OBJECT_BYTES`（`objectTooLarge`） |
 | `501` / `405` | 该路由没接 / 方法不对 |
 
 数据面的拒绝体**没有信封**，所以它把 `code`、`anp_code` 都写进 JSON：
@@ -77,7 +77,7 @@ MIME 回，否则一个 `text/html` 对象就是我们域名下的一个页面�
   "serviceDid": "…",
   "profiles": ["anp.core.binding.v1", "…"],
   "securityProfiles": ["transport-protected", "group-e2ee"],
-  "x_agentx": { "profiles": ["x_agentx.inbox.v1", "x_agentx.stream.v1"], "methods": ["…"] }
+  "x_anpiocli": { "profiles": ["x_anpiocli.inbox.v1", "x_anpiocli.stream.v1"], "methods": ["…"] }
 }
 ```
 
@@ -85,7 +85,7 @@ MIME 回，否则一个 `text/html` 对象就是我们域名下的一个页面�
 - **嵌入方要把 `id` 换成文档所有者的 DID**——服务条目住在被描述的那个 agent（或群）的
   文档里，而本服务不知道对方是谁，给不出那个 id。这里给的是它自己的 DID，那是真实可解析
   的，不是占位符。
-- `x_agentx` 是扩展块。**标准字段里不放扩展**，那等于让一个只实现规范的服务看起来支持它。
+- `x_anpiocli` 是扩展块。**标准字段里不放扩展**，那等于让一个只实现规范的服务看起来支持它。
 - `profiles` / `securityProfiles` 来自 `capabilities.ts`，与下面运行时答复**同源**，所以
   不会出现"文档说的和运行的不一样"。
 
@@ -101,9 +101,9 @@ MIME 回，否则一个 `text/html` 对象就是我们域名下的一个页面�
 }
 ```
 
-- 只放**规范**定义的字段。扩展能力（`x_agentx.*`）**不**出现在这里——这个结果是"规范能力"
+- 只放**规范**定义的字段。扩展能力（`x_anpiocli.*`）**不**出现在这里——这个结果是"规范能力"
   的运行时权威，掺扩展会让标准客户端推出错误结论。扩展的自我描述在 `.well-known` 的
-  `x_agentx` 块与 `stream.hello` 的 `profiles` 两处。
+  `x_anpiocli` 块与 `stream.hello` 的 `profiles` 两处。
 - `limits` 的值是**十进制字符串**，不是数字。
 - `max_message_bytes` 报的是请求体上限：消息装在请求里走，不可能比请求上限更大。
 - **`anp.group.e2ee.v2`（P6）被扣留**：方法照做、直接发能受理，但不会声明成稳定 Profile，

@@ -19,7 +19,7 @@ import {
   type AnpRequest,
   type KeyResolver,
   type LocateOptions,
-} from '@agentx/core'
+} from '@anpio-cli/core'
 import type { IncomingMessage } from 'node:http'
 import { EXTENSION_PROFILE } from '../rpc/inbox'
 import { authenticate, callerAnchor } from '../rpc/auth'

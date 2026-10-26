@@ -7,7 +7,7 @@ import {
   subjectOf,
   type DidChain,
   type DidChainAssurance,
-} from '@agentx/core'
+} from '@anpio-cli/core'
 import { loadConfig } from '../config'
 import type { DidChainResolver } from '../rpc/memberDidUpdate'
 import { openStorage } from '../storage/sqlite'

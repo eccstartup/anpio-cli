@@ -10,13 +10,13 @@
 //   - `rpc/dispatch.test.ts` 的 "a group call whose group lives elsewhere" 验的是**路由**
 //     （谁被问了、什么被原样带回去），对端是个回答固定值的 stub；
 //   - `federation/forward.test.ts` 验的是中继自己的三分支，对端也是 stub；
-//   - 这里对端是**第二台真的 `AgentXAgent`**：A 的 `relay` 要真的去取 B 的群文档
+//   - 这里对端是**第二台真的 `AnpioAgent`**：A 的 `relay` 要真的去取 B 的群文档
 //     （`http://127.0.0.1:<portB>/g/<id>/did.json`）、真的把请求 POST 过去，B 真的受理、
 //     真的把回执带回来。stub 换成真服务之后，唯一还是"玩具"的是 DID 文档的来源——
 //     两台服务都用内联解析器，因为"文档挂在哪个 host"不是这一条要测的东西。
 //
 // **外层签名故意没走。** 发给 A 的请求不带 ANP-02 的外层身份头（A 配了 `egress` 也不签，
-// 没有 `AGENTX_KEY_FILE`）。P8 §2.3 对这种调用的处置就是"按本地调用处理"——业务层的
+// 没有 `ANPIOCLI_KEY_FILE`）。P8 §2.3 对这种调用的处置就是"按本地调用处理"——业务层的
 // `origin_proof`（由 alice 真签）照旧是唯一的授权依据，也正是本条要验的东西。外层那半有
 // 它自己的单元测试（`federation/outer.test.ts`）。
 
@@ -35,7 +35,7 @@ import {
   type AnpRequest,
   type KeyResolver,
   type LocateOptions,
-} from '@agentx/core'
+} from '@anpio-cli/core'
 import { loadConfig, type Config } from '../config'
 import { createEgress } from './egress'
 import { createRelay } from './forward'
@@ -76,7 +76,7 @@ function inlineResolver(documents: Record<string, unknown> = DOCUMENTS): KeyReso
 }
 
 /** 一个 OS 挑的空闲端口。`serviceDid` 里带着端口（群 DID 的前缀就是它），所以端口必须在
- *  `listen()` 之前就知道——`AGENTX_LISTEN=…:0` 那种"绑定后再读"在这里来不及。 */
+ *  `listen()` 之前就知道——`ANPIOCLI_LISTEN=…:0` 那种"绑定后再读"在这里来不及。 */
 async function freePort(): Promise<number> {
   const probe = createNetServer()
   await new Promise<void>((resolve) => probe.listen(0, '127.0.0.1', resolve))
@@ -86,7 +86,7 @@ async function freePort(): Promise<number> {
   return port
 }
 
-/** 一台真的 AgentXAgent，接线与 `main.ts` 逐条对应（少了三个后台 worker——本条不投递、
+/** 一台真的 AnpioAgent，接线与 `main.ts` 逐条对应（少了三个后台 worker——本条不投递、
  *  不推、不定时刷新，所以它们不需要起来）。 */
 interface Instance {
   config: Config
@@ -99,14 +99,14 @@ interface Instance {
 
 async function startInstance(port: number): Promise<Instance> {
   const config = loadConfig({
-    AGENTX_LISTEN: `127.0.0.1:${port}`,
-    AGENTX_DB: ':memory:',
-    AGENTX_PUBLIC_URL: `http://127.0.0.1:${port}`,
-    AGENTX_SERVICE_DID: `did:web:127.0.0.1%3A${port}`,
+    ANPIOCLI_LISTEN: `127.0.0.1:${port}`,
+    ANPIOCLI_DB: ':memory:',
+    ANPIOCLI_PUBLIC_URL: `http://127.0.0.1:${port}`,
+    ANPIOCLI_SERVICE_DID: `did:web:127.0.0.1%3A${port}`,
     // 联调豁免：这个主机允许解析到私有地址、允许明文 http。进白名单的方式是 dev hosts
     // 也**同时进 `allowedHosts`**（`config.ts` L248），所以一个变量管两道门。
-    AGENTX_DID_DEV_HOSTS: '127.0.0.1',
-    AGENTX_OBJECT_DIR: mkdtempSync(join(tmpdir(), `agentx-cross-domain-${port}-`)),
+    ANPIOCLI_DID_DEV_HOSTS: '127.0.0.1',
+    ANPIOCLI_OBJECT_DIR: mkdtempSync(join(tmpdir(), `anpiocli-cross-domain-${port}-`)),
   })
   const storage = openStorage({ path: ':memory:' })
   const objects = openObjectStore({ directory: config.objectDir, maxBytes: 1024 * 1024 })

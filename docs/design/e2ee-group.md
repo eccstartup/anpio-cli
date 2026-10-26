@@ -23,7 +23,7 @@ P6 是本仓库面对的四个 Profile 里最反直觉的一个：**它把密码
 | **Group Host**（**本服务**） | 排序位置、公开投影、投递队列 | `group_event_seq` / `group_state_version` / `group_receipt` / 每个 leaf 一份投递信封 |
 | **ANPMessageService**（**本服务**） | KeyPackage 柜子 | 按次发放一个未消费 KeyPackage |
 
-注意最后两行是**同一个进程**：本仓库里 `AgentXAgent` 同时是某个群的 Host 与各成员的
+注意最后两行是**同一个进程**：本仓库里 `AnpioAgent` 同时是某个群的 Host 与各成员的
 消息服务。这两顶帽子之间只通过**公开对象**说话（`group_key_package` 进、`group_cipher_object`
 出），没有共享内存里的会话状态——因为本服务**没有**会话状态可共享。
 
@@ -359,9 +359,9 @@ WebSocket 订阅（`registry.publishDevice`）。推不到（设备没连着）*
 
 **（四）保留有界，两道闸门。** §12.6 逐字要求上限是"显式、由部署声明"的：
 
-- **尝试次数**（默认 8，`AGENTX_DEVICE_QUEUE_MAX_ATTEMPTS`）：管 HTTP 那头。与 C9 的 outbox
+- **尝试次数**（默认 8，`ANPIOCLI_DEVICE_QUEUE_MAX_ATTEMPTS`）：管 HTTP 那头。与 C9 的 outbox
   同形、同一条理由（P3 §8.4 L477 交给本地策略），到顶丢弃并记一笔。
-- **在队时长**（默认 30 天，`AGENTX_DEVICE_QUEUE_MAX_AGE_MS`）：第二条闸门，也是**唯一**
+- **在队时长**（默认 30 天，`ANPIOCLI_DEVICE_QUEUE_MAX_AGE_MS`）：第二条闸门，也是**唯一**
   能收掉本地那条路的（它不记尝试）。超龄的行在**投递前**扫掉，所以一台长期卡住的设备不会
   把自己的队列永久冻住，MUST NOT 阻塞该群后续 epoch、保留 leaf 的投递、或新
   `group.e2ee.send` 的接受（§12.3 L1456–1458）。
@@ -369,7 +369,7 @@ WebSocket 订阅（`registry.publishDevice`）。推不到（设备没连着）*
   这个 30 天是 2026-10-03 裁定的，理由与 §12.6 那条上限无关，是**窗口对齐**：P6 的信封在
   `deliveries` 里没有行（§6），所以设备队列是 `sync.delta` **够不着**的那一半，而它的宽度
   就是"这条群消息还能不能到"。取与取件面可读窗口同一个值
-  （`AGENTX_DELIVERY_READ_WINDOW_MS`，[message-service.md](message-service.md) §14），
+  （`ANPIOCLI_DELIVERY_READ_WINDOW_MS`，[message-service.md](message-service.md) §14），
   两个窗口才不会各说各话。24 小时对**推**本来是对的（推是尽力而为的优化，拉才是事实），
   错在它同时是**拉**也拿不到的那一半的存活期。
 

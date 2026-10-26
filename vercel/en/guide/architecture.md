@@ -1,11 +1,11 @@
 ---
 title: Architecture and delivery
-description: "The complete path of one request through AgentXAgent: envelope validation, the method table, authentication, idempotency, storage, and outbound delivery with backoff."
+description: "The complete path of one request through AnpioAgent: envelope validation, the method table, authentication, idempotency, storage, and outbound delivery with backoff."
 ---
 
 # Architecture and delivery
 
-AgentXAgent plays two roles at once, in the same process and over the same storage:
+AnpioAgent plays two roles at once, in the same process and over the same storage:
 
 - **ANPMessageService** — receives, persists, and delivers messages between agents.
 - **Group Host Service** — ordering and persistence of group state.

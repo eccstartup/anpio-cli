@@ -57,8 +57,8 @@ Key ordering — reverse any of these and messages are lost:
 | `stream.ack` | client → server | `body: {seq}`, needs `origin_proof` |
 | `sync.delta` | client → server | `body: {device_id, since, limit?}`, inbox-surface extension |
 
-`stream.auth` / `stream.ack` belong to the transport's own Profile `x_agentx.stream.v1`;
-`sync.delta` belongs to the inbox surface `x_agentx.inbox.v1`. **Neither Profile is in
+`stream.auth` / `stream.ack` belong to the transport's own Profile `x_anpiocli.stream.v1`;
+`sync.delta` belongs to the inbox surface `x_anpiocli.inbox.v1`. **Neither Profile is in
 `anp.get_capabilities`**: that table is spec conformance, and the `profiles` in `stream.hello` are
 what "this endpoint can do".
 

@@ -157,7 +157,7 @@ CREATE TABLE sync_state (
 - **`text` / `payload_json` 两列而不是一列 JSON。** §7.4 的 exactly-one-of 是协议形状；两列让
   它落在 CHECK 上（写的时候就能判），也让"按会话翻"这条最常走的查询不用解 JSON。
 - **`read_at` 在行上。** 已读是每行一个时刻，不是一张表。理由：本服务的 `inbox.mark_read` 是
-  **服务端**那份已读（扩展面 `x_agentx.inbox.v1`），而 TODO5 §4 第 4 条把 read 状态判给了本地。
+  **服务端**那份已读（扩展面 `x_anpiocli.inbox.v1`），而 TODO5 §4 第 4 条把 read 状态判给了本地。
   两个都存在，各答各的问题：行上这个答"这台设备的用户看过没有"，`--ack` 喂给服务端的那个是
   交付侧的记账。它们的先后跟 §2.1 一致——**落库 → acknowledging → 已读**。
 
@@ -254,7 +254,7 @@ CREATE TABLE sync_state (
 | 发件队列 / outbox / 自动重试 | `operation_id` 的重试归调用方（[cli.md](cli.md) §3.3）；本地库不排队 |
 | 设备间同步 | 规范**排除**（P3 §1、P5 §10.7、P6、P8 §35）；多设备一致靠服务端游标 |
 | 历史拉取（从服务端翻旧消息） | 规范**不存在**这个接口（[message-service.md](message-service.md) §9）；只有扩展面的 `inbox.get`，且它只够到自己那台服务 |
-| 通讯录 / 群备注进这张库 | 它们是**当前状态**不是历史，各有自己的扩展面与存储（`x_agentx.contacts.v1` / `x_agentx.group_remarks.v1`，今天都读服务端）。放进来会让"备注改了"变成"历史改了" |
+| 通讯录 / 群备注进这张库 | 它们是**当前状态**不是历史，各有自己的扩展面与存储（`x_anpiocli.contacts.v1` / `x_anpiocli.group_remarks.v1`，今天都读服务端）。放进来会让"备注改了"变成"历史改了" |
 | 全文检索（FTS） | 读了才有的需求，且 FTS 会**再复制一份明文索引**——第二个密钥资产。要做就是另一个决定 |
 | 加密这张库 | TODO5 §0.1 第 2 条已裁定**留明文**；静态加密是另一个决定，不为它顺手加一层 |
 
@@ -353,7 +353,7 @@ CREATE TABLE sync_state (
 自己的有界保留（8 次尝试 / 30 天）。`sync.delta` 答的是 `deliveries`，所以设备队列里过期的
 那些 `fetch` **补不回来**——这是服务端那一半要给的答案（TODO7 §3），不是客户端补得了的。
 
-还有一条**同类的窗**：`deliveries` 里比服务端可读窗口（`AGENTX_DELIVERY_READ_WINDOW_MS`，
+还有一条**同类的窗**：`deliveries` 里比服务端可读窗口（`ANPIOCLI_DELIVERY_READ_WINDOW_MS`，
 默认 30 天）更早的行，服务端也**不答**——它们是"不删但看不见"
 （[message-service.md](message-service.md) §14）。这条**今天分得出来了**（2026-10-03 用户裁定
 "走甲"）：`sync.delta` 多答一个 `aged_out`，`fetch` 据此在"brought in: 0"之外单独打印一行

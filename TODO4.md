@@ -24,7 +24,7 @@
 或"文档指向别处"，不真解析、不起第二个服务；`packages/e2e/src/harness.ts` 的文件头也明写了
 本用例用不到 `relay`。所以下一轮最该做的不是加功能，是**把两台服务真的连起来**（§A3）。
 
-**A3 之后这个缺口补上了**（2026-10-02）：`packages/e2e` 起两台真的 `AgentXAgent`，A 域对
+**A3 之后这个缺口补上了**（2026-10-02）：`packages/e2e` 起两台真的 `AnpioAgent`，A 域对
 B 域命名空间里的群发 `group.send` 全链路跑通，`harness.ts` 的文件头也随之改掉了那一句。
 剩下没验的是真 https / 真域名与**外层签名那一半**——两条都记在
 [federation.md](docs/design/federation.md) §8 第 4 条。A 节余下的 A1 / A2 是部署侧前提，
@@ -40,13 +40,13 @@ B 域命名空间里的群发 `group.send` 全链路跑通，`harness.ts` 的文
 都不是本仓库的代码缺陷，但没有它们，B1b 那套机制在真部署里一次也跑不起来。
 
 - **A1 `did:web` 解析要 HTTPS。** `didToUrl` 对任何 `did:web` 一律给出 `https://`，所以
-  `AGENTX_PUBLIC_URL` 是 `http://…` 的部署（**包括仓库默认值** `http://127.0.0.1:8787`），
+  `ANPIOCLI_PUBLIC_URL` 是 `http://…` 的部署（**包括仓库默认值** `http://127.0.0.1:8787`），
   它的群 DID 会指到一个没有 TLS 的地址——对端解析必然失败。这不是 bug，是 `did:web` 的固有
   约束，与 `serviceDid` 的约束同源（federation.md §2.5）。本地联调走
-  `AGENTX_DID_DEV_HOSTS` / 内联文档那条口。
-- **A2 `AGENTX_ALLOWED_DID_HOSTS` 要把对端域加进白名单。** 跨域**接收**时解析对端文档要过
+  `ANPIOCLI_DID_DEV_HOSTS` / 内联文档那条口。
+- **A2 `ANPIOCLI_ALLOWED_DID_HOSTS` 要把对端域加进白名单。** 跨域**接收**时解析对端文档要过
   SSRF 守卫（federation.md §2.5），清单里只有自己的域，一次也解析不了。
-- ~~**A3 两台服务真连一次（新）。** 起两个 `AgentXAgent`（两个域，各带 https 或 dev-host 口
+- ~~**A3 两台服务真连一次（新）。** 起两个 `AnpioAgent`（两个域，各带 https 或 dev-host 口
   子），让 A 域的 agent 对 B 域命名空间里的群发 `group.send`，验三件事：转发真的发生、
   B 域签的回执**在 A 域**用 B 域发布的群文档验得过、A 域本地一个群行都没落。这是把 A4 / A5
   的 stub 测试换成正链路的那一步，落点就是 `packages/e2e`——它已经是"真 HTTP、真签名"的包，
@@ -122,7 +122,7 @@ B 域命名空间里的群发 `group.send` 全链路跑通，`harness.ts` 的文
 - ~~**C2 `serviceDid` 自己那份文档仍由 awiki 托管。**~~ **裁定：就这样，是分层不是缺口。**
   身份文档是 DID server 的输出，本服务不发布它；本服务发布的是**消息层**的文档（群文档，
   [groups.md](docs/design/groups.md) §2）。所以外层 `keyid` 的 fragment 由发布方决定、本服务
-  用 `AGENTX_KEY_ID` 配成一致——**这不是一处待补的耦合，就是"身份归身份层"这件事本身**
+  用 `ANPIOCLI_KEY_ID` 配成一致——**这不是一处待补的耦合，就是"身份归身份层"这件事本身**
   （[federation.md](docs/design/federation.md) §4 第 2 点）。[TODO3.md](TODO3.md) §C3 里那句
   "要不要把后者也收回来自己发"到此有了答案：**不收。**
 

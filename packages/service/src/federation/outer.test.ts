@@ -10,7 +10,7 @@ import {
   type NonceStore,
   type ServiceEntry,
   type ServiceLocator,
-} from '@agentx/core'
+} from '@anpio-cli/core'
 import {
   ANP_COMPONENTS,
   buildContentDigestValue,
@@ -19,7 +19,7 @@ import {
   serializeSignatureParams,
   signatureBaseBytes,
   utf8,
-} from '@agentx/core/advanced'
+} from '@anpio-cli/core/advanced'
 import { openStorage } from '../storage/sqlite'
 import { createHttpNonceStore } from './nonces'
 import { verifyOuterIdentity } from './outer'

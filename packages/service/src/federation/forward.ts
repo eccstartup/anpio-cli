@@ -20,7 +20,7 @@ import {
   type AnpRequest,
   type LocateOptions,
   type ServiceLocator,
-} from '@agentx/core'
+} from '@anpio-cli/core'
 import type { Config } from '../config'
 import { isOurOwnIngress } from '../http/server'
 import type { Egress, EgressAnswer } from './egress'
@@ -128,7 +128,7 @@ export function createRelay(options: RelayOptions): Relay {
         endpoint = target.endpoint
       } catch (err) {
         // 解析不出目标的入口服务：可能没有那条 service 条目，也可能它在我们够不着的
-        // 域里（`AGENTX_ALLOWED_DID_HOSTS` 是空的时候，任何远程解析都到不了这里）。
+        // 域里（`ANPIOCLI_ALLOWED_DID_HOSTS` 是空的时候，任何远程解析都到不了这里）。
         log(`anp: cannot locate an ANPMessageService for ${targetDid}: ${describe(err)}`)
         return {
           kind: 'refused',

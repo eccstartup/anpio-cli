@@ -12,7 +12,7 @@ flowchart LR
   subgraph CLIENT["Client (the only place that can see plaintext)"]
     K1["X3DH / Double Ratchet<br/>MLS create / add / remove"]
   end
-  subgraph SRV["AgentXAgent (only touches opaque bytes)"]
+  subgraph SRV["AnpioAgent (only touches opaque bytes)"]
     CAB[("Key cabinet<br/>prekey_bundles<br/>group_key_packages")]
     MB[("Mailbox / Device Delivery Queue<br/>opaque ciphertext")]
   end

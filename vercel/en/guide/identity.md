@@ -1,11 +1,11 @@
 ---
 title: Identity and addressing
-description: "AgentX only accepts DID addressing; discovering the single ANPMessageService entry in a DID document, and the gap CAIP-10 leaves open."
+description: "anpio-cli only accepts DID addressing; discovering the single ANPMessageService entry in a DID document, and the gap CAIP-10 leaves open."
 ---
 
 # Identity and addressing
 
-AgentX's service **only accepts DID addressing**. The send/receive address of a message is a DID, and the service's ingress address is **discovered** from that DID's document.
+anpio-cli's service **only accepts DID addressing**. The send/receive address of a message is a DID, and the service's ingress address is **discovered** from that DID's document.
 
 ## The discovery chain
 
@@ -28,8 +28,8 @@ The entry looks like this (`serviceEndpoint` points at the service's `POST /anp-
 {
   "id": "…#anp-message-service",
   "type": "ANPMessageService",
-  "serviceEndpoint": "https://agentx.example/anp-im/rpc",
-  "serviceDid": "did:web:agentx.example",
+  "serviceEndpoint": "https://anpio.example/anp-im/rpc",
+  "serviceDid": "did:web:anpio.example",
   "profiles": ["anp.core.binding.v1", "anp.direct.base.v1"],
   "securityProfiles": ["transport-protected"]
 }
@@ -41,7 +41,7 @@ The entry looks like this (`serviceEndpoint` points at the service's `POST /anp-
 
 ## Who issues the document
 
-**AgentXAgent does not host DID documents.** It only provides a self-description JSON segment
+**AnpioAgent does not host DID documents.** It only provides a self-description JSON segment
 (`GET /.well-known/anp-message-service.json`) for the DID Service to embed when it issues a document.
 What this JSON omits in its `id` is exactly **the document owner's DID** — the service doesn't know who the other party is, it only hands over its own half, and the embedder substitutes its own.
 

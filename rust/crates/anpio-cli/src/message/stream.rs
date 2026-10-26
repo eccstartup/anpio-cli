@@ -25,7 +25,7 @@ use crate::error::{AnpioError, Result};
 /// normative operations, so they name an extension Profile the way the read surface does —
 /// but a *different* one, because `meta.profile` is "the single interpretation of this
 /// request" (P1 §6.2.2) and the handshake is not a read.
-pub const STREAM_PROFILE: &str = "x_agentx.stream.v1";
+pub const STREAM_PROFILE: &str = "x_anpiocli.stream.v1";
 
 /// The two methods this connection sends that are the transport's own (realtime.md §4, §6).
 /// They exist nowhere else: `stream.auth` has no mailbox to subscribe to over HTTP, and
@@ -198,8 +198,8 @@ mod tests {
     #[test]
     fn the_last_segment_becomes_stream() {
         assert_eq!(
-            stream_url("https://agentx.example/anp-im/rpc").unwrap(),
-            "wss://agentx.example/anp-im/stream"
+            stream_url("https://anpio.example/anp-im/rpc").unwrap(),
+            "wss://anpio.example/anp-im/stream"
         );
         assert_eq!(
             stream_url("http://127.0.0.1:8080/anp-im/rpc").unwrap(),

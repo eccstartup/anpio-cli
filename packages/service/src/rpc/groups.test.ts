@@ -4,7 +4,7 @@
 // 两个通知的发起者分别是谁、拒绝回哪个码——而信封、认证、幂等各有自己的测试。
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { verifyObjectProofDetailed, type AnpMeta, type AnpRejection } from '@agentx/core'
+import { verifyObjectProofDetailed, type AnpMeta, type AnpRejection } from '@anpio-cli/core'
 import { loadConfig } from '../config'
 import { openStorage } from '../storage/sqlite'
 import type { DeliveryRecord, Storage } from '../storage/types'
@@ -32,7 +32,7 @@ import {
 } from './groups'
 import { AnpRefusal } from './refusal'
 
-const SERVICE = 'did:web:agentx.example'
+const SERVICE = 'did:web:anpio.example'
 const ALICE = 'did:web:alice.example'
 const BOB = 'did:web:bob.example'
 const CAROL = 'did:web:carol.example'
@@ -189,7 +189,7 @@ describe('group.create (P4 §8.1)', () => {
     const key = storage.groupSigningKey(groupDid)
     expect(key).toBeDefined()
     expect(key?.createdAt).toBe(AT)
-    // hex 的 32 字节种子：`parsePrivateKey(hex, 'ed25519')` 认的形状，与 `AGENTX_KEY_FILE`
+    // hex 的 32 字节种子：`parsePrivateKey(hex, 'ed25519')` 认的形状，与 `ANPIOCLI_KEY_FILE`
     // 那种裸 hex 同一套（groups.md §2.1）。
     expect(key?.privateKeyHex).toMatch(/^[0-9a-f]{64}$/)
 

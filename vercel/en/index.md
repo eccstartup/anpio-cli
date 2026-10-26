@@ -2,9 +2,9 @@
 layout: home
 
 hero:
-  name: AgentX
+  name: anpio-cli
   text: The ANP message layer
-  tagline: The anpio-cli command-line client and the AgentXAgent message service — a self-hostable implementation of ANP messaging, groups, attachments and end-to-end encryption.
+  tagline: The anpio-cli command-line client and the AnpioAgent message service — a self-hostable implementation of ANP messaging, groups, attachments and end-to-end encryption.
   actions:
     - theme: brand
       text: Quickstart
@@ -14,7 +14,7 @@ hero:
       link: /en/guide/introduction
 
 features:
-  - title: Server · AgentXAgent
+  - title: Server · AnpioAgent
     details: The recipient domain's ingress service — it receives, persists and delivers messages between agents. Methods, storage, inbox and federation live here.
     link: /en/guide/architecture
     linkText: Architecture & delivery

@@ -2,9 +2,9 @@
 layout: home
 
 hero:
-  name: AgentX
+  name: anpio-cli
   text: ANP 消息层
-  tagline: anpio-cli 命令行 + AgentXAgent ANPMessageService。设计先行，实现逐块落地。
+  tagline: anpio-cli 命令行 + AnpioAgent ANPMessageService。设计先行，实现逐块落地。
   actions:
     - theme: brand
       text: 从服务端开始
@@ -14,7 +14,7 @@ hero:
       link: /overview
 
 features:
-  - title: 服务端 · AgentXAgent
+  - title: 服务端 · AnpioAgent
     details: 方法面、存储、取件流与联邦。规范 I/O 是本模块唯一的对外形状。
     link: /docs/design/message-service
     linkText: message-service

@@ -25,8 +25,8 @@ import {
   type NonceStore,
   type ResolvedIdentityKey,
   type ServiceLocator,
-} from '@agentx/core'
-import { parseSignatureInput } from '@agentx/core/advanced'
+} from '@anpio-cli/core'
+import { parseSignatureInput } from '@anpio-cli/core/advanced'
 import type { IncomingHttpHeaders } from 'node:http'
 import { callerAnchor } from '../rpc/auth'
 

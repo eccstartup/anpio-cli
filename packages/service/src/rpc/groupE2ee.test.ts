@@ -21,8 +21,8 @@ import {
   type AnpSigningIdentity,
   type DeviceResolver,
   type LocateOptions,
-} from '@agentx/core'
-import { signDidDocumentProofSync } from '@agentx/core/advanced'
+} from '@anpio-cli/core'
+import { signDidDocumentProofSync } from '@anpio-cli/core/advanced'
 import { loadConfig } from '../config'
 import { serviceCapabilities } from '../capabilities'
 import { createHttpNonceStore } from '../federation/nonces'
@@ -246,7 +246,7 @@ function harness(
   const handle: RpcHandler = createDispatch({
     config: overrides.config ?? config,
     storage,
-    objects: openObjectStore({ directory: mkdtempSync(join(tmpdir(), 'agentx-keypkg-')), maxBytes: 1024 }),
+    objects: openObjectStore({ directory: mkdtempSync(join(tmpdir(), 'anpiocli-keypkg-')), maxBytes: 1024 }),
     deviceResolver: deviceResolverFor(overrides.documents ?? defaultDocuments()),
     nonceStore: createHttpNonceStore(storage),
     log: () => undefined,

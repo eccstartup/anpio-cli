@@ -4,7 +4,7 @@ import {
   type AnpRequest,
   type ServiceEntry,
   type ServiceLocator,
-} from '@agentx/core'
+} from '@anpio-cli/core'
 import { loadConfig } from '../config'
 import type { Egress, EgressAnswer } from './egress'
 import { createRelay } from './forward'

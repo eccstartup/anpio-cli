@@ -256,7 +256,7 @@ export const SCHEMA: readonly string[] = [
      PRIMARY KEY (group_did, event_seq)
    )`,
 
-  // 群自己的 Ed25519 私钥（B1b-A1），hex 编码的 32 字节种子——与 `AGENTX_KEY_FILE` 认的
+  // 群自己的 Ed25519 私钥（B1b-A1），hex 编码的 32 字节种子——与 `ANPIOCLI_KEY_FILE` 认的
   // 那种裸 hex 同形，所以 `parsePrivateKey(hex, 'ed25519')` 两边都能读。
   //
   // **这张表里的每一行都是密钥。** 它是本库里唯一一处签名私钥落盘的地方，于是数据库文件、

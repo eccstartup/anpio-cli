@@ -9,7 +9,7 @@ import { join } from 'node:path'
 import { Readable } from 'node:stream'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createHash } from 'node:crypto'
-import type { AnpMeta, AnpRejection } from '@agentx/core'
+import type { AnpMeta, AnpRejection } from '@anpio-cli/core'
 import { openObjectStore, type ObjectStore } from '../objects'
 import { openStorage } from '../storage/sqlite'
 import type { Storage } from '../storage/types'
@@ -30,8 +30,8 @@ import {
 import { AnpRefusal } from './refusal'
 import { lookupMethod } from './methods'
 
-const SERVICE = 'did:web:agentx.example'
-const PUBLIC_URL = 'https://agentx.example'
+const SERVICE = 'did:web:anpio.example'
+const PUBLIC_URL = 'https://anpio.example'
 const ALICE = 'did:web:alice.example'
 const BOB = 'did:web:bob.example'
 const CAROL = 'did:web:carol.example'
@@ -43,7 +43,7 @@ let dir: string
 
 beforeEach(() => {
   storage = openStorage({ path: ':memory:' })
-  dir = mkdtempSync(join(tmpdir(), 'agentx-attach-'))
+  dir = mkdtempSync(join(tmpdir(), 'anpiocli-attach-'))
   objects = openObjectStore({ directory: dir, maxBytes: 1024 * 1024 })
 })
 
@@ -492,10 +492,10 @@ describe('attachment.get_download_ticket (P7 §10.5)', () => {
   it('answers 6006 for a group ticket when the requester is no longer an active member', () => {
     // §9.8 L734：判定用的是**当前**成员状态，不是消息时刻的快照。
     grantFor({
-      groupDid: 'did:web:agentx.example:g:team',
+      groupDid: 'did:web:anpio.example:g:team',
       payload: { attachments: [manifestEntry()] },
     })
-    const body = ticketBody({ message_target_did: undefined, group_did: 'did:web:agentx.example:g:team' })
+    const body = ticketBody({ message_target_did: undefined, group_did: 'did:web:anpio.example:g:team' })
     const rejection = refusalOf(() => invoke(ATTACHMENT_GET_DOWNLOAD_TICKET, { actor: BOB, body }))
     expect(rejection.code).toBe(6006)
   })
@@ -513,7 +513,7 @@ describe('attachment.get_download_ticket (P7 §10.5)', () => {
     const both = refusalOf(() =>
       invoke(ATTACHMENT_GET_DOWNLOAD_TICKET, {
         actor: BOB,
-        body: ticketBody({ group_did: 'did:web:agentx.example:g:team' }),
+        body: ticketBody({ group_did: 'did:web:anpio.example:g:team' }),
       }),
     )
     expect(both.code).toBe(1003)
@@ -570,10 +570,10 @@ describe('the grants a carrying message grows (P7 §9.2)', () => {
       securityProfile: 'transport-protected',
       body: { payload: { attachments: [manifestEntry()] } },
       messageId: 'msg-1',
-      groupDid: 'did:web:agentx.example:g:team',
+      groupDid: 'did:web:anpio.example:g:team',
       createdAt: AT,
     })
-    expect(grants[0]?.groupDid).toBe('did:web:agentx.example:g:team')
+    expect(grants[0]?.groupDid).toBe('did:web:anpio.example:g:team')
     expect(grants[0]?.messageTargetDid).toBeUndefined()
   })
 

@@ -53,13 +53,13 @@ describe('discoverMessageService', () => {
 describe('parseCapabilities', () => {
   it('reads the underscore-named runtime result', () => {
     const caps = parseCapabilities({
-      service_did: 'did:web:agentx.example',
+      service_did: 'did:web:anpio.example',
       supported_profiles: ['anp.core.binding.v1'],
       supported_security_profiles: ['transport-protected'],
       limits: { max_request_bytes: '1048576' },
       supported_content_types: ['text/plain'],
     })
-    expect(caps.serviceDid).toBe('did:web:agentx.example')
+    expect(caps.serviceDid).toBe('did:web:anpio.example')
     expect(caps.supportedProfiles).toEqual(['anp.core.binding.v1'])
     // §7.3 L491: counter limits are decimal STRINGS, not numbers.
     expect(caps.limits.max_request_bytes).toBe('1048576')

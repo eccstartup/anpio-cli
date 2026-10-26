@@ -48,7 +48,7 @@ A5 `32b0120`、A6 `ddcc49e`（A5 与 A6 之间那条 `342a13d` 是 B1b 之外的
 - **不能有半个群。** 群行与"证明这个群的钥"必须同生同死。文件形态必然要跨两个东西写
   （一个文件 + 一行路径），中间崩一下就留下"有行没钥"的群，而那个状态的恢复路径是零。
   数据库列天然在一个 `BEGIN IMMEDIATE` 里，要么都有要么都没有。
-- **两者性质不同。** `AGENTX_KEY_FILE` 那种文件形态是给**部署身份**用的——一把按部署
+- **两者性质不同。** `ANPIOCLI_KEY_FILE` 那种文件形态是给**部署身份**用的——一把按部署
   配置、跨群稳定的钥，属于运维资产。群钥是**每个群一把、随群创建而生的数据**，它的生命
   周期就跟着群行走。
 
@@ -57,7 +57,7 @@ A5 `32b0120`、A6 `ddcc49e`（A5 与 A6 之间那条 `342a13d` 是 B1b 之外的
 仓库扩到运行时的资产上。
 
 **落地（2026-10-02）。** schema **v11**：新表 `group_keys (group_did PRIMARY KEY,
-private_key, created_at)`，`private_key` 是 hex 的 32 字节种子——与 `AGENTX_KEY_FILE` 认的
+private_key, created_at)`，`private_key` 是 hex 的 32 字节种子——与 `ANPIOCLI_KEY_FILE` 认的
 裸 hex 同形，`parsePrivateKey(hex, 'ed25519')` 两边都能读。访问子是
 `groupSigningKey()` / `insertGroupSigningKey()`，**单开一张表而不是 `groups` 上加一列**：
 `Storage.group()` 是 `SELECT *`，加一列就等于让私钥跟着每一个 `StoredGroup` 走（日志、测试
@@ -99,7 +99,7 @@ private_key, created_at)`，`private_key` 是 hex 的 32 字节种子——与 `
 `ed25519PublicKey`（32 字节种子的长度检查留在这一层，因为它读的是数据库列 / keystore /
 文件这类输入边界；Rust 那条路不需要，这里是 TS），以及把已有的 `buildBaseDidDocument` 公开
 ——它本来就把同一个 `keyid` 写进 `authentication` **和** `assertionMethod`，所以"两处授权"
-是构造出来的而不是配出来的。两个名字都进 `@agentx/core/advanced`，`index.test.ts` 的钉死清单
+是构造出来的而不是配出来的。两个名字都进 `@anpio-cli/core/advanced`，`index.test.ts` 的钉死清单
 同步。服务侧新增 `rpc/groupDidDocument.ts`：`groupDidKeyId()`（fragment 一处定义，因为文档里
 的声明与证明里的引用必须是同一个值）、`groupServiceEntry()`（`well-known.ts` 那条原样搬过来
 只换 `id`）、`buildGroupDidDocument()`（`parsePrivateKey` → `ed25519PublicKey` →
@@ -167,7 +167,7 @@ v11 前无钥的群 / 空段 / 多一段 / 坏转义 → 404，非 GET → 405 +
 2. `relayFor` 里加了一次短路——`isOwnGroupDid(config.serviceDid, targetDid)` 直接回 `LOCAL`。
    **计划里没有这一条，但不加就是回归**：`targetDid` 对群族是 `group_did`，永远不等于
    `config.serviceDid`，于是本服务亲手建的群会在自己的 `group.send` 上被送去解析**自己**的
-   文档——而那趟解析要么被 `AGENTX_ALLOWED_DID_HOSTS` 拒（那份清单写的是对端域），要么要求
+   文档——而那趟解析要么被 `ANPIOCLI_ALLOWED_DID_HOSTS` 拒（那份清单写的是对端域），要么要求
    本服务的 `publicUrl` 是 https，净效果是一个本地就知道答案的调用报 1012。
 3. **群分支要像附件分支那样在转发后整段跳过本地处理器**（`dispatch.ts`）。这是新写的测试
    当场抓到的：`relayFor` 把转发结果交给 `perform`，而群那一支此前不看 `input.relayed`，
@@ -235,7 +235,7 @@ federation.md §3/§8。**与 B1a 一样，更正不是附赠，是这一步的�
 
 | 处 | 原来那句 | 改成 |
 |---|---|---|
-| README §"两处服务" | "`AgentXAgent` 不托管 DID 文档" | "不托管**别人的**" + 群文档这处例外 |
+| README §"两处服务" | "`AnpioAgent` 不托管 DID 文档" | "不托管**别人的**" + 群文档这处例外 |
 | message-service.md §"它不是" | 同上 | 同上（这处是 §13 那句话的正文，漏了它等于只改了一半） |
 | message-service.md §13 | "本服务不写 DID 文档，只交出这段 JSON" | "不写**别人**的" + 群文档由本服务写；并把"`id` 由嵌入方改写"接到"嵌入方这次是本服务自己"，同时钉住**服务自己的文档仍不是本服务签的** |
 | groups.md §2 | "v1 不发布" | A2/A3 已改；这一步只把 §2.1 那句"B1b 之后要发布的"的时态顺过来 |
@@ -253,11 +253,11 @@ federation.md §3/§8。**与 B1a 一样，更正不是附赠，是这一步的�
 ## B. 部署侧的（不是代码，也不是本轮能做的）
 
 - **`did:web` 解析要 HTTPS。** `didToUrl` 对任何 `did:web` 一律给出 `https://`，所以
-  `AGENTX_PUBLIC_URL` 是 `http://…` 的部署（**包括本仓库的默认值** `http://127.0.0.1:8787`），
+  `ANPIOCLI_PUBLIC_URL` 是 `http://…` 的部署（**包括本仓库的默认值** `http://127.0.0.1:8787`），
   它的群 DID 会指到一个没有 TLS 的地址——跨域解析必然失败。这不是本轮的 bug，是 `did:web`
   的固有约束，与 `serviceDid` 的约束同源（federation.md §2.5）。真实部署必须 https；本地
-  联调走 `AGENTX_DID_DEV_HOSTS` / 内联文档那条口。
-- **`AGENTX_ALLOWED_DID_HOSTS`**：跨域**接收**要求把对端域加进白名单（federation.md §2.5）。
+  联调走 `ANPIOCLI_DID_DEV_HOSTS` / 内联文档那条口。
+- **`ANPIOCLI_ALLOWED_DID_HOSTS`**：跨域**接收**要求把对端域加进白名单（federation.md §2.5）。
 
 ---
 

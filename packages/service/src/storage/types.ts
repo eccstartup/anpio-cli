@@ -116,7 +116,7 @@ export interface StoredGroup {
  * policy — cannot carry private key material along with it. Reading a key is a call site's
  * explicit decision here, not a side effect of reading a group.
  *
- * `privateKeyHex` is the 32-byte seed as bare hex, the same text form `AGENTX_KEY_FILE`
+ * `privateKeyHex` is the 32-byte seed as bare hex, the same text form `ANPIOCLI_KEY_FILE`
  * accepts, so `parsePrivateKey(hex, 'ed25519')` reads both. The public key is deliberately
  * NOT stored: it is derivable, and two copies of one fact can disagree.
  */
@@ -396,7 +396,7 @@ export interface StoredDownloadTicket {
 }
 
 /**
- * One line of somebody's address book (TODO6 §3, `x_agentx.contacts.v1`).
+ * One line of somebody's address book (TODO6 §3, `x_anpiocli.contacts.v1`).
  *
  * `subject` is the stable identity and `did` is where that identity currently lives — the
  * pair is the whole point of the table (TODO6 §3.2). A key update moves the DID and leaves
@@ -423,7 +423,7 @@ export interface StoredContact {
 }
 
 /**
- * One group's name, as one owner calls it (TODO6 §4.2, `x_agentx.group_remarks.v1`).
+ * One group's name, as one owner calls it (TODO6 §4.2, `x_anpiocli.group_remarks.v1`).
  *
  * The sibling of {@link StoredContact}, and deliberately not the same table. A contact is a
  * peer this owner can `msg send` to — an `agent` target. A group is `group`-addressed, and

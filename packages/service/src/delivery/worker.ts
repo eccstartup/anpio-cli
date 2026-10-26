@@ -15,7 +15,7 @@
 //      可以在两次重试之间换入口服务（`storage/types.ts` 里 `recipientDid` 的注释）。
 //   2. **本地投递**。收件人就住在本服务上时，`deliveries` 那一行已经写好了，C7 的
 //      订阅 / 取件面会把它交出去。再走一次 HTTP 回环只是绕远路，还会逼运营商把自己
-//      的公网地址加进 `AGENTX_ALLOWED_DID_HOSTS` 才转得动。
+//      的公网地址加进 `ANPIOCLI_ALLOWED_DID_HOSTS` 才转得动。
 //   3. **退避**。P3 §8.4 L477 把这件事明确交给本地策略："发送失败后是否自动重发，
 //      MAY 由服务按本地策略自行决定；本 Profile MUST NOT 要求必须重发、固定重发次数或
 //      固定退避算法"。所以下面的数值是本实现的选择，不是规范的值。
@@ -31,7 +31,7 @@ import {
   type AnpNotification,
   type LocateOptions,
   type ServiceLocator,
-} from '@agentx/core'
+} from '@anpio-cli/core'
 import type { Config } from '../config'
 import { isOurOwnIngress } from '../http/server'
 import type { OutboxEntry, Storage } from '../storage/types'

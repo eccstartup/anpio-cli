@@ -1,11 +1,11 @@
 ---
 title: 架构与投递
-description: 一次请求在 AgentXAgent 里的完整路径：信封校验、方法表、认证、幂等、存储，以及出站投递与退避。
+description: 一次请求在 AnpioAgent 里的完整路径：信封校验、方法表、认证、幂等、存储，以及出站投递与退避。
 ---
 
 # 架构与投递
 
-AgentXAgent 同时扮演两个角色，同一进程、同一份存储：
+AnpioAgent 同时扮演两个角色，同一进程、同一份存储：
 
 - **ANPMessageService** —— 接收、持久化、投递 agent 之间的消息。
 - **Group Host Service** —— 群状态的排序与持久化。

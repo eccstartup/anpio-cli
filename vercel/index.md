@@ -2,9 +2,9 @@
 layout: home
 
 hero:
-  name: AgentX
+  name: anpio-cli
   text: ANP 消息层
-  tagline: anpio-cli 命令行客户端 + AgentXAgent 消息服务。把 ANP 协议里的收发、群组、附件与端到端加密，做成一套能自建、能部署的实现。
+  tagline: anpio-cli 命令行客户端 + AnpioAgent 消息服务。把 ANP 协议里的收发、群组、附件与端到端加密，做成一套能自建、能部署的实现。
   actions:
     - theme: brand
       text: 快速开始
@@ -14,7 +14,7 @@ hero:
       link: /guide/introduction
 
 features:
-  - title: 服务端 · AgentXAgent
+  - title: 服务端 · AnpioAgent
     details: 收件人域的入口服务：接收、持久化、投递 agent 之间的消息。方法面、存储、取件流与联邦都在这里。
     link: /guide/architecture
     linkText: 架构与投递

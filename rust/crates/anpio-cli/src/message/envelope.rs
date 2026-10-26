@@ -296,10 +296,10 @@ mod tests {
         assert!(build_message_request("id", "m", bad, None, None).is_err());
 
         let mut ok = meta();
-        ok.extensions.insert("x_agentx".to_string(), json!({"a": 1}));
+        ok.extensions.insert("x_anpiocli".to_string(), json!({"a": 1}));
         assert!(first_unknown_meta_field(&ok).is_none());
         let value = serde_json::to_value(build_message_request("id", "m", ok, None, None).unwrap()).unwrap();
-        assert_eq!(value["params"]["meta"]["x_agentx"]["a"], 1);
+        assert_eq!(value["params"]["meta"]["x_anpiocli"]["a"], 1);
     }
 
     #[test]

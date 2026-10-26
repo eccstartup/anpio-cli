@@ -1,14 +1,14 @@
-# ANPMessageService
+# anpio-cli
 
-ANP（Agent Network Protocol）消息层的实现：一个可自建的消息服务 `AgentXAgent`，以及它
+ANP（Agent Network Protocol）消息层的实现：一个可自建的消息服务 `AnpioAgent`，以及它
 依赖的协议原语库。
 
 ## 两块
 
 | 包 | 产物 | 角色 |
 |---|---|---|
-| `packages/core` | `@agentx/core` | 协议原语：DID 组合、RFC 9421 签名与验签、密钥解析、CAIP-10 身份、JCS 规范化 |
-| `packages/service` | `agentx` | ANPMessageService：接收、存储、推送、取件，群组与附件 |
+| `packages/core` | `@anpio-cli/core` | 协议原语：DID 组合、RFC 9421 签名与验签、密钥解析、CAIP-10 身份、JCS 规范化 |
+| `packages/service` | `anpio-service` | ANPMessageService：接收、存储、推送、取件，群组与附件 |
 
 `core` 不含传输与进程，`service` 建在它上面。
 
@@ -24,10 +24,10 @@ ANP 里有两个可以被"自己搭一个"的服务，本仓库做的是第二�
 
 - **DID Service** —— 托管 `did.json`、发号（handle）。独立部署，不属于本仓库。
   `anpio-cli` 是它的**客户端**（`did register` / `did resolve` / `did update`）。
-- **ANPMessageService** —— 接收并投递 agent 之间的消息。**`AgentXAgent` 就是它。**
+- **ANPMessageService** —— 接收并投递 agent 之间的消息。**`AnpioAgent` 就是它。**
 
 两者分开部署，**分工是清楚的：DID Service 只管身份，本服务承载社交应用**（2026-10-02 的
-口径，[TODO4.md](TODO4.md) §C）。所以 `AgentXAgent` **不托管别人的 DID 文档**（服务自己的
+口径，[TODO4.md](TODO4.md) §C）。所以 `AnpioAgent` **不托管别人的 DID 文档**（服务自己的
 身份文档由 DID Service 托管——那是身份层的产物），只在需要时**解析**对方的 DID 文档，从中取
 唯一的 `ANPMessageService` 条目来找到入口服务。**一处例外**：本服务**自己名下**的群 DID 文档
 由本服务发布——群文档是**消息层**的产物（这个群住在哪台 Host 上、名册与事件序在哪儿），群 DID
@@ -41,7 +41,7 @@ npm install
 npm run build
 
 # 起一个消息服务（全部配置走环境变量，没有命令行旗标）
-AGENTX_LISTEN=127.0.0.1:8787 node packages/service/dist/main.js
+ANPIOCLI_LISTEN=127.0.0.1:8787 node packages/service/dist/main.js
 
 # 另开一个终端：备一个身份，发一条消息，再取回来（客户端在 rust/ 下）
 cargo run -p anpio-cli -- did create
@@ -78,7 +78,7 @@ npm run docs:build    # 构建静态站点
 npm run build && npm run typecheck && npm test
 ```
 
-**`build` 不能省。** 每个包的测试按包名 import `@agentx/core`，而那个名字解析到
+**`build` 不能省。** 每个包的测试按包名 import `@anpio-cli/core`，而那个名字解析到
 `packages/core/dist`——空检出直接跑 `npm test` 会红得像测试坏了，其实是缺构建。
 
 ## 规范版本

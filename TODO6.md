@@ -108,7 +108,7 @@
       那句 "Nothing is stored locally"（`3ff2084`）——后者是 messages.db 落地后留下的，
       与这次换无关但同一类。
       **故意留着**的 `connectx` 字样只有三类：参考页的"已冻结"横幅、`ConnectxError` 这个 TS
-      类名（服务端与 `@agentx/cli` 共用，重命名它不在本条的射程内）、以及"不碰旧
+      类名（服务端与 `@anpio-cli/cli` 共用，重命名它不在本条的射程内）、以及"不碰旧
       `~/.connectx/`"那句对照。
 - [x] **`skill/connectx/SKILL.md`：按 2.1 改名/重写，并**把 `help.test.ts` 的门禁跟着改**
       （它拿 skill 里逐字给出的调用去和命令面对账，命令面变了它就该红）。
@@ -276,7 +276,7 @@ ANP 的定址单位是 **DID**，`msg send --to` 只吃 DID。
       所以群的备注也应落在同一处、同一分行方式，别一边在库里一边在文件里。
       —— **2026-10-02 裁定：新表 + 新扩展面**（用户选的，不是"复用 `contacts`"、
       也不是"只在 `group info` 里显示"）。落成 `group_remarks(owner_did, group_did, remark,
-      created_at, updated_at)` + Profile `x_agentx.group_remarks.v1`
+      created_at, updated_at)` + Profile `x_anpiocli.group_remarks.v1`
       （`list` / `put` / `remove` 三条，见 `docs/design/message-service.md` §9.5）。
       **为什么不并进 `contacts`**：那张表是"`msg send --to` 能到谁"，键的另一头是一个
       **agent**；并进去会让一个名字解析成群 DID，再让 `msg send --to <那个名字>` 把消息投进
@@ -357,7 +357,7 @@ msg * / group * / group e2ee *  ──►  packages/service（本仓，:8787 之
 >    `create_did_wba_document` 拒收 IP 当主机名。所以乙要连着改三处，不是加一条路由。
 > 2. **"主机即消息服务"是这个客户端的结构假设，不只是 awiki 的配置。** 服务自己的
 >    `did:web:` 与主机的 `did:wba:` 天生是两个方法，除非服务能被声明成别的权威——
->    而 `AGENTX_SERVICE_DID` 正是那个开关。§5.3 的玩具主机就是用它把两者接上的。
+>    而 `ANPIOCLI_SERVICE_DID` 正是那个开关。§5.3 的玩具主机就是用它把两者接上的。
 
 ### 5.3 计划
 
@@ -388,7 +388,7 @@ msg * / group * / group e2ee *  ──►  packages/service（本仓，:8787 之
       玩具主机就是 `scripts/e2e/did_host.py` 这一份。）玩具主机只做主机该做的那几件事，
       **没有一处签名逻辑**（文档全由客户端造再 `register`，主机只按 DID 存、按 DID 发），
       并把 `/g/<id>/did.json` 让给服务（`groups.md` §2.2：群文档归服务）。
-      它对外宣告的身份就是服务的身份（`AGENTX_SERVICE_DID` 设成同一个值），于是
+      它对外宣告的身份就是服务的身份（`ANPIOCLI_SERVICE_DID` 设成同一个值），于是
       awiki 那套"主机即消息服务"的关系照旧成立，只是消息服务换成了我们的。
       **awiki 的角色因此被收窄到它唯一能演的那半截**，并且是**开关打开才有**：
       `./scripts/e2e.sh --with-awiki` 对真主机 :8765 跑 `did create` / `did publish`
@@ -474,7 +474,7 @@ PYTHONPATH=src AWIKI_DATA_DIR=/tmp/awiki-data \
 
 ```bash
 # 2. 客户端（本仓）
-export ANPIOCLI_HOME=/tmp/agentx-e2e
+export ANPIOCLI_HOME=/tmp/anpiocli-e2e
 
 cargo run --manifest-path rust/Cargo.toml -- \
   did create --host http://127.0.0.1:8765 --handle e2ealice --agent e2ealice
@@ -563,7 +563,7 @@ cargo run --manifest-path rust/Cargo.toml -- me set --agent e2ealice
       "某个旗标被改名"。所以"定稿"的范围就是**页面**：加命令是加法，改名与删命令是
       破坏性的。这条判据和"权威是 `--help`"一起写在 `rust/README.md` 参考层的开头。
 - [x] ~~**TS CLI 冻结在某个版本**~~ —— **2026-10-02 结论：没有"某个版本"可钉，因为
-      `@agentx/cli` 从没发布过**（`npm view @agentx/cli` → 404，仓库里没有 tag，
+      `@anpio-cli/cli` 从没发布过**（`npm view @anpio-cli/cli` → 404，仓库里没有 tag，
       `packages/cli/package.json` 停在 `0.0.0`）。所以冻结点就是**这次裁定这个提交**，
       而"哪个版本起不再加功能"这句话在这里是空的——不存在一个用户手里的旧版本需要被
       按版本说明。冻结的实际射程按用户 2026-10-02 的原话（「ts的cli暂时不要动，也不加功能」）
@@ -571,7 +571,7 @@ cargo run --manifest-path rust/Cargo.toml -- me set --agent e2ealice
       它是冻结这件事本身的出处，不在 `package.json` 里造一个没有语义的字段。
 - [x] ~~**`packages/e2e` 的既有覆盖**~~ —— **2026-10-02 结论：保持不动，但它现在该被
       当成"服务侧的跨域 e2e"，不是"客户端的 e2e"。** 量出来的事实：它 `import` 的是
-      `packages/cli/src/commands/*` **源码**（不是 `@agentx/cli` 这个包、也不是二进制），
+      `packages/cli/src/commands/*` **源码**（不是 `@anpio-cli/cli` 这个包、也不是二进制），
       所以它**只能**测 `connectx`——Rust 客户端一旦接棒，它作为客户端 e2e 就失效了。
       但 2 个文件 4 条用例里，只有 `directSend` 那两条是重复的（`scripts/e2e.sh` 现在用
       **真二进制**跑同一条路，更好）；另外两条独一份：

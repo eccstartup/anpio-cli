@@ -20,8 +20,8 @@ import {
   type AnpSigningIdentity,
   type DeviceResolver,
   type LocateOptions,
-} from '@agentx/core'
-import { signDidDocumentProofSync } from '@agentx/core/advanced'
+} from '@anpio-cli/core'
+import { signDidDocumentProofSync } from '@anpio-cli/core/advanced'
 import { loadConfig } from '../config'
 import { createHttpNonceStore } from '../federation/nonces'
 import { openObjectStore } from '../objects'
@@ -224,7 +224,7 @@ function harness(
   const handle: RpcHandler = createDispatch({
     config: overrides.config ?? config,
     storage,
-    objects: openObjectStore({ directory: mkdtempSync(join(tmpdir(), 'agentx-keys-')), maxBytes: 1024 }),
+    objects: openObjectStore({ directory: mkdtempSync(join(tmpdir(), 'anpiocli-keys-')), maxBytes: 1024 }),
     deviceResolver: deviceResolverFor(overrides.documents ?? defaultDocuments()),
     nonceStore: createHttpNonceStore(storage),
     log: () => undefined,
@@ -558,7 +558,7 @@ describe(`${GET_PREKEY_BUNDLE} (§7.2)`, () => {
 
 describe('rate limiting (§7.3 L598)', () => {
   it('answers 1011 once the caller runs out of tokens, and does not write a ledger row', async () => {
-    const tight = loadConfig({ AGENTX_PREKEY_BURST: '1', AGENTX_PREKEY_PER_MINUTE: '1' })
+    const tight = loadConfig({ ANPIOCLI_PREKEY_BURST: '1', ANPIOCLI_PREKEY_PER_MINUTE: '1' })
     const h = harness({ config: tight })
     const first = await h.call(publishRequest({ id: 'req-1' }))
     expect(first.json?.error).toBeUndefined()

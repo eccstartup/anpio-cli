@@ -1,13 +1,13 @@
-// AgentXAgent's configuration, read from the environment.
+// AnpioAgent's configuration, read from the environment.
 //
 // The names and defaults are message-service.md §14 verbatim. Two of them are not
-// values but derivations (`AGENTX_SERVICE_DID` from the public URL, the public URL
+// values but derivations (`ANPIOCLI_SERVICE_DID` from the public URL, the public URL
 // itself from the listen address), and both are resolved here so that no other module
 // has to know how a deployment gets a service DID.
 //
 // The rule §14 states in prose is enforced by what this file does NOT have: there is no
 // switch that turns `origin_proof` verification off. A local integration test relaxes the
-// DID resolution policy instead — `AGENTX_DID_DEV_HOSTS` names hosts that may be private
+// DID resolution policy instead — `ANPIOCLI_DID_DEV_HOSTS` names hosts that may be private
 // or speak plain http — which is a policy on the resolver and not a hole in the auth path.
 // Those hosts still have to be named one by one, so no value of it makes resolution
 // unbounded; the allowlist is exact at every setting.
@@ -19,7 +19,7 @@ import {
   createDidDocumentStore,
   type DidChainEdgeStore,
   type DidDocumentStore,
-} from '@agentx/core'
+} from '@anpio-cli/core'
 
 /** 1 MiB, §14. Attachments travel on the data plane and never through this limit. */
 const DEFAULT_MAX_BODY = 1024 * 1024
@@ -30,7 +30,7 @@ const DEFAULT_MAX_BODY = 1024 * 1024
 const DEFAULT_MAX_OBJECT_BYTES = 64 * 1024 * 1024
 
 const DEFAULT_LISTEN = '127.0.0.1:8787'
-const DEFAULT_DB = './agentx.db'
+const DEFAULT_DB = './anpio-cli.db'
 
 /** P5 §7.3 L598 没给数字，所以这是本实现选的：**一分钟 60 次、允许一次 60 个的突发**。 */
 const DEFAULT_PREKEY_BURST = 60
@@ -158,7 +158,7 @@ export interface Config {
   /** The externally visible base URL, `https://host[:port][/path]`, with no trailing
    *  slash. `serviceEndpoint` and `object_uri` are built from it. */
   publicUrl: string
-  /** This service's own DID: `AGENTX_SERVICE_DID`, else `did:web` of the public URL.
+  /** This service's own DID: `ANPIOCLI_SERVICE_DID`, else `did:web` of the public URL.
    *  It is what a cross-domain caller authenticates and the `did` of `group.create`'s
    *  target (P4 §8.1.2 L625). */
   serviceDid: string
@@ -175,7 +175,7 @@ export interface Config {
   keyId?: string
   /** SQLite file, or `:memory:`. */
   dbPath: string
-  /** Where attachment objects are written (P7, C10). Always present: `AGENTX_OBJECT_DIR`
+  /** Where attachment objects are written (P7, C10). Always present: `ANPIOCLI_OBJECT_DIR`
    *  or the derivation in {@link defaultObjectDir}. Unlike `keyFile` this has no "absent"
    *  state — a service that cannot store an object cannot implement `anp.attachment.v1`,
    *  and the method table has no switch for that. */
@@ -183,7 +183,7 @@ export interface Config {
   /** Request body cap in bytes. */
   maxBody: number
   /** Cap on one attachment object's bytes (P7, C10). Enforced while the upload stream is
-   *  read rather than after it is buffered — see `AGENTX_MAX_BODY` for the same reason. */
+   *  read rather than after it is buffered — see `ANPIOCLI_MAX_BODY` for the same reason. */
   maxObjectBytes: number
   /**
    * P5 §7.3 L598 的限流：两条 Key 方法每个调用方一分钟能来多少次、一次突发能来多少。
@@ -216,18 +216,18 @@ function parseListen(raw: string): ListenAddress {
   if (hostPort === null) {
     throw new ConnectxError(
       'invalid_argument',
-      `AGENTX_LISTEN must be host:port (got ${JSON.stringify(raw)}); for example 127.0.0.1:8787`,
+      `ANPIOCLI_LISTEN must be host:port (got ${JSON.stringify(raw)}); for example 127.0.0.1:8787`,
     )
   }
   const port = Number(hostPort[2])
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
-    throw new ConnectxError('invalid_argument', `AGENTX_LISTEN port must be 0-65535 (got ${hostPort[2]})`)
+    throw new ConnectxError('invalid_argument', `ANPIOCLI_LISTEN port must be 0-65535 (got ${hostPort[2]})`)
   }
   return { host: hostPort[1], port }
 }
 
 /** A positive integer, or the default when the variable is absent. An empty string is
- *  treated as absent: `AGENTX_MAX_BODY= ` is a shell accident, not a request for 0. */
+ *  treated as absent: `ANPIOCLI_MAX_BODY= ` is a shell accident, not a request for 0. */
 function parsePositive(raw: string | undefined, name: string, fallback: number): number {
   if (raw === undefined || raw === '') return fallback
   const value = Number(raw)
@@ -252,14 +252,14 @@ function parseHosts(raw: string | undefined): string[] {
  * 检查"的分支。
  */
 function parseDidResolution(env: NodeJS.ProcessEnv): DidResolution {
-  const devHosts = parseHosts(env.AGENTX_DID_DEV_HOSTS)
+  const devHosts = parseHosts(env.ANPIOCLI_DID_DEV_HOSTS)
   const resolution: DidResolution = {
-    allowedHosts: [...new Set([...parseHosts(env.AGENTX_ALLOWED_DID_HOSTS), ...devHosts])],
+    allowedHosts: [...new Set([...parseHosts(env.ANPIOCLI_ALLOWED_DID_HOSTS), ...devHosts])],
     // 一份进程内共享的缓存。放在这里而不是各个调用点各自 new 一个：受理、投递、出站三条路
     // 各自持有一份就等于三份互不知情的缓存，同一个 DID 会被抓三倍次数，而"多久看一次"这件
     // 事也没法再配成一个数。
     documentStore: createDidDocumentStore(),
-    cacheTtlMs: parsePositive(env.AGENTX_DID_CACHE_TTL_MS, 'AGENTX_DID_CACHE_TTL_MS', DEFAULT_DID_CACHE_TTL_MS),
+    cacheTtlMs: parsePositive(env.ANPIOCLI_DID_CACHE_TTL_MS, 'ANPIOCLI_DID_CACHE_TTL_MS', DEFAULT_DID_CACHE_TTL_MS),
     // 与 `documentStore` 同一个理由放在这里：每个调用点各持一份，就等于两份互不知情的见证
     // 台账，而"同一个旧 DID 指向两个后继"恰恰只有把两次解析放在一起看才成立。
     edgeStore: createDidChainEdgeStore(),
@@ -284,12 +284,12 @@ function parseDidResolution(env: NodeJS.ProcessEnv): DidResolution {
  */
 function parseServiceDid(raw: string): string {
   if (!raw.startsWith('did:')) {
-    throw new ConnectxError('invalid_argument', `AGENTX_SERVICE_DID must be a DID string (got ${JSON.stringify(raw)})`)
+    throw new ConnectxError('invalid_argument', `ANPIOCLI_SERVICE_DID must be a DID string (got ${JSON.stringify(raw)})`)
   }
   if (raw.includes('#') || raw.includes('?')) {
     throw new ConnectxError(
       'invalid_argument',
-      `AGENTX_SERVICE_DID must be a DID, not a DID URL (got ${JSON.stringify(raw)}); it may carry no fragment or query`,
+      `ANPIOCLI_SERVICE_DID must be a DID, not a DID URL (got ${JSON.stringify(raw)}); it may carry no fragment or query`,
     )
   }
   return raw
@@ -315,9 +315,9 @@ function normalizeUrl(raw: string, name: string): string {
  * identifier segment, with `:` percent-encoded, and each path segment follows as its own
  * `:`-separated segment.
  *
- *   https://agentx.example            -> did:web:agentx.example
+ *   https://anpio.example            -> did:web:anpio.example
  *   http://localhost:8787             -> did:web:localhost%3A8787
- *   https://example.com/agentx/inbox  -> did:web:example.com:agentx:inbox
+ *   https://example.com/anpio/inbox  -> did:web:example.com:anpio:inbox
  *
  * The path is percent-decoded before it is appended, because the DID document is served
  * at the decoded path and the two spellings would otherwise name different DIDs.
@@ -337,16 +337,16 @@ function impliedPublicUrl(listen: ListenAddress): string {
   if (loopback) return `http://${listen.host === '::1' ? '[::1]' : listen.host}:${listen.port}`
   throw new ConnectxError(
     'invalid_argument',
-    `AGENTX_PUBLIC_URL is required when AGENTX_LISTEN is not a loopback address ` +
+    `ANPIOCLI_PUBLIC_URL is required when ANPIOCLI_LISTEN is not a loopback address ` +
       `(got ${listen.host}); this service's DID and the endpoints it hands out are derived from it`,
   )
 }
 
 /**
- * `AGENTX_OBJECT_DIR` 不给就用数据库文件旁边那个目录（attachments.md §4）：对象与它所属的
+ * `ANPIOCLI_OBJECT_DIR` 不给就用数据库文件旁边那个目录（attachments.md §4）：对象与它所属的
  * 那个库是一份状态的两半，让它们默认待在一起，备份与搬迁才不会只搬走一半。
  *
- * `:memory:` 没有"旁边"，退回 `./objects`——与 `AGENTX_DB` 的缺省 `./agentx.db` 落在同一个
+ * `:memory:` 没有"旁边"，退回 `./objects`——与 `ANPIOCLI_DB` 的缺省 `./anpio-cli.db` 落在同一个
  * 工作目录，也是 `.gitignore` 里那一条。
  */
 function defaultObjectDir(dbPath: string): string {
@@ -355,69 +355,69 @@ function defaultObjectDir(dbPath: string): string {
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
-  const listen = parseListen(env.AGENTX_LISTEN ?? DEFAULT_LISTEN)
-  const publicUrl = normalizeUrl(env.AGENTX_PUBLIC_URL ?? impliedPublicUrl(listen), 'AGENTX_PUBLIC_URL')
-  const dbPath = env.AGENTX_DB ?? DEFAULT_DB
+  const listen = parseListen(env.ANPIOCLI_LISTEN ?? DEFAULT_LISTEN)
+  const publicUrl = normalizeUrl(env.ANPIOCLI_PUBLIC_URL ?? impliedPublicUrl(listen), 'ANPIOCLI_PUBLIC_URL')
+  const dbPath = env.ANPIOCLI_DB ?? DEFAULT_DB
 
   const config: Config = {
     listen,
     publicUrl,
-    serviceDid: parseServiceDid(env.AGENTX_SERVICE_DID ?? didWebFor(publicUrl)),
+    serviceDid: parseServiceDid(env.ANPIOCLI_SERVICE_DID ?? didWebFor(publicUrl)),
     didResolution: parseDidResolution(env),
     dbPath,
-    objectDir: env.AGENTX_OBJECT_DIR !== undefined && env.AGENTX_OBJECT_DIR !== ''
-      ? env.AGENTX_OBJECT_DIR
+    objectDir: env.ANPIOCLI_OBJECT_DIR !== undefined && env.ANPIOCLI_OBJECT_DIR !== ''
+      ? env.ANPIOCLI_OBJECT_DIR
       : defaultObjectDir(dbPath),
-    maxBody: parsePositive(env.AGENTX_MAX_BODY, 'AGENTX_MAX_BODY', DEFAULT_MAX_BODY),
+    maxBody: parsePositive(env.ANPIOCLI_MAX_BODY, 'ANPIOCLI_MAX_BODY', DEFAULT_MAX_BODY),
     maxObjectBytes: parsePositive(
-      env.AGENTX_MAX_OBJECT_BYTES,
-      'AGENTX_MAX_OBJECT_BYTES',
+      env.ANPIOCLI_MAX_OBJECT_BYTES,
+      'ANPIOCLI_MAX_OBJECT_BYTES',
       DEFAULT_MAX_OBJECT_BYTES,
     ),
     prekeyRate: {
-      burst: parsePositive(env.AGENTX_PREKEY_BURST, 'AGENTX_PREKEY_BURST', DEFAULT_PREKEY_BURST),
-      perMinute: parsePositive(env.AGENTX_PREKEY_PER_MINUTE, 'AGENTX_PREKEY_PER_MINUTE', DEFAULT_PREKEY_PER_MINUTE),
+      burst: parsePositive(env.ANPIOCLI_PREKEY_BURST, 'ANPIOCLI_PREKEY_BURST', DEFAULT_PREKEY_BURST),
+      perMinute: parsePositive(env.ANPIOCLI_PREKEY_PER_MINUTE, 'ANPIOCLI_PREKEY_PER_MINUTE', DEFAULT_PREKEY_PER_MINUTE),
     },
     deviceQueue: {
       maxAttempts: parsePositive(
-        env.AGENTX_DEVICE_QUEUE_MAX_ATTEMPTS,
-        'AGENTX_DEVICE_QUEUE_MAX_ATTEMPTS',
+        env.ANPIOCLI_DEVICE_QUEUE_MAX_ATTEMPTS,
+        'ANPIOCLI_DEVICE_QUEUE_MAX_ATTEMPTS',
         DEFAULT_DEVICE_QUEUE_MAX_ATTEMPTS,
       ),
       maxAgeMs: parsePositive(
-        env.AGENTX_DEVICE_QUEUE_MAX_AGE_MS,
-        'AGENTX_DEVICE_QUEUE_MAX_AGE_MS',
+        env.ANPIOCLI_DEVICE_QUEUE_MAX_AGE_MS,
+        'ANPIOCLI_DEVICE_QUEUE_MAX_AGE_MS',
         DEFAULT_DEVICE_QUEUE_MAX_AGE_MS,
       ),
     },
     // 取件面的可读窗口。与上面那两个**不同**：它不裁剪任何东西，只回答"还说不说"。
     deliveryReadWindowMs: parsePositive(
-      env.AGENTX_DELIVERY_READ_WINDOW_MS,
-      'AGENTX_DELIVERY_READ_WINDOW_MS',
+      env.ANPIOCLI_DELIVERY_READ_WINDOW_MS,
+      'ANPIOCLI_DELIVERY_READ_WINDOW_MS',
       DEFAULT_DELIVERY_READ_WINDOW_MS,
     ),
     memberDidRefresh: {
       intervalMs: parsePositive(
-        env.AGENTX_DID_REFRESH_INTERVAL_MS,
-        'AGENTX_DID_REFRESH_INTERVAL_MS',
+        env.ANPIOCLI_DID_REFRESH_INTERVAL_MS,
+        'ANPIOCLI_DID_REFRESH_INTERVAL_MS',
         DEFAULT_DID_REFRESH_INTERVAL_MS,
       ),
-      batch: parsePositive(env.AGENTX_DID_REFRESH_BATCH, 'AGENTX_DID_REFRESH_BATCH', DEFAULT_DID_REFRESH_BATCH),
+      batch: parsePositive(env.ANPIOCLI_DID_REFRESH_BATCH, 'ANPIOCLI_DID_REFRESH_BATCH', DEFAULT_DID_REFRESH_BATCH),
     },
   }
-  if (env.AGENTX_KEY_FILE !== undefined && env.AGENTX_KEY_FILE !== '') {
-    config.keyFile = env.AGENTX_KEY_FILE
-    config.keyId = parseKeyId(env.AGENTX_KEY_ID, config.serviceDid)
-  } else if (env.AGENTX_KEY_ID !== undefined && env.AGENTX_KEY_ID !== '') {
+  if (env.ANPIOCLI_KEY_FILE !== undefined && env.ANPIOCLI_KEY_FILE !== '') {
+    config.keyFile = env.ANPIOCLI_KEY_FILE
+    config.keyId = parseKeyId(env.ANPIOCLI_KEY_ID, config.serviceDid)
+  } else if (env.ANPIOCLI_KEY_ID !== undefined && env.ANPIOCLI_KEY_ID !== '') {
     // 只有 keyid 没有钥：要么少配一个变量，要么名字打错了。两者都在启动时说不清，
     // 到了第一次跨域调用才炸会难查得多。
-    throw new ConnectxError('invalid_argument', 'AGENTX_KEY_ID is set but AGENTX_KEY_FILE is not')
+    throw new ConnectxError('invalid_argument', 'ANPIOCLI_KEY_ID is set but ANPIOCLI_KEY_FILE is not')
   }
   return config
 }
 
 /**
- * `AGENTX_KEY_ID`：完整 DID URL（ANP-02 L82），且必须挂在 `serviceDid` 下。
+ * `ANPIOCLI_KEY_ID`：完整 DID URL（ANP-02 L82），且必须挂在 `serviceDid` 下。
  *
  * 后半句不是格式检查，是配置一致性：`keyid` 所属的 DID 必须等于对方按 §6.2.2 第 6 步
  * 读出来的那个 `serviceDid`，否则每一份我们签出去的请求都会被对端按 `forbidden_did` 拒掉
@@ -426,20 +426,20 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
  */
 function parseKeyId(raw: string | undefined, serviceDid: string): string {
   if (raw === undefined || raw === '') {
-    throw new ConnectxError('invalid_argument', 'AGENTX_KEY_ID is required when AGENTX_KEY_FILE is set')
+    throw new ConnectxError('invalid_argument', 'ANPIOCLI_KEY_ID is required when ANPIOCLI_KEY_FILE is set')
   }
   const hash = raw.indexOf('#')
   if (hash <= 0 || hash === raw.length - 1) {
     throw new ConnectxError(
       'invalid_argument',
-      `AGENTX_KEY_ID must be a full DID URL, e.g. ${serviceDid}#key-1 (got ${JSON.stringify(raw)})`,
+      `ANPIOCLI_KEY_ID must be a full DID URL, e.g. ${serviceDid}#key-1 (got ${JSON.stringify(raw)})`,
     )
   }
   const did = raw.slice(0, hash)
   if (did !== serviceDid) {
     throw new ConnectxError(
       'invalid_argument',
-      `AGENTX_KEY_ID must name a verification method of ${serviceDid} (got ${JSON.stringify(did)})`,
+      `ANPIOCLI_KEY_ID must name a verification method of ${serviceDid} (got ${JSON.stringify(did)})`,
     )
   }
   return raw

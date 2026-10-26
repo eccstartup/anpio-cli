@@ -17,7 +17,7 @@ function open(path = ':memory:'): Storage {
 }
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'agentx-storage-'))
+  dir = mkdtempSync(join(tmpdir(), 'anpiocli-storage-'))
 })
 
 afterEach(() => {

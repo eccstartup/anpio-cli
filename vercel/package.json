@@ -1,8 +1,8 @@
 {
-  "name": "@agentx/docs",
+  "name": "@anpio-cli/docs",
   "version": "0.0.0",
   "private": true,
-  "description": "AgentX documentation site: a bilingual VitePress site deployed to Vercel.",
+  "description": "anpio-cli documentation site: a bilingual VitePress site deployed to Vercel.",
   "license": "MIT",
   "type": "module",
   "scripts": {

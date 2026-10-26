@@ -3,7 +3,7 @@
 // P3 §6.2.4–§6.2.6 与 P4 §7.6 说的是**同一件事**，所以只有这一份：`direct.send` 与
 // `group.send` 的正文互斥规则逐字相同，各写一遍就等着某次只改了其中一边。
 
-import { anpRejection, type AnpRejection } from '@agentx/core'
+import { anpRejection, type AnpRejection } from '@anpio-cli/core'
 import { DIRECT_CIPHER_CONTENT_TYPE, DIRECT_INIT_CONTENT_TYPE } from './e2ee'
 
 /** P3 §6.3 L281–285 / P4 §7.6 L438–442：三个负载字段，**恰好**出现一个。 */

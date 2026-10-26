@@ -13,8 +13,8 @@
 //    所以它钉的是**另一句话**：这份文档能被解析成这个 DID 的文档，与签名无关。
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { parsePrivateKey, verifyDidDocument, verifyObjectProofDetailed } from '@agentx/core'
-import { encodeMultibaseEd25519, ed25519PublicKey } from '@agentx/core/advanced'
+import { parsePrivateKey, verifyDidDocument, verifyObjectProofDetailed } from '@anpio-cli/core'
+import { encodeMultibaseEd25519, ed25519PublicKey } from '@anpio-cli/core/advanced'
 import { loadConfig, type Config } from '../config'
 import { RPC_PATH } from '../http/server'
 import { openStorage } from '../storage/sqlite'
@@ -22,8 +22,8 @@ import type { Storage } from '../storage/types'
 import { GROUP_KEY_FRAGMENT, groupDidKeyId } from './groups'
 import { buildGroupDidDocument, groupDidDocument, groupServiceEntry } from './groupDidDocument'
 
-const SERVICE = 'did:web:agentx.example'
-const PUBLIC_URL = 'https://agentx.example'
+const SERVICE = 'did:web:anpio.example'
+const PUBLIC_URL = 'https://anpio.example'
 const GROUP = `${SERVICE}:g:AAAAAAAAAAAAAAAAAAAAAA`
 const CREATED = '2026-10-02T00:00:00Z'
 /** 一个真实的 32 字节种子。写死而不是随机，是为了让"公钥等于这个种子的公钥"能成为一条
@@ -35,7 +35,7 @@ let config: Config
 
 beforeEach(() => {
   storage = openStorage({ path: ':memory:' })
-  config = loadConfig({ AGENTX_PUBLIC_URL: PUBLIC_URL, AGENTX_SERVICE_DID: SERVICE })
+  config = loadConfig({ ANPIOCLI_PUBLIC_URL: PUBLIC_URL, ANPIOCLI_SERVICE_DID: SERVICE })
 })
 
 afterEach(() => {
@@ -147,8 +147,8 @@ describe('the group DID document (B1b-A2)', () => {
     // 服务 DID 是 `did:wba` 时群 DID 是 `did:wba:host:e1_…:g:<id>`：末段是群 id 而不是
     // 指纹，所以策略退到"有则验、无则收"——有就必须验得过。
     const wba = loadConfig({
-      AGENTX_PUBLIC_URL: 'https://agentx.example',
-      AGENTX_SERVICE_DID: 'did:wba:agentx.example:e1_0123456789abcdef',
+      ANPIOCLI_PUBLIC_URL: 'https://anpio.example',
+      ANPIOCLI_SERVICE_DID: 'did:wba:anpio.example:e1_0123456789abcdef',
     })
     const groupDid = `${wba.serviceDid}:g:ZZZZZZZZZZZZZZZZZZZZZZ`
     const document = buildGroupDidDocument({

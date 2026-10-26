@@ -3,7 +3,7 @@
 按 Signal / 微信那类 IM 服务的模型来设计：**服务端持有账号的消息队列，客户端连上去、
 按游标取、同时被推。**
 
-这一层补的是规范刻意留白的一半（见 [cli.md](cli.md) §5），也是 `AgentXAgent`
+这一层补的是规范刻意留白的一半（见 [cli.md](cli.md) §5），也是 `AnpioAgent`
 作为"一个能用的消息服务"与"一个符合规范的投递端点"之间的差。
 
 ---
@@ -95,8 +95,8 @@ client                                server
    `head_seq` 随 `stream.ready` 给**，`hello` 里那个是占位。
 3. **服务端在补齐完成前不刷实时通知。** 见 §5，这是无空洞无重复的关键。
 4. **两个 Profile 分属两件事。** `stream.auth` / `stream.ack` 是传输自己的
-   `x_agentx.stream.v1`，`sync.delta` 与 `inbox.mark_read` 是取件面的
-   `x_agentx.inbox.v1`（§9）。`meta.profile` 是"本次请求的唯一解释"，所以它是**按方法**
+   `x_anpiocli.stream.v1`，`sync.delta` 与 `inbox.mark_read` 是取件面的
+   `x_anpiocli.inbox.v1`（§9）。`meta.profile` 是"本次请求的唯一解释"，所以它是**按方法**
    给的，一条连接上两种都有；给错了就是 1001 `anp.unsupported_profile`。
 
 ## 5. 游标：无空洞、无重复
@@ -204,7 +204,7 @@ client                                server
 | 送达客户端 | 帧已经发出去 / 客户端已收到 | 服务端 + 连接 |
 | **已读** | 有人或某个 agent 处理过了 | **调用方**，靠 `stream.ack` 推进游标 |
 
-推进游标的帧是 `stream.ack {seq}`，走 §4 那条连接（`x_agentx.stream.v1`）。它是
+推进游标的帧是 `stream.ack {seq}`，走 §4 那条连接（`x_anpiocli.stream.v1`）。它是
 `delivery_cursor` 表**唯一**的写入者：`sync.delta` 不写（补齐归补齐），握手不写。
 服务的实现把 `seq` 钳到当前 head 再写——`advanceCursor` 只进不退，一个凭空来的大数
 会把游标顶到真实消息前面，下一次重连就静默跳过了。
@@ -241,7 +241,7 @@ client                                server
 - **非 TTY，或 `--json`**：**NDJSON**，一行一个对象
 
 ```jsonc
-{"state":"connecting","service":"https://agentx.example/anp-im/rpc"}
+{"state":"connecting","service":"https://anpio.example/anp-im/rpc"}
 {"state":"connected","device":"claude-code/default","head":42}
 {"type":"message","seq":43,"message_id":"msg-…","from":"did:wba:…",
  "target_kind":"agent","content_type":"text/plain","text":"hello",
@@ -319,8 +319,8 @@ subscribers: Map<owner_did, Set<{ socket, deviceId, headSeq, pending[] }>>
   它们照旧**不得**出现在 `anp.get_capabilities` 的 `profiles[]` 里。
   但它们**有**自己的 Profile 值（P1 §6.2.2 L277 把 `meta.profile` 定成 MUST，
   且是"本次请求的唯一解释"，所以线上必须有值）：业务方法用
-  `x_agentx.inbox.v1`（[message-service.md](message-service.md) §9.1），
-  传输握手另用一个 `x_agentx.stream.v1`——两者都是 `x_` 命名空间下的扩展标识，
+  `x_anpiocli.inbox.v1`（[message-service.md](message-service.md) §9.1），
+  传输握手另用一个 `x_anpiocli.stream.v1`——两者都是 `x_` 命名空间下的扩展标识，
   与 §13 那条"扩展不进 `profiles[]`"并不冲突：那里说的是**规范符合性**那张清单。
   流端点自己的能力由 `stream.hello` 自报，客户端连上即知。
 - **两个扩展 Profile 走同一套目标建模**：`stream.auth` / `stream.ack` 与业务扩展方法

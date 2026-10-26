@@ -10,7 +10,7 @@
 // 能在进入事务之前就地回一个响应——后者会让一次早已受理的重试被重新判一遍，而那次判定
 // 此刻的答案可能与当初不同。
 
-import type { AnpRejection } from '@agentx/core'
+import type { AnpRejection } from '@anpio-cli/core'
 
 /** 一次调用被 Profile 层拒绝。抛出它，让分发层用**这次请求自己的** `id` 包成响应。 */
 export class AnpRefusal extends Error {

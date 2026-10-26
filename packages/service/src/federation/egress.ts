@@ -15,7 +15,7 @@
 // 第二份拷贝的地方，就是 SSRF 漏洞最终会出现的地方。
 
 import { randomUUID } from 'node:crypto'
-import { fetchControlledResponse, type AnpNotification, type AnpRequest, type FetchErrorCodes, type LocateOptions } from '@agentx/core'
+import { fetchControlledResponse, type AnpNotification, type AnpRequest, type FetchErrorCodes, type LocateOptions } from '@anpio-cli/core'
 import type { Config } from '../config'
 import type { HttpSigner } from './signing'
 

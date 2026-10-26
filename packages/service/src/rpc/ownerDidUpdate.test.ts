@@ -7,7 +7,7 @@
 // 为什么这件事值得一条测试：缓存里那份文档是换钥**之前**抓的，它自己不写 `successorDid`。
 // core 的两条缓存规则（带 `successorDid` 的文档不写进缓存、缓存里那份变了也不再读出）挡的
 // 是"**已经**换过"，挡不住"抓的时候还没换、抓完之后才换"——那正是这里的情形。于是整个
-// "换钥之后把投递搬回新 DID"的发现时刻，会被 `AGENTX_DID_CACHE_TTL_MS`（出厂 5 分钟）推后。
+// "换钥之后把投递搬回新 DID"的发现时刻，会被 `ANPIOCLI_DID_CACHE_TTL_MS`（出厂 5 分钟）推后。
 // 迁移这一步要的是"**现在**谁是这个主体的当前 DID"，晚五分钟没有理由，所以它自己带 `fresh`。
 //
 // **量的就是"我们递了什么选项给 core"**，而不是跑一遍真的解析：服务那份 `DidResolution`
@@ -16,12 +16,12 @@
 // 缓存本身的行为是 core 的，`packages/core/src/did/chain.test.ts` 已经逐条测过。
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import * as core from '@agentx/core'
+import * as core from '@anpio-cli/core'
 import { loadConfig } from '../config'
 import { chainResolverFor } from './memberDidUpdate'
 
-vi.mock('@agentx/core', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@agentx/core')>()
+vi.mock('@anpio-cli/core', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@anpio-cli/core')>()
   return { ...actual, resolveDidChain: vi.fn() }
 })
 

@@ -29,7 +29,7 @@ import type { Duplex } from 'node:stream'
 const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
 
 /** One message may not exceed this. realtime.md §3 frames are JSON-RPC envelopes whose
- *  body cap is already `AGENTX_MAX_BODY`; this is the same order of magnitude and is
+ *  body cap is already `ANPIOCLI_MAX_BODY`; this is the same order of magnitude and is
  *  enforced before a fragment is buffered, so a peer cannot announce a huge frame. */
 export const MAX_MESSAGE = 1024 * 1024
 

@@ -1,30 +1,30 @@
 ---
 title: Introduction
-description: "AgentX is a self-hostable implementation of the ANP message layer: a command-line client called anpio-cli, and a message service called AgentXAgent."
+description: "anpio-cli is a self-hostable implementation of the ANP message layer: a command-line client called anpio-cli, and a message service called AnpioAgent."
 ---
 
 # Introduction
 
-**AgentX is a self-hostable implementation of the ANP (Agent Network Protocol) message layer.** It has two parts:
+**anpio-cli is a self-hostable implementation of the ANP (Agent Network Protocol) message layer.** It has two parts:
 
 - **`anpio-cli`** — the command-line client (Rust, source under `rust/`). Prepare identities, log in to applications, send and receive messages, join groups.
-- **`AgentXAgent`** — the message service. Receives, persists, and delivers messages between agents, and hosts group state.
+- **`AnpioAgent`** — the message service. Receives, persists, and delivers messages between agents, and hosts group state.
 
-**The two are separate implementations**: the server and the protocol library are TypeScript (`@agentx/core`), the command-line client is Rust (the `anp` crate). Signing, canonicalization, and DID resolution therefore exist **twice**, kept in step by the spec and by tests on both sides — a deliberate trade, not laziness. The TypeScript `connectx` in this repository (`packages/cli`) is **frozen**: no new features, and it is no longer the documentation entry point.
+**The two are separate implementations**: the server and the protocol library are TypeScript (`@anpio-cli/core`), the command-line client is Rust (the `anp` crate). Signing, canonicalization, and DID resolution therefore exist **twice**, kept in step by the spec and by tests on both sides — a deliberate trade, not laziness. The TypeScript `connectx` in this repository (`packages/cli`) is **frozen**: no new features, and it is no longer the documentation entry point.
 
 ## The three pieces
 
 | Package | Artifact | Role |
 |---|---|---|
-| `packages/core` | `@agentx/core` | Protocol primitives: DID composition, RFC 9421 signing and verification, key resolution, CAIP-10 identity, JCS canonicalization, message envelope |
+| `packages/core` | `@anpio-cli/core` | Protocol primitives: DID composition, RFC 9421 signing and verification, key resolution, CAIP-10 identity, JCS canonicalization, message envelope |
 | `rust/crates/anpio-cli` | `anpio-cli` | Command-line client (Rust): identity / login / send and receive messages |
-| `packages/service` | `AgentXAgent` | ANP message service: receive, store, push, fetch; also the Group Host for groups |
+| `packages/service` | `AnpioAgent` | ANP message service: receive, store, push, fetch; also the Group Host for groups |
 
 ```mermaid
 graph TD
   U(["user / agent runtime"]) --> CLI["anpio-cli<br/>command-line client · Rust"]
-  CLI --> CORE["@agentx/core<br/>protocol primitives"]
-  CORE --> SVC["AgentXAgent<br/>ANPMessageService"]
+  CLI --> CORE["@anpio-cli/core<br/>protocol primitives"]
+  CORE --> SVC["AnpioAgent<br/>ANPMessageService"]
   PEER["peer agent's ingress service"] <-->|"direct.send / direct.incoming"| SVC
   SVC --> DB[("SQLite<br/>messages · deliveries · idempotency · groups")]
   CLI -. "resolve DID document" .-> DOC["agent's DID document"]
@@ -38,9 +38,9 @@ ANP has two kinds of service. This repository only does the second:
 
 - **DID Service** — hosts `did.json`, issues handles. Handled by a **sibling project**, not this repository.
   `anpio-cli` is only a client of it here (`did create` / `did resolve` / `did update`).
-- **ANPMessageService** — receives and delivers messages between agents. **`AgentXAgent` in this repository is it.**
+- **ANPMessageService** — receives and delivers messages between agents. **`AnpioAgent` in this repository is it.**
 
-The two deploy independently. `AgentXAgent` **does not host DID documents**; it only **resolves** the other party's DID document when it needs to, and finds the ingress service address inside. This is also why, for an agent to be able to receive messages, it must first have a DID document that resolves to an `ANPMessageService` entry.
+The two deploy independently. `AnpioAgent` **does not host DID documents**; it only **resolves** the other party's DID document when it needs to, and finds the ingress service address inside. This is also why, for an agent to be able to receive messages, it must first have a DID document that resolves to an `ANPMessageService` entry.
 
 ## One success semantic that decides the architecture
 

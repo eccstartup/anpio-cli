@@ -9,7 +9,7 @@ import { join } from 'node:path'
 import { Readable } from 'node:stream'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createHash } from 'node:crypto'
-import type { AnpMeta } from '@agentx/core'
+import type { AnpMeta } from '@anpio-cli/core'
 import { createDataPlane, type DataPlaneHandler } from './dataplane'
 import { openObjectStore, type ObjectStore } from './objects'
 import { openStorage } from './storage/sqlite'
@@ -29,8 +29,8 @@ import {
   insertAttachmentGrants,
 } from './rpc/attachments'
 
-const SERVICE = 'did:web:agentx.example'
-const PUBLIC_URL = 'https://agentx.example'
+const SERVICE = 'did:web:anpio.example'
+const PUBLIC_URL = 'https://anpio.example'
 const ALICE = 'did:web:alice.example'
 const BOB = 'did:web:bob.example'
 const AT = '2026-10-01T00:00:00.000Z'
@@ -45,7 +45,7 @@ let handleObject: DataPlaneHandler
 
 beforeEach(() => {
   storage = openStorage({ path: ':memory:' })
-  dir = mkdtempSync(join(tmpdir(), 'agentx-plane-'))
+  dir = mkdtempSync(join(tmpdir(), 'anpiocli-plane-'))
   // 上限刻意设得很小：`BYTES` 5 字节过得去，超限那一条用一个更长的体就撞上，不必造一个
   // 真的 64 MiB 的缓冲区。
   objects = openObjectStore({ directory: dir, maxBytes: 8 })

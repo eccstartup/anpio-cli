@@ -20,5 +20,5 @@ export default defineConfig({
   clean: true,
   treeshake: true,
   removeNodeProtocol: false,
-  external: [/^@agentx\/core(\/.*)?$/],
+  external: [/^@anpio-cli\/core(\/.*)?$/],
 })

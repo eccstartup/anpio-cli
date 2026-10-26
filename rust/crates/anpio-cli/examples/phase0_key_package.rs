@@ -11,7 +11,7 @@
 //! things this file pins down.
 //!
 //! ```text
-//! cargo run --example phase0_key_package -- /tmp/agentx-spike
+//! cargo run --example phase0_key_package -- /tmp/anpiocli-spike
 //! ```
 
 use std::path::PathBuf;
@@ -32,7 +32,7 @@ fn main() -> anyhow::Result<()> {
     let base = PathBuf::from(
         std::env::args()
             .nth(1)
-            .unwrap_or_else(|| "./.agentx-spike".to_string()),
+            .unwrap_or_else(|| "./.anpiocli-spike".to_string()),
     );
 
     // 1. A device identity. `enable_e2ee` (on by default) is what makes the document carry

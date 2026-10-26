@@ -13,7 +13,7 @@
 1. **它没有剩下的用处了。** 它唯一还在调的服务端扩展面是 `inbox.get` / `inbox.mark_read` /
    `message.get_batch`，而读搬到本地之后（[client-messages.md](client-messages.md) §8）这三条
    在 Rust 侧已经没有调用者，服务端那三条 spec 也随之下线（[message-service.md](message-service.md) §9）。
-   `sync.delta` 是 `x_agentx.inbox.v1` 里唯一还有客户端的成员，而它由 `msg fetch` 与
+   `sync.delta` 是 `x_anpiocli.inbox.v1` 里唯一还有客户端的成员，而它由 `msg fetch` 与
    `msg listen` 走。
 2. **两份客户端意味着签名、规范化、DID 解析各存在两遍。** 服务端与协议库是 TypeScript、
    客户端是 Rust，这本身是有意的取舍；再叠一份同语言的客户端只是把同一份协议实现再写一遍，
@@ -81,8 +81,8 @@ ANP 里有两个可以被"自己搭一个"的服务，`anpio-cli` 对两者都�
 
 ## 5. 扩展面：规范没有定义的那一半
 
-`msg fetch` / `msg listen` 走的是 `x_agentx.inbox.v1`，`contacts` 走
-`x_agentx.contacts.v1`，群备注走 `x_agentx.group_remarks.v1`——**规范里都没有**。
+`msg fetch` / `msg listen` 走的是 `x_anpiocli.inbox.v1`，`contacts` 走
+`x_anpiocli.contacts.v1`，群备注走 `x_anpiocli.group_remarks.v1`——**规范里都没有**。
 `x_` 前缀是 P1 §12 给扩展留的命名空间，取值不是任何一个规范 Profile（那才是对客户端撒谎：
 P1 §6.2.2 L277 说 `profile` 是"唯一解释"）。
 

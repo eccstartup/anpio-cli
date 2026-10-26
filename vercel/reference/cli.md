@@ -10,7 +10,7 @@ description: 命令行客户端 anpio-cli 的完整命令面：discover / did / 
 `anpio-cli help [<命令> [<子命令>]]` 打印同一份说明（命令面的权威来源就是它打印的东西）。
 
 > [!NOTE]
-> **`connectx` 已冻结。** `packages/cli` 的那个 TypeScript 客户端（`@agentx/cli` 包）不再加功能，
+> **`connectx` 已冻结。** `packages/cli` 的那个 TypeScript 客户端（`@anpio-cli/cli` 包）不再加功能，
 > 也不再是文档入口——本页描述的是 `anpio-cli`，站上其余指南也都已换成它。两者的**协议语义相同**，
 > 命令名与旗标有出入，以本页与 `--help` 为准。
 
@@ -117,7 +117,7 @@ cargo build --release --manifest-path rust/Cargo.toml
 服务，这个命令连不上。
 
 > [!NOTE]
-> `msg inbox` / `msg show` / `msg read` 打的是**实现扩展**（`x_agentx.inbox.v1`），不是规范。
+> `msg inbox` / `msg show` / `msg read` 打的是**实现扩展**（`x_anpiocli.inbox.v1`），不是规范。
 > ANP 消息规范刻意不管历史与已读状态，所以一个只实现规范的服务在这里会答 `-32601`——
 > 客户端把这句话**原样报成 `unsupported_extension` 并退出 1**，那**是正确答案**，不是缺陷：
 > 它说明对端没有这套扩展，与"对端拒绝了"（`message_send_failed`）是两件事。
@@ -133,7 +133,7 @@ cargo build --release --manifest-path rust/Cargo.toml
 | `contacts remove <name>` | 移出册子（名字或 DID） |
 | `contacts resolve <name>` | 名字进、DID 出；`--json` 给整行（含 `subject`） |
 
-册子不在本地文件里，在**消息服务的库**里（扩展 `x_agentx.contacts.v1`），按**请求的已验证
+册子不在本地文件里，在**消息服务的库**里（扩展 `x_anpiocli.contacts.v1`），按**请求的已验证
 签名者**分行，所以一个身份的备注对另一个身份天然不可见。行按 **`subject`** 存、不按 `did`——
 `did update` 会把 DID 挪走（它内嵌钥指纹），备注挂 `did` 上就会在换钥时静默消失。
 
@@ -162,7 +162,7 @@ cargo build --release --manifest-path rust/Cargo.toml
 
 **`update-profile --name` 与 `set-remark` 不是一件事**：前者写的是群**自己的**名字，存在群的
 主机上、对所有人一样；后者起的是**只有我看得见**的那个，存在服务里另一张表（扩展
-`x_agentx.group_remarks.v1`），`group info` 把它印在 `name:` 的下一行。`members` 里认得的成员
+`x_anpiocli.group_remarks.v1`），`group info` 把它印在 `name:` 的下一行。`members` 里认得的成员
 后面跟的是**你给他起的备注**（名字挂在 `subject` 上，对端换钥也不会丢）。
 
 ## `group e2ee` —— 群端到端加密

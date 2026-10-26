@@ -29,7 +29,7 @@ import {
   profileRejection,
   type AnpMeta,
   type AnpRejection,
-} from '@agentx/core'
+} from '@anpio-cli/core'
 import type { ObjectStore } from '../objects'
 import type { Storage, StoredAttachmentGrant } from '../storage/types'
 import { refusal } from './refusal'

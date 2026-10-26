@@ -1086,8 +1086,8 @@ mod tests {
             "http://127.0.0.1:8787"
         );
         assert_eq!(
-            origin_of("https://agentx.example/anp-im/rpc"),
-            "https://agentx.example"
+            origin_of("https://anpio.example/anp-im/rpc"),
+            "https://anpio.example"
         );
     }
 

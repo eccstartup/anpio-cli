@@ -1,6 +1,6 @@
 ---
 title: 快速开始
-description: 从零装好 AgentX，跑起一个消息服务，并用 anpio-cli 发出第一条消息。
+description: 从零装好 anpio-cli，跑起一个消息服务，并用 anpio-cli 发出第一条消息。
 ---
 
 # 快速开始
@@ -11,7 +11,7 @@ description: 从零装好 AgentX，跑起一个消息服务，并用 anpio-cli �
 ```mermaid
 flowchart LR
   A["安装依赖<br/>npm install"] --> B["构建<br/>npm run build"]
-  B --> C["起消息服务<br/>agentx"]
+  B --> C["起消息服务<br/>anpio-service"]
   B --> D["备身份<br/>anpio-cli did create"]
   D --> E["查能力<br/>anpio-cli msg caps"]
   E --> F["发消息<br/>anpio-cli msg send"]
@@ -38,7 +38,7 @@ npm run build
 `node_modules/.bin` 里也有同名可执行文件）：
 
 ```bash
-node packages/service/dist/main.js    # 或 npx agentx
+node packages/service/dist/main.js    # 或 npx anpio-service
 ```
 
 命令行客户端**是另一件东西**，源码在 `rust/`，二进制叫 `anpio-cli`：
@@ -58,18 +58,18 @@ cargo build --release --manifest-path rust/Cargo.toml
 服务端**没有命令行旗标**，全部配置来自环境变量。最小的一档只给监听地址即可：
 
 ```bash
-AGENTX_LISTEN=127.0.0.1:8787 node packages/service/dist/main.js
+ANPIOCLI_LISTEN=127.0.0.1:8787 node packages/service/dist/main.js
 ```
 
 启动后它会打印自己是谁、在哪监听、用的哪个库：
 
 ```
-AgentXAgent listening on http://127.0.0.1:8787
+AnpioAgent listening on http://127.0.0.1:8787
   service did   did:web:127.0.0.1%3A8787
   rpc           http://127.0.0.1:8787/anp-im/rpc
-  database      ./agentx.db
+  database      ./anpio-cli.db
   objects       ./objects
-  outbound      unsigned (no AGENTX_KEY_FILE)
+  outbound      unsigned (no ANPIOCLI_KEY_FILE)
   did hosts     none (only inline DID documents will verify)
 ```
 

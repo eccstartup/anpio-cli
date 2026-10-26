@@ -18,7 +18,7 @@ import {
   type AnpNotification,
   type AnpRejection,
   type AnpRequest,
-} from '@agentx/core'
+} from '@anpio-cli/core'
 import type { RpcResponse } from '../http/server'
 
 // `AnpRequest` is structurally an `AnpNotification` plus an `id`, so this union is NOT

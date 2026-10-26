@@ -13,7 +13,7 @@ flowchart LR
   subgraph CLIENT["客户端（唯一看得见明文的地方）"]
     K1["X3DH / Double Ratchet<br/>MLS create / add / remove"]
   end
-  subgraph SRV["AgentXAgent（只碰不透明字节）"]
+  subgraph SRV["AnpioAgent（只碰不透明字节）"]
     CAB[("钥匙柜<br/>prekey_bundles<br/>group_key_packages")]
     MB[("邮箱 / Device Delivery Queue<br/>不透明密文")]
   end

@@ -117,10 +117,10 @@ L252–260 那组 `error` 取值（`invalid_signature` / `invalid_verification_m
 第 2 步要解析 caller anchor 的文档，第 7 步要解析 `serviceDid` 的文档，两者都住在**对方**
 域里。§6.2.3 L328–329 推荐 `did:web` / `did:wba` 用**裸域名 DID** 做域级联邦身份，
 而 core 的签名器只在**非** `did:web:` 时内联文档——所以 `did:web` 的跨域接收
-**必然**要出站解析，而 `AGENTX_ALLOWED_DID_HOSTS` 的默认值是空（只认内联文档）。
+**必然**要出站解析，而 `ANPIOCLI_ALLOWED_DID_HOSTS` 的默认值是空（只认内联文档）。
 
 **这不是代码问题，是部署问题**：跨域接收要求把对端域加进白名单，或者用
-`AGENTX_DID_DEV_HOSTS` 联调。默认空是**对的**默认——一个消息服务不该因为跑起来
+`ANPIOCLI_DID_DEV_HOSTS` 联调。默认空是**对的**默认——一个消息服务不该因为跑起来
 就去任意解析陌生域名。C11 不放松它，只在文档里写清楚。
 
 ## 3. 发送侧：一条同步路，一条异步路
@@ -177,7 +177,7 @@ MTI 第 14 项（§10 L661）。
   A1–A3 铸出群钥、造出文档、把文档挂上 `GET …/g/<id>/did.json`，这一族才接得上。
 - 接上之后还有一处前两族没有的判据：住在**自己命名空间**里的群（`serviceDid:g:<id>`）直接
   落在本地（`relayFor` 里的 `isOwnGroupDid`）。放它出站的那趟解析要么被
-  `AGENTX_ALLOWED_DID_HOSTS` 拒（清单写的是对端域，不写自己），要么要求本服务的
+  `ANPIOCLI_ALLOWED_DID_HOSTS` 拒（清单写的是对端域，不写自己），要么要求本服务的
   `publicUrl` 是 https——于是一个**本服务亲手建的群**会在自己的 `group.send` 上报 1012。
   这不是优化：一个本地就知道答案的调用不该取决于出站解析成不成功。见 §3.3。
 - 跨域那一档还多一处与前两族不同的接线：群一转发，本地处理器就**整段跳过**
@@ -260,10 +260,10 @@ C5b 那行 `direct.incoming` 入队本来就是白跑的一趟：后台 worker �
    （[message-service.md](message-service.md) §13 / [cli.md](cli.md) §3.4）——**这是分层，
    不是缺口**（2026-10-02 的裁定：DID server 只管身份，本服务承载社交应用；身份文档是 DID
    server 的产物，本服务发布的是群文档那一类消息层产物）。所以 keyid 的 fragment 由**发布
-   方**决定，本服务只能配成一致。落地就是 `AGENTX_KEY_ID`：完整 DID URL，且必须挂在
+   方**决定，本服务只能配成一致。落地就是 `ANPIOCLI_KEY_ID`：完整 DID URL，且必须挂在
    `serviceDid` 下——配置层会拒掉别的，因为不一致时我们签出去的每一份请求都会被对端按第 6
    步拒成 `forbidden_did`，而那个错误看起来像对端的问题。
-3. **私钥从哪来。** `AGENTX_KEY_FILE`（`config.ts` L206）早就解析了却没人用。
+3. **私钥从哪来。** `ANPIOCLI_KEY_FILE`（`config.ts` L206）早就解析了却没人用。
    C11 就是它的第一个消费者：读一把 Ed25519 私钥（hex 或 PEM，与 `connectx --key` 认的
    同两种），按 ANP-02 §3.1.2 造 `Signature-Input` + `Signature` + `Content-Digest`。
    core 现有的签名器**不能**直接用——它是 ANP-02 的 DID 服务登录流程，不是通用外层的
@@ -348,20 +348,20 @@ Grant 的键已经是 `(message_id, attachment_id, object_uri)`，多存一列�
    范围内通了。剩下两处不是本服务的事：别人名下的群要靠**它自己**的 Host 发布（§5.1 的
    `ServiceLocator` 本来就不假设是谁发的），以及本服务自己的 `serviceDid` 文档仍由
    `awiki-open-server` 托管（下面第 2 条）。**部署侧另有一条硬前提**：`did:web` 一律要求
-   https，所以 `AGENTX_PUBLIC_URL` 是 http 的部署（含本仓库的默认值）其群文档解析不出来，
-   `AGENTX_ALLOWED_DID_HOSTS` 也得写进对端域（TODO3 §B）。
+   https，所以 `ANPIOCLI_PUBLIC_URL` 是 http 的部署（含本仓库的默认值）其群文档解析不出来，
+   `ANPIOCLI_ALLOWED_DID_HOSTS` 也得写进对端域（TODO3 §B）。
 2. **`serviceDid` 文档由 DID Service 发布——这是分层，不是缺口**（§4 第 2 点）。
    2026-10-02 的裁定把两个服务切开：**DID server 只管身份，本服务承载社交应用**。身份文档
    因此**有意**留在 `awiki-open-server` 那一侧，本服务不发布它；外层 `keyid` 的 fragment 由
-   发布方决定，本服务用 `AGENTX_KEY_ID` 配成一致。同一裁定也把 TODO2 A7 那条收了口：一份
+   发布方决定，本服务用 `ANPIOCLI_KEY_ID` 配成一致。同一裁定也把 TODO2 A7 那条收了口：一份
    身份文档里 `ANPMessageService` 条目指向谁，是**身份所有者**的声明，不是 DID server 的
    裁决——awiki 原先那两条"必须等于服务器自己"的相等检查正是把两层焊在了一起，fork 的
    `AWIKI_ALLOW_PEER_DECLARED_MESSAGE_SERVICE` 把它拆开（[TODO4.md](../../TODO4.md) §C）。
 3. **被取代 DID 的拒绝需要 P2 连续性来源**：§6.7 / §7.2 L492 要求重建签名重试，而
    "哪个 DID 取代了哪个"的权威答案在 P2。[groups.md](groups.md) §12 记的是同一条。
 4. **上面这些验到了什么程度。** B1b 落地时，跨域转发只有方法级测试，对端是一个回答
-   "文档指向哪"的 stub。TODO4 §A3 把 stub 换成了第二台真的 `AgentXAgent`：同一台机器、
-   两个端口、`AGENTX_DID_DEV_HOSTS` 那条联调口，A 域的 agent 对 B 域命名空间里的群发
+   "文档指向哪"的 stub。TODO4 §A3 把 stub 换成了第二台真的 `AnpioAgent`：同一台机器、
+   两个端口、`ANPIOCLI_DID_DEV_HOSTS` 那条联调口，A 域的 agent 对 B 域命名空间里的群发
    `group.send`（请求交给 A，`meta.target.did` 是 B 的群 DID），验三件事——转发真的发生
    （B 有群、有名册、有那条消息行，A 一条群行都没有）、B 签的回执在 A 域用**从网络上取回来
    的** B 域群文档过一次 `verifyObjectProofDetailed`、A 的本地库一个群行都没落。落点是

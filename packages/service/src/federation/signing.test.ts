@@ -9,8 +9,8 @@ import {
   verifyHttpSignatureForServer,
   type NonceStore,
   type ResolvedIdentityKey,
-} from '@agentx/core'
-import { parseSignatureInput } from '@agentx/core/advanced'
+} from '@anpio-cli/core'
+import { parseSignatureInput } from '@anpio-cli/core/advanced'
 import { loadConfig, didWebFor } from '../config'
 import { createHttpSigner, loadHttpSigner } from './signing'
 
@@ -97,7 +97,7 @@ describe('createHttpSigner', () => {
 
 describe('loadHttpSigner', () => {
   function keyFile(contents: string): string {
-    const dir = mkdtempSync(join(tmpdir(), 'agentx-key-'))
+    const dir = mkdtempSync(join(tmpdir(), 'anpiocli-key-'))
     const path = join(dir, 'service.key')
     writeFileSync(path, contents)
     return path
@@ -108,8 +108,8 @@ describe('loadHttpSigner', () => {
 
   it('reads a hex key file and signs with it', async () => {
     const config = loadConfig({
-      AGENTX_KEY_FILE: keyFile(hex),
-      AGENTX_KEY_ID: `${serviceDid}#key-1`,
+      ANPIOCLI_KEY_FILE: keyFile(hex),
+      ANPIOCLI_KEY_ID: `${serviceDid}#key-1`,
     })
     const signer = await loadHttpSigner(config)
     expect(signer?.keyid).toBe(`${serviceDid}#key-1`)
@@ -134,8 +134,8 @@ describe('loadHttpSigner', () => {
     const der = Buffer.from(identity.priv)
     const pem = `-----BEGIN PRIVATE KEY-----\n${der.toString('base64')}\n-----END PRIVATE KEY-----\n`
     const config = loadConfig({
-      AGENTX_KEY_FILE: keyFile(pem),
-      AGENTX_KEY_ID: `${serviceDid}#key-1`,
+      ANPIOCLI_KEY_FILE: keyFile(pem),
+      ANPIOCLI_KEY_ID: `${serviceDid}#key-1`,
     })
     const signer = await loadHttpSigner(config)
     const headers = await signer!.headers({ method: METHOD, url: TARGET, body: BODY, nonce: 'file-2' })

@@ -4,7 +4,7 @@
 // 的正文里出现了不认识的字段就拒。两处各写一遍的话，"不认识的字段"这件事会有两个定义，而
 // 它们的分歧只会表现为某个方法多收或少收了一个键。
 
-import { anpRejection, type AnpRejection } from '@agentx/core'
+import { anpRejection, type AnpRejection } from '@anpio-cli/core'
 
 /** 不认识就拒。
  *

@@ -28,7 +28,7 @@ import {
   type DeviceRelationship,
   type DeviceResolver,
   type LocateOptions,
-} from '@agentx/core'
+} from '@anpio-cli/core'
 
 /** 一个 Profile 对"这台设备算不算数"的全部要求。 */
 export interface DeviceRequirement {

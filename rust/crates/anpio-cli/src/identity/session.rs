@@ -424,7 +424,7 @@ mod tests {
 
     /// A store directory under the temp dir, unique per test name and process.
     fn fixture(label: &str) -> IdentityLocation {
-        let root = std::env::temp_dir().join(format!("agentx-session-test-{label}-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("anpiocli-session-test-{label}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         IdentityLocation {
             root,

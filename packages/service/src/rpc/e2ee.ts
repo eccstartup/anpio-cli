@@ -19,7 +19,7 @@ import {
   type AnpParams,
   type AnpRejection,
   type DeviceRelationship,
-} from '@agentx/core'
+} from '@anpio-cli/core'
 import type { DeviceAddressed, DeviceRequirement } from './eligibility'
 
 /** §16.1–16.3 的线上形状里那个 `meta.profile`。 */

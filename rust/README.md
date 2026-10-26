@@ -120,14 +120,14 @@ cargo run --manifest-path rust/Cargo.toml -- discover http://127.0.0.1:8787
   在服务端回 `accepted: true` **之后**写，`message_id` 就是 `--operation-id` 那个值。
   留不下只是 stderr 一句话——信已经发出去了，一个满盘不该让脚本以为没发成。
   `msg send` 两个本机身份**双向** `direct.send` 跑通（两边都回 `accepted: true`）；
-  `msg fetch` 与 `msg listen` 走的是 `x_agentx.inbox.v1` 扩展面（`fetch` 用 `sync.delta`、
+  `msg fetch` 与 `msg listen` 走的是 `x_anpiocli.inbox.v1` 扩展面（`fetch` 用 `sync.delta`、
   `listen` 用 `stream.*`），仅实现规范的对端回 `-32601` 是**正确的负结果**（cli.md §5），
   不是缺陷：它报成 `unsupported_extension` 并退出 1，
   与"对端拒绝了"（`message_send_failed`）分开——两句话要能分开，脚本才分得出"该换个对端"
   和"这次没成"。这两条各有单测咬住，真主机那半在
   `scripts/e2e.sh --with-awiki` 里断言。
 - **`contacts list | add | set-remark | remove | resolve`** —— 名字 ↔ DID 那一层（TODO6 §3）。
-  表不在本地文件里，在**本仓 `packages/service` 的库**里（`x_agentx.contacts.v1`），
+  表不在本地文件里，在**本仓 `packages/service` 的库**里（`x_anpiocli.contacts.v1`），
   按**请求的已验证签名者** `owner_did` 分行，所以一个身份的备注对另一个身份天然不可见，
   不需要文件权限来保证。行按 **`subject`** 存、不按 `did`——`did update` 会把 DID 挪走
   （它内嵌钥指纹），备注挂 `did` 上就会在换钥时静默消失，这正是 `anp show` 非要把
@@ -184,7 +184,7 @@ cargo run --manifest-path rust/Cargo.toml -- discover http://127.0.0.1:8787
   可执行的那一半（DID）照样在。
   **`set-remark` 是同一件事的另一半**（TODO6 §4.2）：`update-profile --name` 写的是**群自己的**
   名字，存在群的主机上、对所有人一样；`set-remark <group_did> <名字>` 起的是**只有我看得见**的
-  那个，存进服务里另一张表（`x_agentx.group_remarks.v1`，`docs/design/message-service.md` §9.5），
+  那个，存进服务里另一张表（`x_anpiocli.group_remarks.v1`，`docs/design/message-service.md` §9.5），
   `group info` 把它印在 `name:` 的下一行。
   **两本书不合并**：通讯录是"`msg send --to` 能到谁"，键的另一头是一个 agent；并进一本书就会让
   一个名字解析成群 DID，再让 `msg send --to <那个名字>` 把消息投进一个群读不了的邮箱。
@@ -221,7 +221,7 @@ cargo run --manifest-path rust/Cargo.toml -- discover http://127.0.0.1:8787
   能驱动 P6 设备半边的记录，结论在 TODO5 §6）：
 
 ```bash
-cargo run --manifest-path rust/Cargo.toml --example phase0_key_package -- /tmp/agentx-spike
+cargo run --manifest-path rust/Cargo.toml --example phase0_key_package -- /tmp/anpiocli-spike
 ```
 
 ### 约定（每条命令都适用）

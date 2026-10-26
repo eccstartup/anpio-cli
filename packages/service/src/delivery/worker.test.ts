@@ -6,7 +6,7 @@ import {
   type LocateOptions,
   type ServiceEntry,
   type ServiceLocator,
-} from '@agentx/core'
+} from '@anpio-cli/core'
 import { loadConfig } from '../config'
 import { openStorage } from '../storage/sqlite'
 import { SCHEMA_VERSION } from '../storage/schema'

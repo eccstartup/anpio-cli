@@ -7,7 +7,7 @@
 // P1 §9.1 L630–631 的两条分支在这里落地：语义等价 → 回原结果；语义冲突 → 1008。
 // 判定本身是 core 的 `idempotencyVerdict()`，本模块负责的是它周围那圈**顺序与事务**。
 
-import { anpRejection, idempotencyVerdict, type AnpRejection } from '@agentx/core'
+import { anpRejection, idempotencyVerdict, type AnpRejection } from '@anpio-cli/core'
 import type { Storage } from '../storage/types'
 
 /**

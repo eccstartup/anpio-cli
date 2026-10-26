@@ -19,14 +19,14 @@
 // 所以删掉它们的 spec，`/.well-known` 与 `anp.get_capabilities` 就不再宣告它们——客户端不会
 // 看到一条答不了的方法，这是"别让读=本地与服务端还在答 inbox.get 同时为真"那条要求的落点。
 
-import type { AnpMeta, AnpRejection } from '@agentx/core'
-import { anpRejection } from '@agentx/core'
+import type { AnpMeta, AnpRejection } from '@anpio-cli/core'
+import { anpRejection } from '@anpio-cli/core'
 import type { Storage } from '../storage/types'
 import { isCount, isNonEmptyString, isPage, unknownField } from './body'
 
 /** §9.1：这条扩展面自己的 Profile。`x_` 前缀是 P1 §12 给扩展留的命名空间，取值不是
  *  任何一个规范 Profile——那才是对客户端撒谎（P1 §6.2.2 L277 说 `profile` 是"唯一解释"）。 */
-export const EXTENSION_PROFILE = 'x_agentx.inbox.v1'
+export const EXTENSION_PROFILE = 'x_anpiocli.inbox.v1'
 
 /** §9.3 那张表里**还在**的那一条。 */
 export const SYNC_DELTA = 'sync.delta'

@@ -10,7 +10,7 @@
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { Duplex } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
-import { ConnectxError, didToUrl } from '@agentx/core'
+import { ConnectxError, didToUrl } from '@anpio-cli/core'
 import type { Config } from '../config'
 import type { DataPlaneHandler, DataPlaneResponse } from '../dataplane'
 // 这两条路由的路径由**铸 `upload_uri` / `object_uri` 的那个模块**定义：客户端的 URL 与
@@ -187,7 +187,7 @@ function send(
  * and says so in the response.
  *
  * The body is deliberately NOT drained first. Draining a request that announced gigabytes
- * is the denial of service `AGENTX_MAX_BODY` exists to prevent, and draining is only
+ * is the denial of service `ANPIOCLI_MAX_BODY` exists to prevent, and draining is only
  * cheap for the requests that are not the problem.
  */
 function refuse(res: ServerResponse, status: number, message: string, extra: Record<string, string> = {}): void {

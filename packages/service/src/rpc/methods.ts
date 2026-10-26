@@ -16,7 +16,7 @@ import {
   type AnpRejection,
   type AnpTarget,
   type AnpTargetKind,
-} from '@agentx/core'
+} from '@anpio-cli/core'
 import { DIRECT_AUTH_CODES, GROUP_AUTH_CODES, P1_AUTH_CODES, type AuthErrorCodes } from './auth'
 import {
   DIRECT_E2EE_PROFILE,
@@ -266,7 +266,7 @@ const DIRECT_SEND_SPEC: MethodSpec = {
  * 公共段里唯一说"没通过认证"的那个）、目标必须是自己（§9.1.1）。差异只有正文校验与是否
  * 改状态，所以下面每个方法只写这两件，其余从这来。
  *
- * `profile` 是参数而不是常量：`x_agentx.inbox.v1` 与 `x_agentx.contacts.v1` 服务的是
+ * `profile` 是参数而不是常量：`x_anpiocli.inbox.v1` 与 `x_anpiocli.contacts.v1` 服务的是
  * 两件不同的事，而 P1 §6.2.2 L277 说 `meta.profile` 是"本次请求的唯一解释"——把"读我的
  * 信箱"与"改我的通讯录"写成同一个解释，等于让一个只实现了前者的服务看起来实现了后者。
  */
@@ -339,7 +339,7 @@ const CONTACTS_REMOVE_SPEC = extensionSpec(
  * 验过签的签名者，A 给群起的名字 C 看不见；`list` 不改状态所以没有 `targetScope`，
  * `put` / `remove` 各自进幂等台账。
  *
- * 与通讯录**不同**的是 Profile（`x_agentx.group_remarks.v1`）——一本是"我给这些人起的
+ * 与通讯录**不同**的是 Profile（`x_anpiocli.group_remarks.v1`）——一本是"我给这些人起的
  * 名字"，一本是"我给这些群起的名字"，P1 §6.2.2 L277 说 Profile 是本次请求的唯一解释，
  * 两件事不能共用一个解释。
  */
@@ -365,8 +365,8 @@ const GROUP_REMARKS_REMOVE_SPEC = extensionSpec(
  * 流上的两个传输方法（realtime.md §4、§6）。
  *
  * 形状与取件面完全同构——自己那个 Profile、只认 `transport-protected`、要 proof、目标必须是
- * 自己——因为它们服务的是**同一个**信箱，只是换了一条传输。`x_agentx.stream.v1` 而不复用
- * `x_agentx.inbox.v1`，是 §9 定的：`meta.profile` 是"本次请求的唯一解释"（P1 §6.2.2 L277），
+ * 自己——因为它们服务的是**同一个**信箱，只是换了一条传输。`x_anpiocli.stream.v1` 而不复用
+ * `x_anpiocli.inbox.v1`，是 §9 定的：`meta.profile` 是"本次请求的唯一解释"（P1 §6.2.2 L277），
  * 而"我要订阅"与"我要读一页"不是同一种解释。
  *
  * 都没有 `targetScope`：两者都不进幂等台账。`stream.auth` 的重放只是又注册一次订阅（连接

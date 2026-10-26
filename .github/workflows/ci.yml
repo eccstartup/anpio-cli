@@ -1,8 +1,8 @@
 # The gate that did not exist: until now every check was run by hand, on one machine.
 #
 # The build step is not optional and not a formality. Every package's tests import
-# `@agentx/core` by package name, and that name resolves to `packages/core/dist`
-# (`core/package.json`'s `exports`). A checkout with no `dist` has no `@agentx/core`
+# `@anpio-cli/core` by package name, and that name resolves to `packages/core/dist`
+# (`core/package.json`'s `exports`). A checkout with no `dist` has no `@anpio-cli/core`
 # to import, so `npm test` on a fresh clone fails in a way that looks like a broken
 # test rather than a missing build. Hence: install, build, then check.
 name: CI

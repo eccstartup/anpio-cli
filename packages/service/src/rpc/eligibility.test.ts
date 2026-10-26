@@ -6,7 +6,7 @@
 // 三个码（1016 / 1017），配错的表现是调用方按诊断改错了地方。
 
 import { describe, expect, it } from 'vitest'
-import type { DeviceEntry, DeviceResolver } from '@agentx/core'
+import type { DeviceEntry, DeviceResolver } from '@anpio-cli/core'
 import { DIRECT_E2EE_DEVICE } from './e2ee'
 import { checkDevice, deviceSelector, isRejection, type EligibleDevice } from './eligibility'
 

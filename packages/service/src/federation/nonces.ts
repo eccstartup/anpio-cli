@@ -12,7 +12,7 @@
 // `NonceStore` 都写明了：nonce 只保证签者自己内部唯一，按裸 nonce 建缓存会让一个 DID 的
 // 重放烧掉另一个 DID 的挑战——那是一个受害者从没选过的值上的拒绝服务。
 
-import type { NonceStore } from '@agentx/core'
+import type { NonceStore } from '@anpio-cli/core'
 import type { Storage } from '../storage/types'
 
 /**

@@ -123,7 +123,7 @@ anpio-cli contacts resolve Alice               # name in, DID out
 ```
 
 `msg listen` and `msg fetch` go through an **implementation extension** of this
-service (`x_agentx.inbox.v1`), not the specification. A peer that implements only the
+service (`x_anpiocli.inbox.v1`), not the specification. A peer that implements only the
 spec answers "I do not have this method", and the CLI reports that as
 `unsupported_extension` — which is a correct answer about that peer, not a failure of
 the exchange. It is kept distinct from a refusal (`message_send_failed`) so a script

@@ -15,10 +15,10 @@ describe('serviceCapabilities', () => {
     ])
     expect(capabilities.securityProfiles).toEqual(['direct-e2ee', 'group-e2ee', 'transport-protected'])
     expect(capabilities.extensionProfiles).toEqual([
-      'x_agentx.contacts.v1',
-      'x_agentx.group_remarks.v1',
-      'x_agentx.inbox.v1',
-      'x_agentx.stream.v1',
+      'x_anpiocli.contacts.v1',
+      'x_anpiocli.group_remarks.v1',
+      'x_anpiocli.inbox.v1',
+      'x_anpiocli.stream.v1',
     ])
     expect(capabilities.extensionMethods).toEqual([
       'contacts.list',
@@ -81,9 +81,9 @@ describe('serviceCapabilities', () => {
 
 describe('capabilitiesResult', () => {
   it('reports this service did and the cap it actually enforces', () => {
-    const config = loadConfig({ AGENTX_SERVICE_DID: 'did:web:agentx.example', AGENTX_MAX_BODY: '2048' })
+    const config = loadConfig({ ANPIOCLI_SERVICE_DID: 'did:web:anpio.example', ANPIOCLI_MAX_BODY: '2048' })
     expect(capabilitiesResult(config)).toEqual({
-      service_did: 'did:web:agentx.example',
+      service_did: 'did:web:anpio.example',
       supported_profiles: [
         'anp.attachment.v1',
         'anp.core.binding.v1',

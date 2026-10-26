@@ -138,7 +138,7 @@ MLS，只搬运。
 
 1. **构建成本。** `rusqlite` 是 `bundled`——每次构建编一份 SQLite 的 C 源。加上 Rust 工具链与
    `rust-toolchain.toml` 钉的版本，等于给一个**今天一个 Rust 文件都没有**的仓库引入第二套构建。
-2. **发版面。** `connectx` 是 `bin` 包（`tsup`，ESM-only，`@agentx/core` 保持 external）。加了
+2. **发版面。** `connectx` 是 `bin` 包（`tsup`，ESM-only，`@anpio-cli/core` 保持 external）。加了
    native 依赖之后，发布就从"一个包"变成"一个包 + 每平台预编译产物"——napi-rs 的标准做法是按
    平台走 `optionalDependencies`，那是一套新的 CI 矩阵。`tsup` 也要把 `.node` 标成 external。
 3. **同步阻塞。** crate 的 `group_e2ee` 全是**同步**的 rusqlite + fs2。napi 侧必须包成

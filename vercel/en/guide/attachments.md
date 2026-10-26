@@ -77,7 +77,7 @@ Constraints:
 
 ## Storage
 
-Object bytes are addressed by digest and land at `<AGENTX_OBJECT_DIR>/objects/<sha-256 base64url>`; control-plane and data-plane state (slots, objects, grants, tickets) lives in SQLite. **There is no GC and no retrospective revocation** — objects and Grants are never deleted; expiry is judged **at use time**.
+Object bytes are addressed by digest and land at `<ANPIOCLI_OBJECT_DIR>/objects/<sha-256 base64url>`; control-plane and data-plane state (slots, objects, grants, tickets) lives in SQLite. **There is no GC and no retrospective revocation** — objects and Grants are never deleted; expiry is judged **at use time**.
 
 The data plane is the only place that uses **real HTTP status codes** (`401` / `403` / `404` / `410` / `413` etc.), because it has no JSON-RPC envelope and no `id` to answer with. See [HTTP endpoints](/en/reference/endpoints).
 

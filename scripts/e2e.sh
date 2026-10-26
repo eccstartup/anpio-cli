@@ -47,7 +47,7 @@
 # 逐字相同——这不是本脚本发明的东西，是本仓既有的那个决定。
 #
 # 于是这台主机只演一句话：它对外宣告的身份就是本仓服务的身份
-# （`AGENTX_SERVICE_DID` 设成同一个值），awiki 那套"主机即消息服务"的关系照旧成立，
+# （`ANPIOCLI_SERVICE_DID` 设成同一个值），awiki 那套"主机即消息服务"的关系照旧成立，
 # 只是消息服务换成了我们的。
 
 set -euo pipefail
@@ -68,7 +68,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/agentx-e2e.XXXXXX")"
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/anpiocli-e2e.XXXXXX")"
 mkdir -p "$WORK/svc/objects"
 HOST_PID=""
 SERVICE_PID=""
@@ -190,7 +190,7 @@ wait_for_port() {
 if [ "$BUILD" = 1 ]; then
   section "build"
   ( cd "$ROOT/rust" && cargo build -q )
-  # core 也要建：服务按**包名**引 `@agentx/core`，而那个名字解析到 `packages/core/dist`
+  # core 也要建：服务按**包名**引 `@anpio-cli/core`，而那个名字解析到 `packages/core/dist`
   # （`core/package.json` 的 `exports`）。全新 clone 上只建服务，服务就起不来，
   # 且那样子像是"服务坏了"而不是"少建了一步"（CI 的注释里记的是同一件事）。
   ( cd "$ROOT" && npm run build:core >/dev/null && npm run build:service >/dev/null )
@@ -219,15 +219,15 @@ python3 "$ROOT/scripts/e2e/did_host.py" \
   >"$WORK/host.log" 2>&1 &
 HOST_PID=$!
 
-# `AGENTX_SERVICE_DID` 与服务在主机的 `/.well-known/did.json` 里宣告的必须**逐字相同**：
+# `ANPIOCLI_SERVICE_DID` 与服务在主机的 `/.well-known/did.json` 里宣告的必须**逐字相同**：
 # 客户端把主机宣告的那个写进身份文档，服务再拿它核 `meta.target.did`。两处不一样，
 # 每一步都会以 `anp.invalid_target_binding` 被拒。
-AGENTX_LISTEN="127.0.0.1:${SERVICE_PORT}" \
-AGENTX_PUBLIC_URL="http://127.0.0.1:${SERVICE_PORT}" \
-AGENTX_SERVICE_DID="$SERVICE_DID" \
-AGENTX_DB="$WORK/svc/svc.db" \
-AGENTX_OBJECT_DIR="$WORK/svc/objects" \
-AGENTX_DID_DEV_HOSTS="127.0.0.1,localhost" \
+ANPIOCLI_LISTEN="127.0.0.1:${SERVICE_PORT}" \
+ANPIOCLI_PUBLIC_URL="http://127.0.0.1:${SERVICE_PORT}" \
+ANPIOCLI_SERVICE_DID="$SERVICE_DID" \
+ANPIOCLI_DB="$WORK/svc/svc.db" \
+ANPIOCLI_OBJECT_DIR="$WORK/svc/objects" \
+ANPIOCLI_DID_DEV_HOSTS="127.0.0.1,localhost" \
   node "$ROOT/packages/service/dist/main.js" >"$WORK/svc.log" 2>&1 &
 SERVICE_PID=$!
 
@@ -236,7 +236,7 @@ wait_for_port "$SERVICE_PORT" "the service"
 
 export ANPIOCLI_HOME="$WORK/home"
 # 这台主机的权威段是 `localhost`，而服务在 `127.0.0.1` 上——两个都放行。
-export AGENTX_DID_DEV_HOSTS="127.0.0.1,localhost"
+export ANPIOCLI_DID_DEV_HOSTS="127.0.0.1,localhost"
 
 # ---- 身份：did create / show / publish / me ----------------------------------
 

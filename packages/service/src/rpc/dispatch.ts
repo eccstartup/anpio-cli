@@ -30,7 +30,7 @@ import {
   type LocateOptions,
   type NonceStore,
   type ServiceLocator,
-} from '@agentx/core'
+} from '@anpio-cli/core'
 import type { Config } from '../config'
 import { capabilitiesResult } from '../capabilities'
 import type { ForwardOutcome, Relay } from '../federation/forward'
@@ -792,7 +792,7 @@ export function createDispatch(deps: DispatchDeps): RpcHandler {
     if (targetDid === deps.config.serviceDid) return LOCAL
     // 住在自己命名空间里的群（`serviceDid:g:<id>`）：群文档由**本服务**发布（groups.md
     // §2.2/§2.3），所以"它的入口在哪"同样是本地已知的常量，不必问网络。**这不是优化**：
-    // 那一趟解析要么被 `AGENTX_ALLOWED_DID_HOSTS` 拒掉（清单里是**对端**域，不写自己），
+    // 那一趟解析要么被 `ANPIOCLI_ALLOWED_DID_HOSTS` 拒掉（清单里是**对端**域，不写自己），
     // 要么要求本服务的 `publicUrl` 是 https，于是一个本服务亲手建的群会在自己的 `group.send`
     // 上报 1012——一个本地就知道答案的调用，不该取决于出站解析成不成功。
     //

@@ -28,7 +28,7 @@
 // 发现是**按需的**：水位线与调用方 DID 一致时一次索引读就返回了，只有真的不一致才走网络
 // 解析转移链——也就是一次换钥最多解析一次，之后水位线跟上，不再解析。
 
-import { subjectOf, type DidChain } from '@agentx/core'
+import { subjectOf, type DidChain } from '@anpio-cli/core'
 import type { Config } from '../config'
 import type { Storage } from '../storage/types'
 import { ACCEPTED_ASSURANCES, chainResolverFor, type DidChainResolver } from './memberDidUpdate'
@@ -81,7 +81,7 @@ export async function adoptOwnerDidForRequest(input: OwnerDidUpdateInput): Promi
   // DID 在冒名——两者的区别只有转移链说得出来，所以往下走一次解析。
   //
   // **走 `fresh` 档：这一次解析绕过文档缓存。** 缓存里那份是换钥**之前**抓的，它自己看不见
-  // "这条 DID 已经换过了"，靠它只会把发现推到 `AGENTX_DID_CACHE_TTL_MS` 之后（出厂 5 分钟）。
+  // "这条 DID 已经换过了"，靠它只会把发现推到 `ANPIOCLI_DID_CACHE_TTL_MS` 之后（出厂 5 分钟）。
   // 而这一步正是整个功能的目的所在，代价又只落在"水位线对不上"这一种状态上——一次真换钥之后
   // 水位线就跟上了，只解析这一次。详见 `chainResolverFor` 的 `fresh` 说明与
   // [message-service.md](../docs/design/message-service.md) §9.6。

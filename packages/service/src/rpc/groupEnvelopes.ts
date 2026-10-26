@@ -35,7 +35,7 @@
 // 天然保证：它只回 `state = 'active'` 的行，被移除的那条已经 `terminal` 了。
 
 import { randomBytes } from 'node:crypto'
-import type { AnpMeta } from '@agentx/core'
+import type { AnpMeta } from '@anpio-cli/core'
 import type { Storage, StoredGroupLeaf } from '../storage/types'
 import { GROUP_E2EE_PROFILE, isPlainObject, nonEmptyString } from './groupE2ee'
 

@@ -16,7 +16,7 @@ import {
 
 /** A config bound to an OS-chosen port, so a test never collides with a real service. */
 function testConfig(overrides: Record<string, string> = {}) {
-  return loadConfig({ AGENTX_LISTEN: '127.0.0.1:0', AGENTX_DB: ':memory:', ...overrides })
+  return loadConfig({ ANPIOCLI_LISTEN: '127.0.0.1:0', ANPIOCLI_DB: ':memory:', ...overrides })
 }
 
 let running: RunningServer | undefined
@@ -88,7 +88,7 @@ describe('POST /anp-im/rpc', () => {
   })
 
   it('answers 413 once the body passes the cap', async () => {
-    const base = await start(echo, { AGENTX_MAX_BODY: '16' })
+    const base = await start(echo, { ANPIOCLI_MAX_BODY: '16' })
     const res = await fetch(`${base}${RPC_PATH}`, {
       method: 'POST',
       headers: JSON_HEADERS,
@@ -101,7 +101,7 @@ describe('POST /anp-im/rpc', () => {
   // The cap is a byte count, not a character count: a body of multi-byte characters that
   // fits in `maxBody` characters can still be over it in bytes.
   it('counts bytes rather than characters', async () => {
-    const base = await start(echo, { AGENTX_MAX_BODY: '10' })
+    const base = await start(echo, { ANPIOCLI_MAX_BODY: '10' })
     const res = await fetch(`${base}${RPC_PATH}`, {
       method: 'POST',
       headers: JSON_HEADERS,
@@ -153,13 +153,13 @@ describe('the routes that are not built yet', () => {
 
   it('serves the service entry once the wiring supplies one', async () => {
     // C8: the document is data, so the route's job is to hand it back and say it is JSON.
-    const document = JSON.stringify({ type: 'ANPMessageService', serviceDid: 'did:web:agentx.example' })
+    const document = JSON.stringify({ type: 'ANPMessageService', serviceDid: 'did:web:anpio.example' })
     running = createServer({ config: testConfig(), handleRpc: echo, wellKnown: document })
     await running.listen()
     const res = await fetch(`http://127.0.0.1:${running.address.port}${WELL_KNOWN_PATH}`)
     expect(res.status).toBe(200)
     expect(res.headers.get('content-type')).toBe('application/json')
-    expect(await res.json()).toEqual({ type: 'ANPMessageService', serviceDid: 'did:web:agentx.example' })
+    expect(await res.json()).toEqual({ type: 'ANPMessageService', serviceDid: 'did:web:anpio.example' })
   })
 
   it('answers 501 on the well-known document when nothing was wired to it', async () => {
@@ -225,7 +225,7 @@ describe('a refusal does not poison the connection pool', () => {
   // undici then hands the NEXT request on that pooled connection a reset. The symptom is
   // two requests away from the cause, which is why this is pinned here.
   it('serves the request after a 413', async () => {
-    const base = await start(echo, { AGENTX_MAX_BODY: '64' })
+    const base = await start(echo, { ANPIOCLI_MAX_BODY: '64' })
     const oversize = await fetch(`${base}${RPC_PATH}`, {
       method: 'POST',
       headers: JSON_HEADERS,
@@ -272,7 +272,7 @@ describe('binding', () => {
     running = undefined
 
     // Binding the same port again is the assertion: `close` must have released it.
-    running = createServer({ config: loadConfig({ AGENTX_LISTEN: `127.0.0.1:${port}`, AGENTX_DB: ':memory:' }), handleRpc: echo })
+    running = createServer({ config: loadConfig({ ANPIOCLI_LISTEN: `127.0.0.1:${port}`, ANPIOCLI_DB: ':memory:' }), handleRpc: echo })
     await expect(running.listen()).resolves.toBeUndefined()
     void base
   })
@@ -395,10 +395,10 @@ describe('GET …/g/<id>/did.json (B1b-A3)', () => {
   it('derives its path from didToUrl, so a service DID with its own path segments moves it too', () => {
     // 路由的前缀与"对端会去 GET 的那个 URL"必须是同一个推导，否则表现是"本地的群文档找
     // 不到，而跨域解析总是 404"。
-    expect(groupDidRoutePrefix(testConfig({ AGENTX_PUBLIC_URL: 'https://groups.example' }))).toBe('')
+    expect(groupDidRoutePrefix(testConfig({ ANPIOCLI_PUBLIC_URL: 'https://groups.example' }))).toBe('')
     expect(
       groupDidRoutePrefix(
-        testConfig({ AGENTX_PUBLIC_URL: 'https://host.example', AGENTX_SERVICE_DID: 'did:web:host.example:svc' }),
+        testConfig({ ANPIOCLI_PUBLIC_URL: 'https://host.example', ANPIOCLI_SERVICE_DID: 'did:web:host.example:svc' }),
       ),
     ).toBe('/svc')
   })
@@ -410,7 +410,7 @@ describe('GET …/g/<id>/did.json (B1b-A3)', () => {
         seen.push(groupDid)
         return DOC
       },
-      { AGENTX_PUBLIC_URL: 'https://groups.example' },
+      { ANPIOCLI_PUBLIC_URL: 'https://groups.example' },
     )
 
     const res = await fetch(`${base}/g/AAAA/did.json`)
@@ -427,7 +427,7 @@ describe('GET …/g/<id>/did.json (B1b-A3)', () => {
   it('serves it under the service DID\'s own path prefix', async () => {
     const base = await startGroups(
       () => DOC,
-      { AGENTX_PUBLIC_URL: 'https://host.example', AGENTX_SERVICE_DID: 'did:web:host.example:svc' },
+      { ANPIOCLI_PUBLIC_URL: 'https://host.example', ANPIOCLI_SERVICE_DID: 'did:web:host.example:svc' },
     )
 
     expect((await fetch(`${base}/svc/g/AAAA/did.json`)).status).toBe(200)

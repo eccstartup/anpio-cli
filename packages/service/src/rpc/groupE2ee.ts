@@ -42,7 +42,7 @@ import {
   type AnpMeta,
   type AnpRejection,
   type DeviceRelationship,
-} from '@agentx/core'
+} from '@anpio-cli/core'
 import type { Storage } from '../storage/types'
 import type { DeviceRequirement, EligibleDevice } from './eligibility'
 import { refusal } from './refusal'

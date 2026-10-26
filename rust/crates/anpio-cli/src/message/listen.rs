@@ -35,7 +35,7 @@ use super::stream::{
 
 /// realtime.md §9: the read surface's Profile — `sync.delta` is a business extension method,
 /// not a transport one, so it is interpreted under this.
-const INBOX_PROFILE: &str = "x_agentx.inbox.v1";
+const INBOX_PROFILE: &str = "x_anpiocli.inbox.v1";
 
 /// realtime.md §7.2: exponential backoff, bounded. The base is 2s so attempt 2 lands on the
 /// 4s the design document's own example shows.
@@ -1035,7 +1035,7 @@ mod tests {
         assert_eq!(profile_for(STREAM_AUTH), STREAM_PROFILE);
         assert_eq!(profile_for(STREAM_ACK), STREAM_PROFILE);
         // `sync.delta` is the one extension method `msg listen` still calls, and the only
-        // member of `x_agentx.inbox.v1` the client has left (design §4, 2026-10-03).
+        // member of `x_anpiocli.inbox.v1` the client has left (design §4, 2026-10-03).
         assert_eq!(profile_for(SYNC_DELTA), INBOX_PROFILE);
     }
 

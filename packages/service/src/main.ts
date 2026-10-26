@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// The `agentx` executable.
+// The `anpio-service` executable.
 //
 // It does four things: read the environment, open the storage, build the dispatcher that
 // accepts control-plane calls (C5), and hand the HTTP layer that handler. Everything a
@@ -10,7 +10,7 @@
 // relative imports stay extensionless (house style, `moduleResolution: Bundler`), which is
 // why this file is only runnable after `tsup` rather than straight from `src/`.
 
-import { ConnectxError } from '@agentx/core'
+import { ConnectxError } from '@anpio-cli/core'
 import { loadConfig } from './config'
 import { createDataPlane } from './dataplane'
 import { createDeviceQueueWorker } from './delivery/deviceQueue'
@@ -109,7 +109,7 @@ async function main(): Promise<void> {
   deviceQueue.start()
   memberDidRefresh.start()
 
-  process.stdout.write(`AgentXAgent listening on http://${server.address.host}:${server.address.port}\n`)
+  process.stdout.write(`AnpioAgent listening on http://${server.address.host}:${server.address.port}\n`)
   process.stdout.write(`  service did   ${config.serviceDid}\n`)
   process.stdout.write(`  rpc           ${config.publicUrl}/anp-im/rpc\n`)
   process.stdout.write(`  database      ${config.dbPath}\n`)
@@ -120,7 +120,7 @@ async function main(): Promise<void> {
   // it does not match.
   process.stdout.write(
     signer === undefined
-      ? '  outbound      unsigned (no AGENTX_KEY_FILE)\n'
+      ? '  outbound      unsigned (no ANPIOCLI_KEY_FILE)\n'
       : `  outbound      signed as ${signer.keyid}\n`,
   )
   // Outbound DID resolution is the one setting whose default is a closed door, so say so

@@ -10,8 +10,8 @@
 // 决定"能不能发"的东西——一处漏改就是一次拒绝，且拒绝的理由看起来像客户端的错。
 //
 // 扩展（`x_` 命名空间）与规范 Profile 分开列。P1 §8.1 L457 的 `profiles` 是"服务端点
-// 直接支持的 ANP Profile 集合"，把 `x_agentx.*` 塞进去等于让一个只实现规范的服务看起来
-// 支持它们（message-service.md §13 L834–838），而扩展另有 `x_agentx` 块这条路。
+// 直接支持的 ANP Profile 集合"，把 `x_anpiocli.*` 塞进去等于让一个只实现规范的服务看起来
+// 支持它们（message-service.md §13 L834–838），而扩展另有 `x_anpiocli` 块这条路。
 
 import type { Config } from './config'
 import { allMethods, type MethodSpec } from './rpc/methods'
@@ -97,11 +97,11 @@ function isExtension(spec: MethodSpec): boolean {
  *
  * 只放规范定义的字段。扩展能力不在这里报——这个结果是"**规范**能力"的运行时权威
  * （§8.3 L592），往里掺扩展会让一个标准客户端按规范理解出一个错误的结论；扩展的自我
- * 描述有另外两处（`.well-known` 的 `x_agentx` 块与 `stream.hello` 的 `profiles`）。
+ * 描述有另外两处（`.well-known` 的 `x_anpiocli` 块与 `stream.hello` 的 `profiles`）。
  */
 export function capabilitiesResult(config: Config): Record<string, unknown> {
   const { profiles, securityProfiles } = serviceCapabilities()
-  // 本服务只强制一个上限：请求体的大小（`AGENTX_MAX_BODY`）。消息是装在请求里走的，所以
+  // 本服务只强制一个上限：请求体的大小（`ANPIOCLI_MAX_BODY`）。消息是装在请求里走的，所以
   // 它不可能比请求上限更大——报同一个数是一句真话，报一个更小的数则是在发明一条没有执行
   // 的约束。
   const cap = String(config.maxBody)

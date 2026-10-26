@@ -27,7 +27,7 @@ TODO6 写完了一整轮**写**侧：本机消息库 `messages.db` 的写入侧�
 | `delivery_cursor` 的**唯一**写入者是 `stream.ack` | [sqlite.ts:653](packages/service/src/storage/sqlite.ts#L653) `advanceCursor` |
 | P6 设备队列有界保留：**8 次 / 30 天** | [config.ts:46-47](packages/service/src/config.ts#L46) |
 | 取件面可读窗口：**30 天**（不删，只是看不见） | [config.ts:59](packages/service/src/config.ts#L59) |
-| 取件面 `x_agentx.inbox.v1` 是**本服务的扩展**，规范里没有 | [inbox.ts](packages/service/src/rpc/inbox.ts) 抬头；规范 P3 §1 / P5 §10.7 / P6 / P8 §35 都排除 |
+| 取件面 `x_anpiocli.inbox.v1` 是**本服务的扩展**，规范里没有 | [inbox.ts](packages/service/src/rpc/inbox.ts) 抬头；规范 P3 §1 / P5 §10.7 / P6 / P8 §35 都排除 |
 | `direct.get_history` 有形状、**v1 不实现** | [message-service.md:785](docs/design/message-service.md#L785)（`since_seq` 没有定义） |
 | 换钥后 `deliveries.owner_did` **不跟着迁** | [message-service.md:914](docs/design/message-service.md#L914)——「这一条是已知的、还没解的问题」 |
 
@@ -143,7 +143,7 @@ TODO6 写完了一整轮**写**侧：本机消息库 `messages.db` 的写入侧�
       - **保留 = 永不裁剪**，写成了契约。`message-service.md` §7 的 `deliveries` 建表处逐字写着
         没有任何 DELETE 会到这张表，以及为什么 ack **不是**能删的信号（就是上面那个算不出来的
         下界：本服务没有设备名册）。纸面上它可逆——想删随时能加。
-      - **能见度 = 30 天**，这一半是新的：`AGENTX_DELIVERY_READ_WINDOW_MS`（缺省 30 天，
+      - **能见度 = 30 天**，这一半是新的：`ANPIOCLI_DELIVERY_READ_WINDOW_MS`（缺省 30 天，
         [config.ts](packages/service/src/config.ts)），`sync.delta` 只答窗口内的行。
         `Storage::deliveriesSince` 多了个 `notBefore`（`string | undefined`，`undefined` = 无界，
         storage 层的测试与非取件面的读者用这个值）；下界按**这次请求自己的** `acceptedAt` 算，
@@ -162,7 +162,7 @@ TODO6 写完了一整轮**写**侧：本机消息库 `messages.db` 的写入侧�
 - [x] **取件面：让 `sync.delta` / `fetch` 说得出"窗外还有 N 条"**。今天 `msg fetch` 只报搬
       回来几条，"0" 既可能是真的没有了、也可能是窗口外还有一堆——而窗口是**永不裁剪 + 30 天
       可见**（上面那条裁定），所以"有但看不见"是常态、不是异常。要做就得让 `sync.delta` 多答
-      一个窗口外的计数（我们自己的扩展面 `x_agentx.inbox.v1`，改它不碰规范），客户端再据此
+      一个窗口外的计数（我们自己的扩展面 `x_anpiocli.inbox.v1`，改它不碰规范），客户端再据此
       分两句打印。**要用户裁定**：是补这个计数，还是维持"只报搬回来的"、把那层分不清交给
       文档说明。两条路都不影响保留契约。落点见
       [message-service.md](docs/design/message-service.md) §14 末尾那半句。
@@ -190,7 +190,7 @@ TODO6 写完了一整轮**写**侧：本机消息库 `messages.db` 的写入侧�
       文件头第 3 条逐字写着「P6 的信封在 `deliveries` 里没有行，所以这里没有第二条路可走」。
       于是过期的设备队列帧是**真的没了**：`fetch` 搬不到，本地也没有过，客户端只能把"这条群消息
       我没收到"如实说成没收到（`unfetchable` 那条打印的是**还在队里**的帧；过期的连名字都没有）。
-      要改的话是两条，都要裁定：**放宽保留**（数字是部署档位，改 `AGENTX_DEVICE_QUEUE_MAX_AGE_MS`
+      要改的话是两条，都要裁定：**放宽保留**（数字是部署档位，改 `ANPIOCLI_DEVICE_QUEUE_MAX_AGE_MS`
       即可，但那只是把窗口推远），或者**给 P6 帧也写一条可补拉的记录**（那是让设备队列与
       `deliveries` 共享一条持久路径，等于改 §12.6 的发射面）。**这条要用户裁定。**
 
@@ -263,14 +263,14 @@ TODO6 写完了一整轮**写**侧：本机消息库 `messages.db` 的写入侧�
 本地库成为记录之源之后，"服务端的收件箱"和"我本地的库"是**两份记录同一件事的真相**。
 它们会分叉（离线读过、服务端重装、设备换了），所以要定**谁说了算**。
 
-- [x] **`x_agentx.inbox.v1` 这套扩展面的去留。** `inbox.get` / `inbox.mark_read` /
+- [x] **`x_anpiocli.inbox.v1` 这套扩展面的去留。** `inbox.get` / `inbox.mark_read` /
       `message.get_batch` 是本服务自己的扩展（规范里不存在）。读 = 本地之后它们还有没有存在的理由？
       至少要区分：**`fetch` 需要的那几个**留下（如果 `fetch` 走 `sync.delta`，那连 `inbox.get`
       都不必留），**其余**是历史包袱。别让"读 = 本地"和"服务端还在答 `inbox.get`"同时为真。
 
       **2026-10-03 客户端这一侧已经落定，服务端那一侧卡在一个不是我的裁定上。** 事实：
       - **Rust 客户端只剩一个调用者。** `sync.delta`（`msg fetch` 与 `msg listen` 的补齐）是
-        `x_agentx.inbox.v1` 里**唯一**还有客户端的成员。`INBOX_MARK_READ` 已从
+        `x_anpiocli.inbox.v1` 里**唯一**还有客户端的成员。`INBOX_MARK_READ` 已从
         [listen.rs](rust/crates/anpio-cli/src/message/listen.rs) 删掉（已读改由本地写），
         `inbox.get` / `message.get_batch` 更早就没有 Rust 侧调用者了。
       - **但 `packages/cli`（TS 那个客户端）还在调这三个**
@@ -286,7 +286,7 @@ TODO6 写完了一整轮**写**侧：本机消息库 `messages.db` 的写入侧�
         **core + service**，唯一的客户端是 Rust 的 `anp`。
       - **服务端摘掉三个方法**：`INBOX_GET` / `INBOX_MARK_READ` / `MESSAGE_GET_BATCH` 从
         `METHODS` 移除（[methods.ts](packages/service/src/rpc/methods.ts) 驱动分发表与广告出的能力面，
-        所以摘一处两边同时变），`x_agentx.inbox.v1` 只剩 `sync.delta`。
+        所以摘一处两边同时变），`x_anpiocli.inbox.v1` 只剩 `sync.delta`。
       - 现在"读 = 本地"与"服务端还答 `inbox.get`"**不可能同时为真**了——那个方法不存在了。
 - [x] **read 状态归谁。** 今天已读是**服务端按 (owner, device) 记的**（`inbox.mark_read` /
       `read_state`）。本地库有 `messages` 表，加一列 `read_at` 是最省事的做法，但那就有了
@@ -360,7 +360,7 @@ TODO6 写完了一整轮**写**侧：本机消息库 `messages.db` 的写入侧�
       还没有**。搬的是**服务端那半边**（驱动原本是 TS 客户端命令 `call` / `senderFor` /
       `runGroup`，那半边已经不在了）：
       - 落点 [crossDomain.test.ts](packages/service/src/federation/crossDomain.test.ts)：
-        两台真 `createServer`（各自 `AGENTX_SERVICE_DID` / 真 HTTP / 真的群文档路由），一次
+        两台真 `createServer`（各自 `ANPIOCLI_SERVICE_DID` / 真 HTTP / 真的群文档路由），一次
         **真**的跨域 `group.send`——A 的 `relay` 真的去取 `http://127.0.0.1:<portB>/g/<id>/did.json`、
         真的 POST 到 B，回执由 **B** 的群钥签发再带回来；另有一条钉住"A 不替对端记一行群"、
         一条钉住够不着时是 1012 而不是任何 `group.*` 码。

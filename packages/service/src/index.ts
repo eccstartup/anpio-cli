@@ -1,6 +1,6 @@
 // The library surface of `packages/service`.
 //
-// `@agentx/service` is mostly a binary (`agentx`), so this file exists for the two callers
+// `@anpio-cli/service` is mostly a binary (`anpio-service`), so this file exists for the two callers
 // that are not a shell: a test that wants the service in-process, and a deployment that
 // embeds it. Every name is listed explicitly rather than re-exported wholesale, so a new
 // export inside a module does not silently become public contract.

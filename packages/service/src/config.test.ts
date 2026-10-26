@@ -7,7 +7,7 @@ describe('loadConfig defaults', () => {
     expect(config.listen).toEqual({ host: '127.0.0.1', port: 8787 })
     expect(config.publicUrl).toBe('http://127.0.0.1:8787')
     expect(config.serviceDid).toBe('did:web:127.0.0.1%3A8787')
-    expect(config.dbPath).toBe('./agentx.db')
+    expect(config.dbPath).toBe('./anpio-cli.db')
     expect(config.maxBody).toBe(1024 * 1024)
     // Optional paths stay out of the object rather than becoming ''.
     expect('keyFile' in config).toBe(false)
@@ -16,61 +16,61 @@ describe('loadConfig defaults', () => {
   })
 })
 
-describe('AGENTX_OBJECT_DIR', () => {
+describe('ANPIOCLI_OBJECT_DIR', () => {
   it('defaults to a directory beside the database file', () => {
-    expect(loadConfig({ AGENTX_DB: '/var/agentx/agentx.db' }).objectDir).toBe('/var/agentx/objects')
-    expect(loadConfig({ AGENTX_DB: 'agentx.db' }).objectDir).toBe('objects')
+    expect(loadConfig({ ANPIOCLI_DB: '/var/anpio/anpio-cli.db' }).objectDir).toBe('/var/anpio/objects')
+    expect(loadConfig({ ANPIOCLI_DB: 'anpio-cli.db' }).objectDir).toBe('objects')
   })
 
   it('falls back to the working directory for an in-memory database', () => {
     // `:memory:` has no "beside": there is no file to sit next to.
-    expect(loadConfig({ AGENTX_DB: ':memory:' }).objectDir).toBe('./objects')
+    expect(loadConfig({ ANPIOCLI_DB: ':memory:' }).objectDir).toBe('./objects')
   })
 })
 
-describe('AGENTX_LISTEN', () => {
+describe('ANPIOCLI_LISTEN', () => {
   it('accepts an IPv6 literal in brackets', () => {
-    expect(loadConfig({ AGENTX_LISTEN: '[::1]:9000' }).listen).toEqual({ host: '::1', port: 9000 })
+    expect(loadConfig({ ANPIOCLI_LISTEN: '[::1]:9000' }).listen).toEqual({ host: '::1', port: 9000 })
   })
 
   it('accepts port 0, which is how a test asks for any free port', () => {
-    expect(loadConfig({ AGENTX_LISTEN: '127.0.0.1:0' }).listen.port).toBe(0)
+    expect(loadConfig({ ANPIOCLI_LISTEN: '127.0.0.1:0' }).listen.port).toBe(0)
   })
 
   it('requires a port rather than inventing one', () => {
-    expect(() => loadConfig({ AGENTX_LISTEN: '127.0.0.1' })).toThrow(/must be host:port/)
-    expect(() => loadConfig({ AGENTX_LISTEN: 'nonsense' })).toThrow(/must be host:port/)
+    expect(() => loadConfig({ ANPIOCLI_LISTEN: '127.0.0.1' })).toThrow(/must be host:port/)
+    expect(() => loadConfig({ ANPIOCLI_LISTEN: 'nonsense' })).toThrow(/must be host:port/)
   })
 
   it('rejects a port outside the range', () => {
-    expect(() => loadConfig({ AGENTX_LISTEN: '127.0.0.1:70000' })).toThrow(/0-65535/)
+    expect(() => loadConfig({ ANPIOCLI_LISTEN: '127.0.0.1:70000' })).toThrow(/0-65535/)
   })
 })
 
-describe('AGENTX_PUBLIC_URL', () => {
+describe('ANPIOCLI_PUBLIC_URL', () => {
   it('refuses to derive one from a non-loopback bind', () => {
-    expect(() => loadConfig({ AGENTX_LISTEN: '0.0.0.0:8787' })).toThrow(/AGENTX_PUBLIC_URL is required/)
+    expect(() => loadConfig({ ANPIOCLI_LISTEN: '0.0.0.0:8787' })).toThrow(/ANPIOCLI_PUBLIC_URL is required/)
   })
 
   it('accepts a non-loopback bind once the public URL is given', () => {
-    const config = loadConfig({ AGENTX_LISTEN: '0.0.0.0:8787', AGENTX_PUBLIC_URL: 'https://agentx.example' })
-    expect(config.publicUrl).toBe('https://agentx.example')
-    expect(config.serviceDid).toBe('did:web:agentx.example')
+    const config = loadConfig({ ANPIOCLI_LISTEN: '0.0.0.0:8787', ANPIOCLI_PUBLIC_URL: 'https://anpio.example' })
+    expect(config.publicUrl).toBe('https://anpio.example')
+    expect(config.serviceDid).toBe('did:web:anpio.example')
   })
 
   it('drops trailing slashes so endpoint paths do not double up', () => {
-    expect(loadConfig({ AGENTX_PUBLIC_URL: 'https://agentx.example///' }).publicUrl).toBe('https://agentx.example')
+    expect(loadConfig({ ANPIOCLI_PUBLIC_URL: 'https://anpio.example///' }).publicUrl).toBe('https://anpio.example')
   })
 
   it('must be an absolute http(s) URL', () => {
-    expect(() => loadConfig({ AGENTX_PUBLIC_URL: 'agentx.example' })).toThrow(/absolute URL/)
-    expect(() => loadConfig({ AGENTX_PUBLIC_URL: 'ftp://agentx.example' })).toThrow(/http or https/)
+    expect(() => loadConfig({ ANPIOCLI_PUBLIC_URL: 'anpio.example' })).toThrow(/absolute URL/)
+    expect(() => loadConfig({ ANPIOCLI_PUBLIC_URL: 'ftp://anpio.example' })).toThrow(/http or https/)
   })
 })
 
-describe('AGENTX_SERVICE_DID', () => {
+describe('ANPIOCLI_SERVICE_DID', () => {
   it('wins over the derived value', () => {
-    const config = loadConfig({ AGENTX_SERVICE_DID: 'did:web:elsewhere.example' })
+    const config = loadConfig({ ANPIOCLI_SERVICE_DID: 'did:web:elsewhere.example' })
     expect(config.serviceDid).toBe('did:web:elsewhere.example')
   })
 
@@ -78,24 +78,24 @@ describe('AGENTX_SERVICE_DID', () => {
     // §8.7 L512. This value is written into the DID document and is the base a cross-domain
     // `keyid` resolves against, so a fragment here would quietly turn "this service" into
     // "some key of this service" at a place that never says so.
-    expect(() => loadConfig({ AGENTX_SERVICE_DID: 'did:web:agentx.example#svc' })).toThrow(/not a DID URL/)
-    expect(() => loadConfig({ AGENTX_SERVICE_DID: 'did:web:agentx.example?x=1' })).toThrow(/not a DID URL/)
+    expect(() => loadConfig({ ANPIOCLI_SERVICE_DID: 'did:web:anpio.example#svc' })).toThrow(/not a DID URL/)
+    expect(() => loadConfig({ ANPIOCLI_SERVICE_DID: 'did:web:anpio.example?x=1' })).toThrow(/not a DID URL/)
   })
 
   it('refuses something that is not a DID at all', () => {
-    expect(() => loadConfig({ AGENTX_SERVICE_DID: 'https://agentx.example' })).toThrow(/must be a DID string/)
+    expect(() => loadConfig({ ANPIOCLI_SERVICE_DID: 'https://anpio.example' })).toThrow(/must be a DID string/)
   })
 
   it('accepts another DID method, which is the deployment choice rather than this module one', () => {
-    expect(loadConfig({ AGENTX_SERVICE_DID: 'did:wba:agentx.example' }).serviceDid).toBe('did:wba:agentx.example')
+    expect(loadConfig({ ANPIOCLI_SERVICE_DID: 'did:wba:anpio.example' }).serviceDid).toBe('did:wba:anpio.example')
   })
 })
 
 describe('didWebFor', () => {
   it('encodes the port and keeps each path segment', () => {
-    expect(didWebFor('https://agentx.example')).toBe('did:web:agentx.example')
+    expect(didWebFor('https://anpio.example')).toBe('did:web:anpio.example')
     expect(didWebFor('http://localhost:8787')).toBe('did:web:localhost%3A8787')
-    expect(didWebFor('https://example.com/agentx/inbox')).toBe('did:web:example.com:agentx:inbox')
+    expect(didWebFor('https://example.com/anpio/inbox')).toBe('did:web:example.com:anpio:inbox')
   })
 
   it('uses the decoded path, so one document is not two DIDs', () => {
@@ -103,95 +103,95 @@ describe('didWebFor', () => {
   })
 })
 
-describe('AGENTX_MAX_BODY', () => {
+describe('ANPIOCLI_MAX_BODY', () => {
   it('treats an empty value as unset', () => {
-    expect(loadConfig({ AGENTX_MAX_BODY: '' }).maxBody).toBe(1024 * 1024)
+    expect(loadConfig({ ANPIOCLI_MAX_BODY: '' }).maxBody).toBe(1024 * 1024)
   })
 
   it('takes a positive integer and rejects anything else', () => {
-    expect(loadConfig({ AGENTX_MAX_BODY: '2048' }).maxBody).toBe(2048)
-    expect(() => loadConfig({ AGENTX_MAX_BODY: '0' })).toThrow(/positive integer/)
-    expect(() => loadConfig({ AGENTX_MAX_BODY: '-1' })).toThrow(/positive integer/)
-    expect(() => loadConfig({ AGENTX_MAX_BODY: '1.5' })).toThrow(/positive integer/)
-    expect(() => loadConfig({ AGENTX_MAX_BODY: 'lots' })).toThrow(/positive integer/)
+    expect(loadConfig({ ANPIOCLI_MAX_BODY: '2048' }).maxBody).toBe(2048)
+    expect(() => loadConfig({ ANPIOCLI_MAX_BODY: '0' })).toThrow(/positive integer/)
+    expect(() => loadConfig({ ANPIOCLI_MAX_BODY: '-1' })).toThrow(/positive integer/)
+    expect(() => loadConfig({ ANPIOCLI_MAX_BODY: '1.5' })).toThrow(/positive integer/)
+    expect(() => loadConfig({ ANPIOCLI_MAX_BODY: 'lots' })).toThrow(/positive integer/)
   })
 })
 
-describe('AGENTX_DEVICE_QUEUE_*', () => {
+describe('ANPIOCLI_DEVICE_QUEUE_*', () => {
   it('defaults the two retention gates to 8 attempts and 30 days', () => {
     expect(loadConfig({}).deviceQueue).toEqual({ maxAttempts: 8, maxAgeMs: 30 * 24 * 60 * 60_000 })
   })
 
   it('takes deployment values', () => {
-    const config = loadConfig({ AGENTX_DEVICE_QUEUE_MAX_ATTEMPTS: '3', AGENTX_DEVICE_QUEUE_MAX_AGE_MS: '60000' })
+    const config = loadConfig({ ANPIOCLI_DEVICE_QUEUE_MAX_ATTEMPTS: '3', ANPIOCLI_DEVICE_QUEUE_MAX_AGE_MS: '60000' })
     expect(config.deviceQueue).toEqual({ maxAttempts: 3, maxAgeMs: 60_000 })
   })
 
   it('treats an empty value as unset and rejects a non-positive integer', () => {
-    expect(loadConfig({ AGENTX_DEVICE_QUEUE_MAX_ATTEMPTS: '' }).deviceQueue.maxAttempts).toBe(8)
-    expect(() => loadConfig({ AGENTX_DEVICE_QUEUE_MAX_ATTEMPTS: '0' })).toThrow(/positive integer/)
-    expect(() => loadConfig({ AGENTX_DEVICE_QUEUE_MAX_AGE_MS: '-1' })).toThrow(/positive integer/)
+    expect(loadConfig({ ANPIOCLI_DEVICE_QUEUE_MAX_ATTEMPTS: '' }).deviceQueue.maxAttempts).toBe(8)
+    expect(() => loadConfig({ ANPIOCLI_DEVICE_QUEUE_MAX_ATTEMPTS: '0' })).toThrow(/positive integer/)
+    expect(() => loadConfig({ ANPIOCLI_DEVICE_QUEUE_MAX_AGE_MS: '-1' })).toThrow(/positive integer/)
   })
 })
 
-describe('AGENTX_DELIVERY_READ_WINDOW_MS', () => {
+describe('ANPIOCLI_DELIVERY_READ_WINDOW_MS', () => {
   it('defaults the pickup surface to 30 days', () => {
     expect(loadConfig({}).deliveryReadWindowMs).toBe(30 * 24 * 60 * 60_000)
   })
 
   it('takes a deployment value, treats empty as unset, rejects a non-positive integer', () => {
-    expect(loadConfig({ AGENTX_DELIVERY_READ_WINDOW_MS: '3600000' }).deliveryReadWindowMs).toBe(3_600_000)
-    expect(loadConfig({ AGENTX_DELIVERY_READ_WINDOW_MS: '' }).deliveryReadWindowMs).toBe(30 * 24 * 60 * 60_000)
-    expect(() => loadConfig({ AGENTX_DELIVERY_READ_WINDOW_MS: '0' })).toThrow(/positive integer/)
+    expect(loadConfig({ ANPIOCLI_DELIVERY_READ_WINDOW_MS: '3600000' }).deliveryReadWindowMs).toBe(3_600_000)
+    expect(loadConfig({ ANPIOCLI_DELIVERY_READ_WINDOW_MS: '' }).deliveryReadWindowMs).toBe(30 * 24 * 60 * 60_000)
+    expect(() => loadConfig({ ANPIOCLI_DELIVERY_READ_WINDOW_MS: '0' })).toThrow(/positive integer/)
   })
 })
 
 describe('optional paths', () => {
   it('are set only when non-empty', () => {
     const set = loadConfig({
-      AGENTX_KEY_FILE: '/keys/agentx.pem',
-      AGENTX_KEY_ID: `${didWebFor('http://127.0.0.1:8787')}#key-1`,
-      AGENTX_OBJECT_DIR: '/var/agentx/objects',
+      ANPIOCLI_KEY_FILE: '/keys/anpio.pem',
+      ANPIOCLI_KEY_ID: `${didWebFor('http://127.0.0.1:8787')}#key-1`,
+      ANPIOCLI_OBJECT_DIR: '/var/anpio/objects',
     })
-    expect(set.keyFile).toBe('/keys/agentx.pem')
-    expect(set.objectDir).toBe('/var/agentx/objects')
+    expect(set.keyFile).toBe('/keys/anpio.pem')
+    expect(set.objectDir).toBe('/var/anpio/objects')
 
     // An empty value is a shell accident, not a path: `objectDir` falls back to the
     // derivation rather than becoming ''.
-    const blank = loadConfig({ AGENTX_KEY_FILE: '', AGENTX_KEY_ID: '', AGENTX_OBJECT_DIR: '' })
+    const blank = loadConfig({ ANPIOCLI_KEY_FILE: '', ANPIOCLI_KEY_ID: '', ANPIOCLI_OBJECT_DIR: '' })
     expect('keyFile' in blank).toBe(false)
     expect('keyId' in blank).toBe(false)
     expect(blank.objectDir).toBe('objects')
   })
 })
 
-describe('AGENTX_KEY_FILE / AGENTX_KEY_ID', () => {
+describe('ANPIOCLI_KEY_FILE / ANPIOCLI_KEY_ID', () => {
   const SERVICE_DID = didWebFor('http://127.0.0.1:8787')
 
   it('requires a keyid that names a method of this service own DID', () => {
     // 半个配置没有意义：`keyid` 的 DID 必须等于对端按 §6.2.2 第 6 步读出的 `serviceDid`，
     // 不一致时我们签出去的每一份请求都会被拒成 `forbidden_did`——那个错误看起来像对端的
     // 问题，所以要在启动时挡掉。
-    expect(() => loadConfig({ AGENTX_KEY_FILE: '/keys/k' })).toThrow(/AGENTX_KEY_ID is required/)
-    expect(() => loadConfig({ AGENTX_KEY_FILE: '/keys/k', AGENTX_KEY_ID: 'key-1' })).toThrow(/full DID URL/)
-    expect(() => loadConfig({ AGENTX_KEY_FILE: '/keys/k', AGENTX_KEY_ID: `${SERVICE_DID}#` })).toThrow(/full DID URL/)
+    expect(() => loadConfig({ ANPIOCLI_KEY_FILE: '/keys/k' })).toThrow(/ANPIOCLI_KEY_ID is required/)
+    expect(() => loadConfig({ ANPIOCLI_KEY_FILE: '/keys/k', ANPIOCLI_KEY_ID: 'key-1' })).toThrow(/full DID URL/)
+    expect(() => loadConfig({ ANPIOCLI_KEY_FILE: '/keys/k', ANPIOCLI_KEY_ID: `${SERVICE_DID}#` })).toThrow(/full DID URL/)
     expect(() =>
-      loadConfig({ AGENTX_KEY_FILE: '/keys/k', AGENTX_KEY_ID: 'did:web:elsewhere#key-1' }),
+      loadConfig({ ANPIOCLI_KEY_FILE: '/keys/k', ANPIOCLI_KEY_ID: 'did:web:elsewhere#key-1' }),
     ).toThrow(/verification method of/)
   })
 
   it('accepts a keyid under this service own DID', () => {
-    const config = loadConfig({ AGENTX_KEY_FILE: '/keys/k', AGENTX_KEY_ID: `${SERVICE_DID}#key-1` })
+    const config = loadConfig({ ANPIOCLI_KEY_FILE: '/keys/k', ANPIOCLI_KEY_ID: `${SERVICE_DID}#key-1` })
     expect(config.keyId).toBe(`${SERVICE_DID}#key-1`)
   })
 
   it('rejects a keyid with no key file', () => {
     // 打错一个变量名时说清楚，比等到第一次跨域调用才炸好查。
-    expect(() => loadConfig({ AGENTX_KEY_ID: `${SERVICE_DID}#key-1` })).toThrow(/AGENTX_KEY_FILE is not/)
+    expect(() => loadConfig({ ANPIOCLI_KEY_ID: `${SERVICE_DID}#key-1` })).toThrow(/ANPIOCLI_KEY_FILE is not/)
   })
 })
 
-describe('AGENTX_ALLOWED_DID_HOSTS / AGENTX_DID_DEV_HOSTS', () => {
+describe('ANPIOCLI_ALLOWED_DID_HOSTS / ANPIOCLI_DID_DEV_HOSTS', () => {
   it('defaults to resolving nothing at all', () => {
     // The fail-closed default, and the one worth stating out loud: with no allowlist the
     // resolver refuses every remote document, so only inline documents verify.
@@ -202,30 +202,30 @@ describe('AGENTX_ALLOWED_DID_HOSTS / AGENTX_DID_DEV_HOSTS', () => {
   })
 
   it('splits on commas and whitespace, because both get typed at a shell', () => {
-    const config = loadConfig({ AGENTX_ALLOWED_DID_HOSTS: 'a.example, b.example  c.example' })
+    const config = loadConfig({ ANPIOCLI_ALLOWED_DID_HOSTS: 'a.example, b.example  c.example' })
     expect(config.didResolution.allowedHosts).toEqual(['a.example', 'b.example', 'c.example'])
   })
 
   it('treats an empty value as unset rather than as a host named ""', () => {
-    expect(loadConfig({ AGENTX_ALLOWED_DID_HOSTS: '' }).didResolution.allowedHosts).toEqual([])
+    expect(loadConfig({ ANPIOCLI_ALLOWED_DID_HOSTS: '' }).didResolution.allowedHosts).toEqual([])
   })
 
   it('puts dev hosts in the allowlist as well as in the two relaxations', () => {
     // The relaxations lift a gate; they do not widen the allowlist. A host only named
     // there would be opted in to nothing and would still never be fetched.
-    const config = loadConfig({ AGENTX_ALLOWED_DID_HOSTS: 'public.example', AGENTX_DID_DEV_HOSTS: 'localhost' })
+    const config = loadConfig({ ANPIOCLI_ALLOWED_DID_HOSTS: 'public.example', ANPIOCLI_DID_DEV_HOSTS: 'localhost' })
     expect(config.didResolution.allowedHosts).toEqual(['public.example', 'localhost'])
     expect(config.didResolution.allowPrivateHosts).toEqual(['localhost'])
     expect(config.didResolution.allowInsecureTransport).toEqual(['localhost'])
   })
 
   it('does not repeat a host named in both variables', () => {
-    const config = loadConfig({ AGENTX_ALLOWED_DID_HOSTS: 'localhost', AGENTX_DID_DEV_HOSTS: 'localhost' })
+    const config = loadConfig({ ANPIOCLI_ALLOWED_DID_HOSTS: 'localhost', ANPIOCLI_DID_DEV_HOSTS: 'localhost' })
     expect(config.didResolution.allowedHosts).toEqual(['localhost'])
   })
 })
 
-describe('AGENTX_DID_CACHE_TTL_MS / the shared document store (A3)', () => {
+describe('ANPIOCLI_DID_CACHE_TTL_MS / the shared document store (A3)', () => {
   it('carries one store and the core default TTL when nothing is configured', () => {
     const config = loadConfig({})
     expect(typeof config.didResolution.documentStore.get).toBe('function')
@@ -240,8 +240,8 @@ describe('AGENTX_DID_CACHE_TTL_MS / the shared document store (A3)', () => {
   })
 
   it('takes the TTL from the environment, and treats an empty value as unset', () => {
-    expect(loadConfig({ AGENTX_DID_CACHE_TTL_MS: '60000' }).didResolution.cacheTtlMs).toBe(60_000)
-    expect(loadConfig({ AGENTX_DID_CACHE_TTL_MS: '' }).didResolution.cacheTtlMs).toBe(300_000)
+    expect(loadConfig({ ANPIOCLI_DID_CACHE_TTL_MS: '60000' }).didResolution.cacheTtlMs).toBe(60_000)
+    expect(loadConfig({ ANPIOCLI_DID_CACHE_TTL_MS: '' }).didResolution.cacheTtlMs).toBe(300_000)
   })
 
   it('refuses a TTL that is not a positive integer', () => {
@@ -249,7 +249,7 @@ describe('AGENTX_DID_CACHE_TTL_MS / the shared document store (A3)', () => {
     // that this knob deliberately does not have: it would keep the store populated while
     // making every resolution a fetch, i.e. the load of no cache with the staleness rules of
     // one. Turning the cache off entirely is `documentStore`, not a TTL of zero.
-    expect(() => loadConfig({ AGENTX_DID_CACHE_TTL_MS: '0' })).toThrow(/positive integer/)
-    expect(() => loadConfig({ AGENTX_DID_CACHE_TTL_MS: '-1' })).toThrow(/positive integer/)
+    expect(() => loadConfig({ ANPIOCLI_DID_CACHE_TTL_MS: '0' })).toThrow(/positive integer/)
+    expect(() => loadConfig({ ANPIOCLI_DID_CACHE_TTL_MS: '-1' })).toThrow(/positive integer/)
   })
 })

@@ -39,14 +39,14 @@ P1–P6 做完后（`3e3747b`）的下一轮 —— 端到端实测暴露的问�
   一起清干净——`--zk*` 五个旗标、`login-view.ts` 的 `ZkLoginOutcome` / `describeZkSession` / `protocol: 'zk'` 分支、
   `auth.ts` 的整段 `runZkLogin` 与它的属性/描述符助手、`help/commands.ts` 的 Zero-knowledge 旗标组与 `project` 页。
   `SessionWrite` 的 `uncacheable` 与 `LoginCard` 的 `note` / `identity.label` 随之删除：它们的唯一取值来源就是 ZK。
-  `packages/cli/package.json` 本就已是 `@agentx/cli` + 四个运行时依赖，无需再改）
+  `packages/cli/package.json` 本就已是 `@anpio-cli/cli` + 四个运行时依赖，无需再改）
 - ~~B3 `help/commands.ts` 加 `msg` / `group` **两族**（页面数据，见 [cli.md](docs/design/cli.md) §3）~~
   （2026-10-01：两族共 12 页）
 - ~~B4 `msg send`：发现 → 构造 → 签名 → POST → 报错，全链路~~（2026-10-01。含 P1 §10.3 L726 与
   P3 §5.5 L206–208 要求的 `anp.did_superseded` 重试）
 - ~~B5 取件三命令 `msg inbox` / `show` / `read`~~（2026-10-01。扩展面的接口定义落进
   [message-service.md](docs/design/message-service.md) §9——之前只有方法名，参数形状要去
-  另一个仓库反推，这是断链的根因。定下：扩展面有自己的 Profile `x_agentx.inbox.v1`
+  另一个仓库反推，这是断链的根因。定下：扩展面有自己的 Profile `x_anpiocli.inbox.v1`
   （P1 §6.2.2 L277 要求 `profile` 是 MUST 且是"唯一解释"，规范 Profile 解释不了它）；
   认证走 `origin_proof`；`message.get_batch` 收 `message_ids` 而非 awiki 的 `event_ids`。
   **awiki 的取件面够不着**（它要 bearer，CLI 不持 bearer），cli.md §5 的说法已随之更正）
@@ -56,7 +56,7 @@ P1–P6 做完后（`3e3747b`）的下一轮 —— 端到端实测暴露的问�
 - ~~B7 `msg` 族拒绝账户 id，错误码 `caip10_has_no_ingress`~~（2026-10-01：拒绝点确在
   `DidServiceLocator.locate()`，命令层无判断；`caps` 侧有测试钉住）
 - ~~B8 对端不支持扩展面时报 `unsupported_extension`~~（2026-10-01：读对端的答复判定，
-  `-32601 method_not_found` 与 `1001 anp.unsupported_profile`（Profile 是 `x_agentx.*` 时）
+  `-32601 method_not_found` 与 `1001 anp.unsupported_profile`（Profile 是 `x_anpiocli.*` 时）
   都映射过去。不先探 `anp.get_capabilities`——扩展本来就不该出现在 `profiles[]` 里，
   探它只能证明"没有"却多一次往返）
 - ~~B9 **`msg listen`**：WebSocket 连接 + 补齐 + 实时渲染 + 重连退避~~
@@ -71,7 +71,7 @@ P1–P6 做完后（`3e3747b`）的下一轮 —— 端到端实测暴露的问�
 - ~~B11 `msg listen --once`（等价 `msg inbox`）与 `SIGINT` → exit 0~~（2026-10-01。另把
   `--since` 的校验提到开 keystore 之前：参数写错不该先付一次口令提示与发现往返）
 
-## C. `packages/service` —— AgentXAgent
+## C. `packages/service` —— AnpioAgent
 
 - ~~C1 `node:http` 骨架 + `Storage` interface + `node:sqlite` 实现~~（2026-10-01。
   `config.ts` 按 §14 逐项（含 `did:web` 推导，以及非 loopback 监听时拒绝凭空推 public URL）；
@@ -124,8 +124,8 @@ P1–P6 做完后（`3e3747b`）的下一轮 —— 端到端实测暴露的问�
   `kind` 不符回 §10.3 L722 的 1014，缺 target 回 1003——规范列了拒绝、没给码，取舍记在
   §8.1）。`rpc/direct.ts`＝正文互斥 + 落库 + 消息级重复识别；`rpc/dispatch.ts`＝
   `createDispatch()`，层序 parse → 方法表 → 认证 → 正文 → `acceptOperation`，理由在 §8.1。
-  `config.ts` 补 DID 解析策略：`AGENTX_ALLOWED_DID_HOSTS` 默认空＝只认内联文档，
-  `AGENTX_DID_DEV_HOSTS` 是联调放宽（同时进白名单、允许私有地址与明文 http）。
+  `config.ts` 补 DID 解析策略：`ANPIOCLI_ALLOWED_DID_HOSTS` 默认空＝只认内联文档，
+  `ANPIOCLI_DID_DEV_HOSTS` 是联调放宽（同时进白名单、允许私有地址与明文 http）。
   存储顺手修了一处**设计缺陷**：`messages` 主键原为 `message_id` 单列，而 §8.2 L444–450
   给消息级重复识别定的三元组才是键——那个标识是发送方自己起的（P1 §6.2.7 L402），撞名合法，
   旧主键会把本该正常受理的第二次发送变成 500。同批 `outbox.endpoint_uri` → `recipient_did`
@@ -144,7 +144,7 @@ P1–P6 做完后（`3e3747b`）的下一轮 —— 端到端实测暴露的问�
   不变的原证明，验证留给收件人。164 个测试）
 - ~~C6 取件扩展面 + 游标（`delivery_cursor`）~~（2026-10-01。`rpc/inbox.ts`＝四个方法
   `inbox.get` / `inbox.mark_read` / `message.get_batch` / `sync.delta`，线上 Profile 取
-  `x_agentx.inbox.v1`，另加一条本服务自己的约束：`meta.target.did` MUST 等于
+  `x_anpiocli.inbox.v1`，另加一条本服务自己的约束：`meta.target.did` MUST 等于
   `meta.sender_did`，否则 1014（本扩展面没有"代别人读收件箱"）。`MethodSpec` 因此长了
   `validateBody`——C5a 里那句"第二个方法的正文规则出现时就清楚了"说的就是这个。
   `message_reads`（v3）：**已读不是投递游标**，键取 `(owner_did, message_id)`，因为
@@ -167,14 +167,14 @@ P1–P6 做完后（`3e3747b`）的下一轮 —— 端到端实测暴露的问�
   `advanceCursor` 只进不退，凭空来的大数会让下一次重连静默跳过真实消息。
   推送在**事务提交之后**（`dispatch.ts` 收集，提交后才交给注册表），事务里推的话一次
   回滚就会让在线客户端看到一封从未落库的消息。
-  CLI 侧一个真 bug：`meta.profile` 原来一条连接只给 `x_agentx.stream.v1`，而
-  `sync.delta` / `inbox.mark_read` 属 `x_agentx.inbox.v1`，真服务会对整个补齐回 1001；
+  CLI 侧一个真 bug：`meta.profile` 原来一条连接只给 `x_anpiocli.stream.v1`，而
+  `sync.delta` / `inbox.mark_read` 属 `x_anpiocli.inbox.v1`，真服务会对整个补齐回 1001；
   测试里的假服务不校验 profile 所以没红——它现在校验了。`--ack` 除 `inbox.mark_read`
   外再发 `stream.ack`；补齐段不 ack（游标只进不退，第一条实时 ack 自然带过，
   且 `--once` 要保持 §7.2 的只读语义）。文档改 realtime.md §4/§5.1/§5.2/§5.5/§6/§8.1/§9
   与 message-service.md §2.1（426）、§9.3。真机冒烟：426、`stream.hello` 首帧、
   带活连接 SIGTERM → 客户端收 1001 且进程 exit 0。service 240 / core 666 / cli 207）
-- ~~C8 `/.well-known/anp-message-service.json` + `x_agentx` 扩展块~~（2026-10-01。顺带补了
+- ~~C8 `/.well-known/anp-message-service.json` + `x_anpiocli` 扩展块~~（2026-10-01。顺带补了
   `anp.get_capabilities`：它是发现的最后一环（P1 §8.2），设计 §15 第 2 步写着却一直没做
   ——**静态 hint 没有运行时权威对照，就是一张没人核对的清单**。两份清单同源
   （`capabilities.ts` 从方法表推），于是 §8.3 L591–593 的"冲突时以运行为准"永远无事可做。
@@ -218,7 +218,7 @@ P1–P6 做完后（`3e3747b`）的下一轮 —— 端到端实测暴露的问�
     把它定义成"已被目标 ingress 接受"之后的那一跳——跨域时它语义上不成立。C5b 写的，当时没读 P8~~
     （2026-10-01 拆完：请求在事务外同步转发原始 `direct.send`，对端接受才落库、拒绝什么都不写；
     `direct.incoming` 不再入队，outbox 只剩群通知在写。转发前先查一次幂等记录，重试不再出站）
-  - ~~外层八步 + `http_nonces`~~、~~出站签名（`AGENTX_KEY_ID`，配上 `AGENTX_KEY_FILE` 才签；
+  - ~~外层八步 + `http_nonces`~~、~~出站签名（`ANPIOCLI_KEY_ID`，配上 `ANPIOCLI_KEY_FILE` 才签；
     没钥就不签，§2.3 说那失去的是域级归属而不是受理）~~、~~非 2xx 读成答复而不是异常
     （core 新原语 `fetchControlledResponse`，两条既有出站函数把非 2xx 读成失败，不能走）~~
   - 还剩：`group.*` / `attachment.*` 两族的出站判断（今天落本地、响亮失败）。两族的锚点各异
@@ -318,7 +318,7 @@ P1–P6 做完后（`3e3747b`）的下一轮 —— 端到端实测暴露的问�
   ——**已经读到过的消息无法收回**，最终通知只能宣告"你已被移除"。产品取舍，不是技术限制。
   见 [e2ee-group.md](docs/design/e2ee-group.md) §14）
 
-~~D1 包名：`@agentx/*`~~（2026-10-01 定：`@agentx/core` / `@agentx/cli` / `@agentx/service`，用户说后面可改）
+~~D1 包名：`@anpio-cli/*`~~（2026-10-01 定：`@anpio-cli/core` / `@anpio-cli/cli` / `@anpio-cli/service`，用户说后面可改）
 
 ~~D1 命令面分两族~~（2026-10-01 定：分 `msg` / `group`）
 ~~D2 `msg listen` 进不进命令面~~（2026-10-01 定：做，按 IM 模型设计，见 realtime.md）
@@ -334,12 +334,12 @@ P1–P6 做完后（`3e3747b`）的下一轮 —— 端到端实测暴露的问�
 - E2 命令面门禁：`help.test.ts` 已随 B1 一并搬来（两条不变量都在跑）。
   **缺口**：原文件的第三条门禁读 `skill/connectx/SKILL.md`，而这份 skill 没有搬过来，已随删除
   记录在此——要搬 skill 就把它一起恢复
-- **远程**：`origin` = `github.com/eccstartup/AgentX`，本地 `main` 与 `origin/main` 同步。
+- **远程**：`origin` = `github.com/eccstartup/anpio-cli`，本地 `main` 与 `origin/main` 同步。
   2026-10-01 已不再"先不开远程"（当时只做本地 CLI 阶段）。**但 CI 仍跑不了**：仓库里
   没有 `.github/workflows`，`gh run list` 为空——所以门禁目前只能在本地按 job 分组跑
 - E3 **加的评审清单**：CLI 与服务端里**不得出现 `isDid()` 之类的身份类型分支**
   （[vendored-core.md](docs/design/vendored-core.md) §6.3）
-- E4 端到端：`connectx msg send` → `AgentXAgent` → `connectx msg listen` 收到
+- E4 端到端：`connectx msg send` → `AnpioAgent` → `connectx msg listen` 收到
 - ~~E5 文档站~~（2026-10-01：VitePress，`srcDir` 指仓库根，所以 README / 本文件 /
   `docs/design/*.md` 是**同一份文件**的两种呈现；`vercel.json` + 根 `docs:dev|build|preview`。
   改到三处**真的断了**的相对链接：`e2ee-direct.md` / `e2ee-group.md` 里 `../TODO1.md`

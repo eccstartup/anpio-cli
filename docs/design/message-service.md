@@ -1,6 +1,6 @@
-# AgentXAgent —— ANPMessageService 设计
+# AnpioAgent —— ANPMessageService 设计
 
-`packages/service` —— 本仓库的服务端。产品名 **AgentXAgent**。
+`packages/service` —— 本仓库的服务端。产品名 **AnpioAgent**。
 
 它同时扮演两个角色（同一进程、同一存储）：
 
@@ -26,7 +26,7 @@
 | 中继 / 网关 | **规范里没有这种东西**（P8 §3.1 明确不新增 Relay 方法） |
 | 客户端库 | `packages/core`（协议原语）；命令行客户端是本仓库 Rust 的 `anpio-cli` crate |
 
-**`AgentXAgent` 不托管别人的 DID 文档，但需要解析它们**——发件人身份、入口服务发现、群成员
+**`AnpioAgent` 不托管别人的 DID 文档，但需要解析它们**——发件人身份、入口服务发现、群成员
 校验都要。**一处例外**：它**自己名下**的群 DID 文档由它自己发布（§13、[groups.md](groups.md)
 §2.2）：群 DID 就住在它的命名空间里（`<serviceDid>:g:<id>`），而按 P8 §5.2 L215–221，别的域
 必须先解析到这份文档才能把群调用送进来。
@@ -134,7 +134,7 @@ HTTP 层用 `node:http` 自己写路由：服务一共只有**四条**路由（�
 而它正是 P1 §10.2 L695 用来分支的唯一依据。
 
 只有"连 JSON-RPC 对象都还不是"的传输层失败才用非 2xx：
-`413`（体超过 `AGENTX_MAX_BODY`）、`415`（`Content-Type` 不是 JSON）、
+`413`（体超过 `ANPIOCLI_MAX_BODY`）、`415`（`Content-Type` 不是 JSON）、
 `426`（流路径上的非升级 GET）以及上表的 `404` / `405`。**流一旦升级，状态码这套就不
 适用了**：连接上的每一次失败都是 `200` 里的一份 JSON-RPC 响应，只有握手认证失败才关连接
 （[realtime.md](realtime.md) §4.1）。
@@ -430,7 +430,7 @@ CREATE INDEX messages_target ON messages (target_did, accepted_at);
 -- `sync.delta` 重放的是这张表（2026-10-03 起这是它唯一的读者）。
 --
 -- **保留契约（2026-10-03 裁定）：这张表永不裁剪。** 没有任何 DELETE 会到这里，一行进来就
--- 一直留着。取件面只被允许往回看一个窗口（`AGENTX_DELIVERY_READ_WINDOW_MS`，默认 30 天），
+-- 一直留着。取件面只被允许往回看一个窗口（`ANPIOCLI_DELIVERY_READ_WINDOW_MS`，默认 30 天），
 -- 那是**能见度**不是保留——看不见的行仍然在表上。纸面上它是可逆的（想删随时能加），而
 -- "客户端说读到了"（`stream.ack` 推进 `delivery_cursor`）今天**不是**可以删的信号：
 -- 游标一行一个 `(owner_did, device_id)`，本服务没有一张"这个账号有哪些设备"的名册，所以
@@ -659,7 +659,7 @@ CLI 与所有在 NAT 后面的客户端走**订阅路**：客户端主动连上 
 
 **本地投递**：解析出来的端点若**就是本服务的 `/anp-im/rpc`**，不作 HTTP 调用，直接丢掉
 那一行。收件人就住在这里，`deliveries` 那一行已经是持久的，C7 的订阅路会把它交出去。
-绕一次回环不但多余，还会要求运营商把自己的公网地址写进 `AGENTX_ALLOWED_DID_HOSTS`
+绕一次回环不但多余，还会要求运营商把自己的公网地址写进 `ANPIOCLI_ALLOWED_DID_HOSTS`
 才发得动自己。
 
 **失败与退避**：P3 §8.4 L477 把这件事明确交给本地策略——"发送失败后是否自动重发，
@@ -682,7 +682,7 @@ CLI 与所有在 NAT 后面的客户端走**订阅路**：客户端主动连上 
 规范在取件侧是空白的，且是刻意的：P3 §1 排除历史拉取 / 已读状态 / 内部同步，
 P5 §10.7 与 P6 同样排除，P8 也排除。**规范里不存在 `inbox.get`**（已全文 grep 核实）。
 
-`AgentXAgent` 必须补上这一半，否则消息只能发不能取。
+`AnpioAgent` 必须补上这一半，否则消息只能发不能取。
 **设计选择：沿用 `awiki-open-server` 已有的方法名**（`messaging/core.py:2188` 的 `MESSAGE_HANDLERS`），
 自造一套只会让客户端多一个兼容分支：
 
@@ -700,16 +700,16 @@ message.get_batch
 `message.get_batch` 都没有调用者了，详见 §9.3。**沿用名字的那个理由也随之一半失效**：
 留着 `sync.delta` 是因为补齐只有服务端做得了，不是因为名字与 awiki 一致。
 
-### 9.1 扩展面自己的 Profile：`x_agentx.inbox.v1`
+### 9.1 扩展面自己的 Profile：`x_anpiocli.inbox.v1`
 
 **这些扩展方法不是"没有 Profile"的，而是有它们自己的一个。** P1 §6.2.2 L277 把
 `meta.profile` 定成 **MUST**，且说它是"本次请求的**唯一解释** Profile"——所以一个
 扩展方法在线上必须给出一个能解释它的 Profile 值，而这个值不可能是任何一个规范 Profile
 （那才是对客户端撒谎）。取值就是**扩展自己的标识符**，`x_` 前缀正是 P1 §12 给扩展留的命名空间。
 
-**这个扩展面今天有**四**个 Profile**：取件面 `x_agentx.inbox.v1`（本节所写）、
-订阅握手 `x_agentx.stream.v1`（§9.3 末段与 [realtime.md](realtime.md) §4）、
-通讯录 `x_agentx.contacts.v1`（§9.4）、群备注 `x_agentx.group_remarks.v1`（§9.5）。
+**这个扩展面今天有**四**个 Profile**：取件面 `x_anpiocli.inbox.v1`（本节所写）、
+订阅握手 `x_anpiocli.stream.v1`（§9.3 末段与 [realtime.md](realtime.md) §4）、
+通讯录 `x_anpiocli.contacts.v1`（§9.4）、群备注 `x_anpiocli.group_remarks.v1`（§9.5）。
 **按方法**取 Profile，不是一个面一个——P1 §6.2.2 那句"唯一解释"要求 Profile 能把这条方法
 解释清楚，一个 Profile 罩住互不相干的几组方法就做不到这一点。四条共用的形状（`meta.profile`、
 目标建模、`origin_proof`、不进 `profiles[]`）在本节写一次，§9.4 / §9.5 与
@@ -718,7 +718,7 @@ message.get_batch
 于是同一条扩展方法在线上长这样：
 
 ```
-meta.profile            = "x_agentx.inbox.v1"
+meta.profile            = "x_anpiocli.inbox.v1"
 meta.security_profile   = "transport-protected"
 meta.sender_did         = <读自己的收件箱的那个 DID>
 meta.target             = { kind: "agent", did: <同一个 DID> }
@@ -760,7 +760,7 @@ L734 把 "目标绑定错误、service-scoped / endpoint-local 误用" 一并指
 
 **不得出现在 `anp.get_capabilities` 的 `profiles[]` 里**——那是"这个服务实现了哪些规范
 Profile"的答案，混进一个 `x_` 值就把它变成另一个问题了。扩展能力的自报位置见 §13
-（well-known 的 `x_agentx` 块）与 [realtime.md](realtime.md) §9（`stream.hello`）。
+（well-known 的 `x_anpiocli` 块）与 [realtime.md](realtime.md) §9（`stream.hello`）。
 客户端据此判定对端支不支持扩展；判不出来时按"不支持"处理（[cli.md](cli.md) §5）。
 
 ### 9.2 认证：`origin_proof`，不是 bearer
@@ -816,7 +816,7 @@ Profile"的答案，混进一个 `x_` 值就把它变成另一个问题了。扩
 就是按这个规则推的，拉取这一侧跟上之后，同一条信箱的两半才说得出一致的答案。
 
 表里是 `POST /anp-im/rpc` 上**可达**的那几个。流自己的两个方法
-（`stream.auth` / `stream.ack`，各自的 Profile 是 `x_agentx.stream.v1`）不在其中，因为
+（`stream.auth` / `stream.ack`，各自的 Profile 是 `x_anpiocli.stream.v1`）不在其中，因为
 它们离开了连接就没有意义——`stream.auth` 在 HTTP 上没有订阅可注册，`stream.ack` 在 HTTP
 上不知道是哪台设备（游标按 `(owner_did, device_id)` 分片）。形状见
 [realtime.md](realtime.md) §4 与 §6。它们与上表走**同一条**校验与认证路径，不是另一套。
@@ -839,16 +839,16 @@ Profile"的答案，混进一个 `x_` 值就把它变成另一个问题了。扩
 在客户端汇成同一个渲染器——[realtime.md](realtime.md) §5.5 说明为什么实时帧上不需要带 `seq`。
 
 **`deliveries` 一条都不删，但 `sync.delta` 只答最近 30 天。** 保留契约与那个可读窗口是两件
-不同的事，逐字写在 §7 的 `deliveries` 建表处与 §14 的 `AGENTX_DELIVERY_READ_WINDOW_MS`。
+不同的事，逐字写在 §7 的 `deliveries` 建表处与 §14 的 `ANPIOCLI_DELIVERY_READ_WINDOW_MS`。
 
 P5 的 **Mailbox** 不是这条路。Mailbox 是范围为 `(recipient_did, recipient_device_id)` 的
 **不透明密文队列**，不持有 Ratchet 状态，**不是群/私聊历史**。
 E2EE 会话里的取件走 Mailbox，明文的补齐走 `sync.delta`，本地历史走本地库。三者别混。
 
-### 9.4 通讯录扩展面：`x_agentx.contacts.v1`
+### 9.4 通讯录扩展面：`x_anpiocli.contacts.v1`
 
-**这是第三个扩展 Profile**（前两个是取件的 `x_agentx.inbox.v1` 与订阅握手的
-`x_agentx.stream.v1`），它答的是一个取件面不管的问题：**"这个名字对我来说是谁"**。
+**这是第三个扩展 Profile**（前两个是取件的 `x_anpiocli.inbox.v1` 与订阅握手的
+`x_anpiocli.stream.v1`），它答的是一个取件面不管的问题：**"这个名字对我来说是谁"**。
 ANP 按 DID 寻址，而人（以及转述人话的 agent）手里拿的是名字——"给 Alice 捎个话"
 里的人名，线上无人可达。名字到 DID 的这一层规范没有定义，也不该定义：
 它是**调用者自己的记忆**，不是任何一份 DID 文档里的事实。
@@ -882,7 +882,7 @@ subjectOf(did)     // did:wba → 去掉变化的那一段（钥指纹），其�
 **目标建模与 §9.1 同规。** `meta.target = {kind: "agent", did: <owner_did>}`，
 与 `meta.sender_did` 同值；`meta.target.did` **MUST** 等于 `meta.sender_did`，否则回
 **1014 `anp.invalid_target_binding`**。这里没有"改别人的通讯录"这种操作，
-把它做成显式校验而不是"反正也写不进去"。`meta.profile = "x_agentx.contacts.v1"`，
+把它做成显式校验而不是"反正也写不进去"。`meta.profile = "x_anpiocli.contacts.v1"`，
 认证走 `origin_proof`（§9.2），同样**不得**出现在 `profiles[]` 里（§9.1 末段、§13）。
 
 | 方法 | `body` | 结果 |
@@ -958,7 +958,7 @@ subjectOf(did)     // did:wba → 去掉变化的那一段（钥指纹），其�
 是两件事，把它们绑起来会让"对方主机挂了"变成"我不能给他加备注"。可达性由
 `msg send` 那一刻的发现去答。
 
-### 9.5 群备注扩展面：`x_agentx.group_remarks.v1`
+### 9.5 群备注扩展面：`x_anpiocli.group_remarks.v1`
 
 **第四个扩展 Profile**，答的是 §9.4 那个问题的另一半：**"我给这个群起了什么名"**。
 群自己的名字协议里**有**——`group_profile.display_name`，住在群的 Host 上，由
@@ -1036,7 +1036,7 @@ subjectOf(did)     // did:wba → 去掉变化的那一段（钥指纹），其�
 `successorDid` 的文档不写进缓存、缓存里那份变了也不再读出）挡的是"**已经**换过"，挡不住
 "抓的时候还没换、抓完之后才换"——那正是这里的情形，缓存那条"过期了就重抓"的规则只能发现
 "我手上这份旧了"，发现不了"DID 换了"。所以读缓存的话，换钥就只会在 TTL 过期后那一次才被
-看见（`AGENTX_DID_CACHE_TTL_MS`，出厂 300000 毫秒）。
+看见（`ANPIOCLI_DID_CACHE_TTL_MS`，出厂 300000 毫秒）。
 
 **2026-10-03 用户裁定走这一档**，而不是"把 TTL 调小"或"什么都不做"。理由是代价只落在
 "水位线对不上"这一种状态上，而它**一次真换钥之后只出现一次**：迁移成功就把水位线推到新
@@ -1047,7 +1047,7 @@ DID，下一轮 `known === actorDid` 直接返回，不再解析。群名册那�
 `trustedDocuments` 照旧传）。
 
 结论给运维看的那一句：**换钥之后，对端自己那个信箱在下一次自址请求（`msg fetch` /
-`msg listen`）上就长齐**，不再挂在 `AGENTX_DID_CACHE_TTL_MS` 上。e2e 因此也不再有那处
+`msg listen`）上就长齐**，不再挂在 `ANPIOCLI_DID_CACHE_TTL_MS` 上。e2e 因此也不再有那处
 "把 TTL 压到 1 毫秒重启一次"的旁门，跑的是出厂值。
 
 
@@ -1158,8 +1158,8 @@ agent 的 DID 文档里那条 `ANPMessageService` 服务条目是**发现链的�
 {
   "id": "…#anp-message-service",
   "type": "ANPMessageService",
-  "serviceEndpoint": "https://agentx.example/anp-im/rpc",
-  "serviceDid": "did:web:agentx.example",
+  "serviceEndpoint": "https://anpio.example/anp-im/rpc",
+  "serviceDid": "did:web:anpio.example",
   "profiles": ["anp.core.binding.v1", "anp.direct.base.v1", ...],
   "securityProfiles": ["transport-protected", "direct-e2ee"]
 }
@@ -1200,16 +1200,16 @@ DID**：服务条目住在被描述的那个 agent（或群）的文档里，而
 **扩展能力不在那个条目里声明。** `profiles[]` / `securityProfiles[]` 只放规范定义的
 Profile 与安全模式——把 `inbox.*` / `sync.*` / 订阅流塞进去，就是在对客户端撒谎
 （一个只实现规范的服务会被误认为支持它们）。扩展能力另走一处，
-由 `GET /.well-known/anp-message-service.json` 的一个 `x_agentx` 块自报，
+由 `GET /.well-known/anp-message-service.json` 的一个 `x_anpiocli` 块自报，
 并在订阅握手的 `stream.hello` 里再报一次（见 [realtime.md](realtime.md) §9）。
 块里放的是 `x_` 命名空间下的东西（§9.1、§9.4 与 [realtime.md](realtime.md) §9 那三个
 Profile 名），以及分属它们的方法：
 
 ```json
 {
-  "x_agentx": {
-    "profiles": ["x_agentx.contacts.v1", "x_agentx.group_remarks.v1",
-                 "x_agentx.inbox.v1", "x_agentx.stream.v1"],
+  "x_anpiocli": {
+    "profiles": ["x_anpiocli.contacts.v1", "x_anpiocli.group_remarks.v1",
+                 "x_anpiocli.inbox.v1", "x_anpiocli.stream.v1"],
     "methods": ["contacts.list", "contacts.put", "contacts.remove",
                 "group_remarks.list", "group_remarks.put", "group_remarks.remove",
                 "inbox.get", "inbox.mark_read", "message.get_batch",
@@ -1229,25 +1229,25 @@ Profile 决定，所以没有按传输再分一层——多一层形状就多一
 ## 14. 配置
 
 ```
-AGENTX_LISTEN           监听地址，默认 127.0.0.1:8787
-AGENTX_PUBLIC_URL       对外可见的基址（用于 serviceEndpoint / object_uri）
-AGENTX_SERVICE_DID      自己的服务 DID，默认由 PUBLIC_URL 推出 did:web
-AGENTX_KEY_FILE         服务签名钥（跨域时签外层请求；hex 或 PEM）
-AGENTX_KEY_ID           该钥的 keyid，完整 DID URL 且挂在 SERVICE_DID 下（配了 KEY_FILE 就必填）
-AGENTX_DB               SQLite 路径，默认 ./agentx.db
-AGENTX_OBJECT_DIR       附件对象目录（按摘要寻址，见 attachments.md §4）
-AGENTX_MAX_BODY         请求体上限，默认 1 MiB（附件走数据面，不经这里）
-AGENTX_MAX_OBJECT_BYTES 单个附件对象上限，默认 64 MiB（数据面 PUT 时边收边判）
-AGENTX_ALLOWED_DID_HOSTS  允许出站解析 DID 文档的域，逗号/空白分隔，**默认空**
-AGENTX_DID_DEV_HOSTS      联调放宽：这些域可以解析私有地址、可以用 http
-AGENTX_DID_CACHE_TTL_MS   一份解析出来的 DID 文档最多沿用多久，默认 5 分钟（见下）
-AGENTX_PREKEY_BURST       两条 Key 方法每个调用方的突发额度，默认 60
-AGENTX_PREKEY_PER_MINUTE  同上，每分钟补充的令牌数（持续速率），默认 60
-AGENTX_DEVICE_QUEUE_MAX_ATTEMPTS  一条 P6 设备信封最多尝试几次，默认 8（§12.6 有界保留）
-AGENTX_DEVICE_QUEUE_MAX_AGE_MS    一条 P6 设备信封最多在队里待多久，默认 30d（§12.6 有界保留）
-AGENTX_DELIVERY_READ_WINDOW_MS    取件面（sync.delta）能往回看多远，默认 30d（见下）
-AGENTX_DID_REFRESH_INTERVAL_MS    定时刷新成员 DID 的间隔，默认 6h（A3c-4，见下）
-AGENTX_DID_REFRESH_BATCH          一轮最多查几个成员，默认 20（A3c-4，见下）
+ANPIOCLI_LISTEN           监听地址，默认 127.0.0.1:8787
+ANPIOCLI_PUBLIC_URL       对外可见的基址（用于 serviceEndpoint / object_uri）
+ANPIOCLI_SERVICE_DID      自己的服务 DID，默认由 PUBLIC_URL 推出 did:web
+ANPIOCLI_KEY_FILE         服务签名钥（跨域时签外层请求；hex 或 PEM）
+ANPIOCLI_KEY_ID           该钥的 keyid，完整 DID URL 且挂在 SERVICE_DID 下（配了 KEY_FILE 就必填）
+ANPIOCLI_DB               SQLite 路径，默认 ./anpio-cli.db
+ANPIOCLI_OBJECT_DIR       附件对象目录（按摘要寻址，见 attachments.md §4）
+ANPIOCLI_MAX_BODY         请求体上限，默认 1 MiB（附件走数据面，不经这里）
+ANPIOCLI_MAX_OBJECT_BYTES 单个附件对象上限，默认 64 MiB（数据面 PUT 时边收边判）
+ANPIOCLI_ALLOWED_DID_HOSTS  允许出站解析 DID 文档的域，逗号/空白分隔，**默认空**
+ANPIOCLI_DID_DEV_HOSTS      联调放宽：这些域可以解析私有地址、可以用 http
+ANPIOCLI_DID_CACHE_TTL_MS   一份解析出来的 DID 文档最多沿用多久，默认 5 分钟（见下）
+ANPIOCLI_PREKEY_BURST       两条 Key 方法每个调用方的突发额度，默认 60
+ANPIOCLI_PREKEY_PER_MINUTE  同上，每分钟补充的令牌数（持续速率），默认 60
+ANPIOCLI_DEVICE_QUEUE_MAX_ATTEMPTS  一条 P6 设备信封最多尝试几次，默认 8（§12.6 有界保留）
+ANPIOCLI_DEVICE_QUEUE_MAX_AGE_MS    一条 P6 设备信封最多在队里待多久，默认 30d（§12.6 有界保留）
+ANPIOCLI_DELIVERY_READ_WINDOW_MS    取件面（sync.delta）能往回看多远，默认 30d（见下）
+ANPIOCLI_DID_REFRESH_INTERVAL_MS    定时刷新成员 DID 的间隔，默认 6h（A3c-4，见下）
+ANPIOCLI_DID_REFRESH_BATCH          一轮最多查几个成员，默认 20（A3c-4，见下）
 ```
 
 **没有配置项能关掉 `origin_proof` 校验。** 要联调就配一个宽松的 DID 解析策略，
@@ -1295,18 +1295,18 @@ AGENTX_DID_REFRESH_BATCH          一轮最多查几个成员，默认 20（A3c-
 名册就会一直认着一个已经不该被授权的旧 DID。它的节奏是部署档位（默认 6 小时一轮、一轮 20 行）：
 一轮的开销**恒为 20 次解析**，与群有多大无关；取行时**最久没看过的优先**，所以所有成员按同一
 周期轮转。把 N 个成员轮一遍要 `ceil(N/20)` 轮，一个 1000 成员的部署因此约 12 天，要更快就调大
-`AGENTX_DID_REFRESH_BATCH`。`group_members.last_did_checked_at` 是它的游标，记的是"看过"而不是
+`ANPIOCLI_DID_REFRESH_BATCH`。`group_members.last_did_checked_at` 是它的游标，记的是"看过"而不是
 "没问题"——一次解析失败也盖章，否则一个暂时不可达的对端会卡住整个队列。它与两条队列 worker 分开
 也是因为这个节奏差着四个数量级。
 
-**取件面的可读窗口**（`AGENTX_DELIVERY_READ_WINDOW_MS`，默认 30 天，2026-10-03 裁定）。
+**取件面的可读窗口**（`ANPIOCLI_DELIVERY_READ_WINDOW_MS`，默认 30 天，2026-10-03 裁定）。
 读搬到客户端本地之后（[client-messages.md](client-messages.md) §8），服务端这半边的作用
 收窄成一句话：**它手上还留着多少能补给客户端的东西**。这个数就是那个上界的宽度，而它的
 另一侧不是"删"——`deliveries` **一条都不删**（§7 建表处的保留契约）。所以这个窗口调小只让
 `sync.delta` 少答，不让服务端少存：想反悔，把数调回去，行还在。
 
 两个窗口取同一个缺省值（30 天）不是巧合，是与 **P6 设备队列的在队时长**
-（`AGENTX_DEVICE_QUEUE_MAX_AGE_MS`，[e2ee-group.md](e2ee-group.md) §6.2）对齐：设备队列是
+（`ANPIOCLI_DEVICE_QUEUE_MAX_AGE_MS`，[e2ee-group.md](e2ee-group.md) §6.2）对齐：设备队列是
 `sync.delta` **够不着**的那一半（P6 的信封不往 `deliveries` 写行，见那个文件头），所以
 两边不一样宽就会露出一条缝——`sync.delta` 说没有，而队列里其实还有一条。取齐之后，
 "一条消息在这个服务上还能被谁拿到"只有一个答案。

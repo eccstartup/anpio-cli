@@ -12,7 +12,7 @@ import {
   type LocateOptions,
   type ServiceEntry,
   type ServiceLocator,
-} from '@agentx/core'
+} from '@anpio-cli/core'
 import { loadConfig } from '../config'
 import { GROUP_E2EE_DEVICE } from '../rpc/groupE2ee'
 import type { DidChainResolver } from '../rpc/memberDidUpdate'
@@ -539,7 +539,7 @@ describe('retention is bounded (§12.6)', () => {
       return { storage, logs, worker, at: (ms) => { clock = ms } }
     }
 
-    const attempts = build({ AGENTX_DEVICE_QUEUE_MAX_ATTEMPTS: '2' }, policy(async () => new Response('', { status: 503 })))
+    const attempts = build({ ANPIOCLI_DEVICE_QUEUE_MAX_ATTEMPTS: '2' }, policy(async () => new Response('', { status: 503 })))
     seedLeaf(attempts.storage, ALICE, ALICE_DEVICE)
     attempts.storage.enqueueDeviceEnvelope({
       recipientDid: ALICE, recipientDeviceId: ALICE_DEVICE, groupDid: GROUP, kind: 'incoming',
@@ -552,7 +552,7 @@ describe('retention is bounded (§12.6)', () => {
     expect(attempts.logs.some((line) => line.includes('dropped') && line.includes('2 attempts'))).toBe(true)
 
     let delivered = false
-    const age = build({ AGENTX_DEVICE_QUEUE_MAX_AGE_MS: '1000' }, policy(async () => {
+    const age = build({ ANPIOCLI_DEVICE_QUEUE_MAX_AGE_MS: '1000' }, policy(async () => {
       delivered = true
       return new Response('', { status: 200 })
     }))

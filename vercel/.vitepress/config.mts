@@ -1,4 +1,4 @@
-// AgentX docs — a self-contained, bilingual VitePress site.
+// anpio-cli docs — a self-contained, bilingual VitePress site.
 //
 // This directory is the deployment root: point a Vercel project at `vercel/` and it
 // runs `npm install` + `npm run docs:build`, publishing `.vitepress/dist`. Nothing here
@@ -11,9 +11,9 @@
 import { defineConfig } from 'vitepress'
 import { withMermaid } from 'vitepress-plugin-mermaid'
 
-const REPO = 'https://github.com/eccstartup/AgentX'
+const REPO = 'https://github.com/eccstartup/anpio-cli'
 const DESCRIPTION =
-  'ANP message layer: the anpio-cli command-line client and the AgentXAgent message service.'
+  'ANP message layer: the anpio-cli command-line client and the AnpioAgent message service.'
 
 const zhTheme = {
   nav: [
@@ -65,7 +65,7 @@ const zhTheme = {
   darkModeSwitchTitle: '切换到深色模式',
   editLink: { pattern: `${REPO}/edit/main/vercel/:path`, text: '在 GitHub 上修改这一页' },
   footer: {
-    message: 'ANP 消息层：anpio-cli 命令行 + AgentXAgent 消息服务',
+    message: 'ANP 消息层：anpio-cli 命令行 + AnpioAgent 消息服务',
     copyright: 'MIT License',
   },
 }
@@ -120,7 +120,7 @@ const enTheme = {
   darkModeSwitchTitle: 'Switch to dark theme',
   editLink: { pattern: `${REPO}/edit/main/vercel/:path`, text: 'Edit this page on GitHub' },
   footer: {
-    message: 'ANP message layer: the anpio-cli CLI and the AgentXAgent message service',
+    message: 'ANP message layer: the anpio-cli CLI and the AnpioAgent message service',
     copyright: 'MIT License',
   },
 }
@@ -158,7 +158,7 @@ const search = {
 
 export default withMermaid(
   defineConfig({
-    title: 'AgentX',
+    title: 'anpio-cli',
     description: DESCRIPTION,
     cleanUrls: true,
     // Every page uses `<did>`, `<group_did>` and `<object_id>` as placeholders. With HTML

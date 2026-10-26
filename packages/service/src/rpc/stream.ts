@@ -1,7 +1,7 @@
 // C7 —— 流上的两个传输方法（realtime.md §4、§6）。
 //
-// 这两个方法与 §9 那条取件面**不在同一个 Profile 下**：取件面是 `x_agentx.inbox.v1`，
-// 握手与投递确认是 `x_agentx.stream.v1`（realtime.md §9 把这条分界写清了——业务方法与
+// 这两个方法与 §9 那条取件面**不在同一个 Profile 下**：取件面是 `x_anpiocli.inbox.v1`，
+// 握手与投递确认是 `x_anpiocli.stream.v1`（realtime.md §9 把这条分界写清了——业务方法与
 // 传输握手各有各的 Profile，都挂在 `x_` 扩展命名空间里）。
 //
 // 它们**不进 `METHODS`**：那张表是 `POST /anp-im/rpc` 的方法面，而这两个方法离开了流就
@@ -9,12 +9,12 @@
 // 设备（游标按 `(owner_did, device_id)` 分片，§5.4）。所以它们由 `stream/session.ts` 在
 // 连接上直接接，走的是**同一条** `checkMethod` + `authenticate` 路径，不是另一套。
 
-import type { AnpRejection } from '@agentx/core'
-import { anpRejection } from '@agentx/core'
+import type { AnpRejection } from '@anpio-cli/core'
+import { anpRejection } from '@anpio-cli/core'
 import { isCount, isNonEmptyString, unknownField } from './body'
 
 /** 传输握手的 Profile（realtime.md §9）。 */
-export const STREAM_PROFILE = 'x_agentx.stream.v1'
+export const STREAM_PROFILE = 'x_anpiocli.stream.v1'
 
 export const STREAM_AUTH = 'stream.auth'
 export const STREAM_ACK = 'stream.ack'

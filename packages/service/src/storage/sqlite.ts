@@ -7,7 +7,7 @@
 // requirement and not a preference.
 
 import { DatabaseSync, type StatementSync } from 'node:sqlite'
-import { ConnectxError } from '@agentx/core'
+import { ConnectxError } from '@anpio-cli/core'
 import { SCHEMA, SCHEMA_VERSION } from './schema'
 import { deviceFilter } from './types'
 import type {

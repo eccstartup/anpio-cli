@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { AnpRejection } from '@agentx/core'
+import type { AnpRejection } from '@anpio-cli/core'
 import { errorResponse, failureId, parseRequestText } from './envelope'
 
 /** A request body that passes every check, so a case can break exactly one thing. */
@@ -118,7 +118,7 @@ describe('the §3 table', () => {
       jsonrpc: '2.0',
       id: 'r',
       method: 'm',
-      params: { meta: { profile: 'p', security_profile: 's', x_agentx_trace: 'abc' }, body: {} },
+      params: { meta: { profile: 'p', security_profile: 's', x_anpiocli_trace: 'abc' }, body: {} },
     })
     expect(parseRequestText(text).ok).toBe(true)
   })

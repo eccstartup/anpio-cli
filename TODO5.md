@@ -37,7 +37,7 @@
 
 **第 2 条的依据（用户原话加以复述）**：服务端的消息**会被定期清理**，不能保证永远在。所以本地
 客户端**必须**存下来，且按对话组织。**核对仓库现状**：今天服务端只有 **P6 设备队列**有 24 小时的
-有界保留（`AGENTX_DEVICE_QUEUE_MAX_AGE_MS`），`deliveries` 表**还没有**清理任务——也就是说
+有界保留（`ANPIOCLI_DEVICE_QUEUE_MAX_AGE_MS`），`deliveries` 表**还没有**清理任务——也就是说
 "服务端会清理"要么是既定的演进方向、要么是要补的动作。**无论哪种，"服务端不是永久记录"这个
 设计前提都成立**，本地库按记录之源来定（§4）。
 
@@ -85,7 +85,7 @@
 官方仓库里**一个 Rust CLI 都没有**（无 `main.rs`、无 `clap`）。可参照的是**官方 Python SDK**
 （`ANPClient` / `ANPCrawler`）——那是"一个客户端该长什么样"的现成答案。
 **在 1.0.5 源码上核过更确切的位置**：crate 能造出并校验"签好名的请求对象"，但**不发出它**；
-`reqwest` 只用于 DID 解析，本服务的扩展面（`x_agentx` / `inbox.*` / `deliveries` / `sync.delta`）
+`reqwest` 只用于 DID 解析，本服务的扩展面（`x_anpiocli` / `inbox.*` / `deliveries` / `sync.delta`）
 crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 条。
 
 ---
@@ -147,7 +147,7 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 **先纠正一个容易跑偏的前提**：消息今天**不是没人存**——它存在**服务端**。本服务的
 `deliveries` 表是一条**每 (owner, device) 单调递增游标**的收件箱，`msg listen` 用
 `sync.delta` 按游标补拉、`msg inbox` 用 `inbox.get` 分页翻（`inbox.get` / `mark_read` 是
-本服务的**扩展面** `x_agentx.inbox.v1`，**规范里根本没有**——[message-service.md](docs/design/message-service.md) §9）。
+本服务的**扩展面** `x_anpiocli.inbox.v1`，**规范里根本没有**——[message-service.md](docs/design/message-service.md) §9）。
 **TS CLI 自己一行消息都不存**，它是无状态的，每次去问服务端。
 
 所以真正要问的不是"要不要存"，是**"本地存下来，比服务端那份多解决什么"**：
@@ -259,10 +259,10 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
 4. **缺口的真实位置：不在 MLS，在那一跳 HTTP。** 在 1.0.5 源码里核过——`reqwest` 只被
    **DID 解析**用（`did_wba` / `did_web` / `wns/resolver`）；`direct.send` 只出现在
    **构造/校验请求对象**的那几处（`direct_e2ee/envelope.rs`、`v2_wire.rs`、`proof/`）；
-   而 `x_agentx`、`inbox.*`、`deliveries`、`sync.delta`、`group.send` 在 crate 里**一个字都没有**。
+   而 `x_anpiocli`、`inbox.*`、`deliveries`、`sync.delta`、`group.send` 在 crate 里**一个字都没有**。
    也就是说 **crate 停在"签好名的请求对象"那里，不负责把它发出去**，更不知道本服务的扩展面。
    这比 §2 那句"不提供 high-level base-message senders"更具体：**要新写的是传输层**——
-   reqwest + 本服务的 JSON-RPC 信封 + `x_agentx.inbox.v1`（§4 里那条 `inbox.get` / `mark_read`
+   reqwest + 本服务的 JSON-RPC 信封 + `x_anpiocli.inbox.v1`（§4 里那条 `inbox.get` / `mark_read`
    的扩展面）。这本来就是客户端库的活，所以不构成阻塞，但它是 §3 第 3 条里的**大头**。
 5. **还没做的那半步**：真正连一台跑起来的服务打一发。它需要的正是第 4 条那个传输层，
    所以**并进 Phase 1**，不留在 spike 里——spike 已经把它该回答的回答完了。
@@ -272,7 +272,7 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
   身份读取（**自定盘上格式**，独立 store 根；**不需要**与 TS 逐字节兼容，见 §8-E）、
   core 客户端子集里 `msg` 必需的那部分。~~ **已落**（2026-10-02）。
 - [x] ~~**第二件事是传输层**（Phase 0 结果第 4 条）：reqwest + 本服务的 JSON-RPC 信封 + HTTP 签名
-  （crate 的 `generate_auth_header` / `did_wba`）+ `x_agentx` 扩展面。没有它，`msg` 一族一行都
+  （crate 的 `generate_auth_header` / `did_wba`）+ `x_anpiocli` 扩展面。没有它，`msg` 一族一行都
   跑不起来；有了它，Phase 0 剩下的"真打一发"顺手就做了。~~ **已落**（2026-10-02）。
 
 **Phase 1 进展（2026-10-02）**
@@ -315,7 +315,7 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
   服务 → 签一份 origin proof → POST，一次完整往返）；`msg send` 两个**本机 awiki 托管**的
   身份**双向** `direct.send`，两边都回 `accepted: true`。**预期为负的**：`msg inbox` /
   `show` / `read` 对 awiki 一律回"does not implement … (JSON-RPC -32601)"——awiki **没有**
-  `x_agentx.inbox.v1` 这套扩展面，这正是 `call_extension` 该有的反应。
+  `x_anpiocli.inbox.v1` 这套扩展面，这正是 `call_extension` 该有的反应。
 - **撞上的第三个坑：crate 1.0.5 验不了自己这一侧签出来的文档（`@context`）。**
   §8-J 记的是**生成**侧：crate 写 base64url、awiki 要 base58，签名底相同、只需重编码。
   **解析**侧是它的镜像，但结论相反：crate 1.0.5 验一个 base58（`z…`）`eddsa-jcs-2022`
@@ -390,8 +390,8 @@ crate 里没有。所以补的这层是**传输**，见 §6 Phase 0 结果第 4 
   （`/user/<h>/<e1_…>/did.json`，注意路径里**带 DID 最后一段**，不是 `/user/<h>/did.json`）；
   (b) 把已存身份的 DID 换个主机段、`service` 条目改成服务自己的 `serviceDid`
   （`did:web:127.0.0.1%3A8788`）与端点，**用身份自己的 `key-1` 重签**（沿用 awiki 那版
-  不折 `@context` 的签法）；(c) 服务开 `AGENTX_PUBLIC_URL` = 该端口 +
-  `AGENTX_DID_DEV_HOSTS=127.0.0.1`。跑出来的：`publish` 回 `published: true` 且库里
+  不折 `@context` 的签法）；(c) 服务开 `ANPIOCLI_PUBLIC_URL` = 该端口 +
+  `ANPIOCLI_DID_DEV_HOSTS=127.0.0.1`。跑出来的：`publish` 回 `published: true` 且库里
   `group_key_packages` 真有那一行；`get-key-package` **逐枚取走**（第二句拿到的是下一枚，
   取空后回 `anp.group.e2ee.key_package_not_found`）——§8.2.4 L767 那条"发出即占住"的 MAY
   本服务是实现了的；`group create` 建群后 `e2ee create` 回 `created: true`，服务 `group_leaves`
@@ -763,7 +763,7 @@ Phase 1 到此收口：`msg listen` 与 `group` 一族都已落地（见 §6）�
 >   §7 第 5 条、§8-H 末句（"`packages/e2e` 一行不用改"）、§8-C（`inbox.get` 一族"去留要
 >   重新定"）**都已成为历史**。仓库从此是 core + service + Rust 客户端。
 > - **§8-D（服务端可能得跟着改）** —— 三条都有了结论（[TODO7](TODO7.md) §3）：保留契约 =
->   永不裁剪但只答 30 天内（`AGENTX_DELIVERY_READ_WINDOW_MS`）；P6 设备队列保留改为
+>   永不裁剪但只答 30 天内（`ANPIOCLI_DELIVERY_READ_WINDOW_MS`）；P6 设备队列保留改为
 >   **30 天**（原写 24h）；补拉落下 `msg fetch` 走 `sync.delta`；换钥后的投递归属由服务端
 >   迁移解决（[message-service.md](docs/design/message-service.md) §9.6）。**那句"这不是
 >   客户端单方面能解决的"现在有答案了**——服务端那一半做完了。
@@ -780,12 +780,12 @@ Phase 1 到此收口：`msg listen` 与 `group` 一族都已落地（见 §6）�
   TS CLI 那条身份与 `anpio-cli` 那条身份是**两个独立的账号/设备**，不能互相顶替。
 - **B. 本地明文 = 新的密钥资产。** 见 §4 第 2 点。留明文就等于把 TODO4 §E 那条规矩的适用范围
   从 `mls/` 扩到 `messages.db`——备份、调试、分享都要重新立边界。
-- **C. 两份真相要对账。** 服务端收件箱（扩展面 `x_agentx.inbox.v1`）与本地库会分叉。
+- **C. 两份真相要对账。** 服务端收件箱（扩展面 `x_anpiocli.inbox.v1`）与本地库会分叉。
   `inbox.get` / `mark_read` **不在规范里**，是本服务自己的扩展——本地库若成为权威，这套扩展
   面的去留、以及 read 状态归谁，都要重新定。
 - **D. 服务端可能得跟着改（"把它做好"的具体落点）。** 本地库成为记录之源后，需要：
   一条明确的 **ack / 保留契约**（`deliveries` 留多久、ack 后能否删）；P6 **设备队列的有界保留**
-  （`AGENTX_DEVICE_QUEUE_MAX_AGE_MS`，缺省 **24h**／`MAX_ATTEMPTS` **8 次**，
+  （`ANPIOCLI_DEVICE_QUEUE_MAX_AGE_MS`，缺省 **24h**／`MAX_ATTEMPTS` **8 次**，
   [deviceQueue.ts](packages/service/src/delivery/deviceQueue.ts) 文件头）要不要为持久客户端放宽
   或另开一条；以及**补拉历史**的接口（现在没有规范位）。**这不是客户端单方面能解决的。**
 - **E. 盘上格式：不再要求逐字节兼容**（**§0.1 第 1 条裁定之后已作废**）。原文担心的是
@@ -797,7 +797,7 @@ Phase 1 到此收口：`msg listen` 与 `group` 一族都已落地（见 §6）�
   **开工前不要按"逐字节兼容"去做 Phase 1 的身份部分**——那是作废了的约束。
 - **F. 名字不只是名字。**（**已裁定：分开，独立前缀与 store 根。** §0.1 第 1 条。）
   `anpio-cli` 换了名，也用**自己**的 store 根与环境变量前缀，不碰 `CONNECTX_HOME` / 旧
-  `AGENTX_*`。代价是两条身份各自独立（见 §8-A 末句），收益是两个客户端互不干扰。
+  `ANPIOCLI_*`。代价是两条身份各自独立（见 §8-A 末句），收益是两个客户端互不干扰。
 - **G. crate 的依赖面要接受。** `anp` 1.0.5 是 **Apache-2.0**（本机 0.9.0 检出写的是 MIT）；
   `default` features 拖 **`reqwest` + `tokio`**；`mls` 拖 **`rusqlite`(bundled) + openmls
   `=0.8.0`**（**精确 pin**）；且 **`tiny_http` 是非可选依赖**——一个客户端会因此带进一个 HTTP
@@ -818,9 +818,9 @@ Phase 1 到此收口：`msg listen` 与 `group` 一族都已落地（见 §6）�
   见其 `src/awiki_open_server/app/routes.py` L569–650）。所以**不用**照
   `packages/e2e/src/harness.ts` 那样自己起桩——**直接用它**，与"真实部署挂真 DID host"
   是**同一条路**，只是 host 是本机。
-  **落地时要注意的两件**：消息服务侧要放行本机主机（`AGENTX_DID_DEV_HOSTS`，否则
-  `AGENTX_ALLOWED_DID_HOSTS` 会拦掉）——**用 `AGENTX_DID_DEV_HOSTS` 加主机，不要去放宽
-  `AGENTX_ALLOWED_DID_HOSTS` 那段逻辑**（用户明说过这条不动）；以及本机是 **HTTP**，
+  **落地时要注意的两件**：消息服务侧要放行本机主机（`ANPIOCLI_DID_DEV_HOSTS`，否则
+  `ANPIOCLI_ALLOWED_DID_HOSTS` 会拦掉）——**用 `ANPIOCLI_DID_DEV_HOSTS` 加主机，不要去放宽
+  `ANPIOCLI_ALLOWED_DID_HOSTS` 那段逻辑**（用户明说过这条不动）；以及本机是 **HTTP**，
   不是 HTTPS。
   **TS CLI 走的就是这条路**，所以 Rust 侧是在复现一条已存在的路径，不是新开一条。
   **落地方案（2026-10-02 核到行）**：DID 取
@@ -837,7 +837,7 @@ Phase 1 到此收口：`msg listen` 与 `group` 一族都已落地（见 §6）�
   `complete_w3c_proof` 写的是 **base64url** `proofValue`（awiki 的注释点名了这个偏差），
   而签名底两边一样（`sha256(jcs(proof))‖sha256(jcs(未签文档))`），所以**只需把
   `proofValue` 重新编码成 `z`+base58**，签名本身不用重算。服务端要取这份 HTTP 文档，
-  得把主机加进 `AGENTX_DID_DEV_HOSTS`（= `resolution.allowInsecureTransport`，
+  得把主机加进 `ANPIOCLI_DID_DEV_HOSTS`（= `resolution.allowInsecureTransport`，
   见 `config.ts:227,241`）。
   **已经落地（2026-10-02 跑通）**：见 §6 Phase 1 那条"身份已发布"。
   **落地上撞到的第二个坑（原方案里没写、只有跑起来才看得见）**：**设备签名钥不能是

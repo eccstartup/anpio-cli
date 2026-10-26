@@ -5,7 +5,7 @@ description: "All routes and status codes, the two self-description JSON documen
 
 # HTTP endpoints
 
-An AgentXAgent process exposes only these routes. The control plane and the data plane are two
+An AnpioAgent process exposes only these routes. The control plane and the data plane are two
 different error conventions: **the control plane is always 200 + the error inside the envelope**,
 while **the data plane uses real status codes** (it has no JSON-RPC envelope, and no `id` to
 answer).
@@ -31,7 +31,7 @@ Every other path is `404`.
 | `200` | Normal. **Business errors are also inside 200**; look at `error.data.anp_code` |
 | `401` | **Outer** HTTP authentication failure. Carries `WWW-Authenticate: DIDWba realm=…, error=…`, and the body mirrors the same set of fields, **with no `id`** — this step runs before JSON-RPC |
 | `503` | Outer authentication is **`unverifiable`** (we cannot reach a conclusion ourselves). It does **not** go into the challenge header: a 401 would send the peer off to re-sign a request that has nothing wrong with it |
-| `405` / `415` / `413` | Wrong method / not JSON / request body exceeds `AGENTX_MAX_BODY` |
+| `405` / `415` / `413` | Wrong method / not JSON / request body exceeds `ANPIOCLI_MAX_BODY` |
 
 ### Subscription `/anp-im/stream`
 
@@ -53,7 +53,7 @@ Protocol-layer errors (error envelopes inside frames, close codes) are in
 | `403` | The ticket is not bound to this object (`ticketBindingMismatch`) |
 | `404` | Unknown upload token, slot abandoned / no longer `pending`, no committed object (`objectUnavailable`) |
 | `410` | The slot or ticket has expired |
-| `413` | Object exceeds `AGENTX_MAX_OBJECT_BYTES` (`objectTooLarge`) |
+| `413` | Object exceeds `ANPIOCLI_MAX_OBJECT_BYTES` (`objectTooLarge`) |
 | `501` / `405` | Route not mounted / wrong method |
 
 A data-plane rejection body **has no envelope**, so it writes both `code` and `anp_code` into the
@@ -83,7 +83,7 @@ Service embeds it when it issues the document.
   "serviceDid": "…",
   "profiles": ["anp.core.binding.v1", "…"],
   "securityProfiles": ["transport-protected", "group-e2ee"],
-  "x_agentx": { "profiles": ["x_agentx.inbox.v1", "x_agentx.stream.v1"], "methods": ["…"] }
+  "x_anpiocli": { "profiles": ["x_anpiocli.inbox.v1", "x_anpiocli.stream.v1"], "methods": ["…"] }
 }
 ```
 
@@ -93,7 +93,7 @@ Service embeds it when it issues the document.
   the document of the agent (or group) being described, and this service does not know who the other
   party is, so it cannot give that id. What it gives here is its own DID, which is genuinely
   resolvable, not a placeholder.
-- `x_agentx` is the extension block. **Extensions do not go into the standard fields**; that would
+- `x_anpiocli` is the extension block. **Extensions do not go into the standard fields**; that would
   amount to making a service that implements only the spec look like it supports them.
 - `profiles` / `securityProfiles` come from `capabilities.ts`, **the same source as** the runtime
   reply below, so "the document says something different from what runs" cannot happen.
@@ -110,10 +110,10 @@ Service embeds it when it issues the document.
 }
 ```
 
-- It carries only **spec**-defined fields. Extension capabilities (`x_agentx.*`) do **not** appear
+- It carries only **spec**-defined fields. Extension capabilities (`x_anpiocli.*`) do **not** appear
   here — this result is the runtime authority on "spec capabilities", and mixing in extensions would
   lead standard clients to wrong conclusions. The self-description of extensions lives in two
-  places: the `x_agentx` block of `.well-known` and the `profiles` in `stream.hello`.
+  places: the `x_anpiocli` block of `.well-known` and the `profiles` in `stream.hello`.
 - The values of `limits` are **decimal strings**, not numbers.
 - `max_message_bytes` reports the request body limit: a message travels inside a request, so it
   cannot be larger than the request limit.

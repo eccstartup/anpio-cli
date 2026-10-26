@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { idempotencyKey } from '@agentx/core'
+import { idempotencyKey } from '@anpio-cli/core'
 import { openStorage } from '../storage/sqlite'
 import type { Storage } from '../storage/types'
 import { acceptOperation } from './accept'

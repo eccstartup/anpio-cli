@@ -8,7 +8,7 @@ import {
   type AnpMeta,
   type AnpRequest,
   type AnpSigningIdentity,
-} from '@agentx/core'
+} from '@anpio-cli/core'
 import { DIRECT_AUTH_CODES, P1_AUTH_CODES, authenticate, callerAnchor } from './auth'
 
 const sender = createAnpIdentity('sender.example')

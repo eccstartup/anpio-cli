@@ -18,7 +18,7 @@ import {
   type AnpSigningIdentity,
   type KeyResolver,
   type LocateOptions,
-} from '@agentx/core'
+} from '@anpio-cli/core'
 import type { IncomingMessage } from 'node:http'
 import { openStorage } from '../storage/sqlite'
 import { createSubscriberRegistry, type SubscriberRegistry } from './registry'
@@ -101,7 +101,7 @@ class FakeConnection implements WebSocketConnection {
 }
 
 /** 一帧客户端请求。`params.profile` 是方法自己那一族的 Profile（§9）——两个传输方法在
- *  `x_agentx.stream.v1` 下，补齐用的 `sync.delta` 在 `x_agentx.inbox.v1` 下。 */
+ *  `x_anpiocli.stream.v1` 下，补齐用的 `sync.delta` 在 `x_anpiocli.inbox.v1` 下。 */
 function meta(profile: string, overrides: Partial<AnpMeta> = {}): AnpMeta {
   return {
     profile,
@@ -151,7 +151,7 @@ function deltaResponse(request: RpcRequest, nextSince: number, hasMore = false):
 
 /** The upgrade request's stand-in. Only `headers` and `url` are read, and only to hand
  *  them to the control plane. */
-const REQUEST = { headers: { host: 'agentx.example' }, url: '/anp-im/stream' } as unknown as IncomingMessage
+const REQUEST = { headers: { host: 'anpio.example' }, url: '/anp-im/stream' } as unknown as IncomingMessage
 
 interface Harness {
   session: StreamSession
@@ -176,7 +176,7 @@ function harness(overrides: { handleRpc?: RpcHandler } = {}): Harness {
       return deltaResponse(request, 0)
     })
   const session = createStreamSession({
-    serverDid: 'did:web:agentx.example',
+    serverDid: 'did:web:anpio.example',
     storage,
     registry,
     handleRpc,
@@ -224,7 +224,7 @@ describe('stream.hello', () => {
     expect(conn.frames()).toHaveLength(1)
     const hello = conn.frames()[0] as Frame
     expect(hello.method).toBe(STREAM_HELLO)
-    expect(hello.params?.server_did).toBe('did:web:agentx.example')
+    expect(hello.params?.server_did).toBe('did:web:anpio.example')
     expect(hello.params?.profiles).toEqual([...STREAM_PROFILES])
     expect(STREAM_PROFILES).toContain(EXTENSION_PROFILE)
   })
@@ -398,7 +398,7 @@ describe('the backfill window', () => {
     expect(h.requests).toHaveLength(1)
     // The connection's own request stands in for the frame's: same socket, same headers.
     expect(h.requests[0]?.url.pathname).toBe('/anp-im/stream')
-    expect(h.requests[0]?.headers.host).toBe('agentx.example')
+    expect(h.requests[0]?.headers.host).toBe('anpio.example')
   })
 
   it('answers an unknown method with the control plane’s -32601', async () => {

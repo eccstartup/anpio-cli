@@ -147,7 +147,7 @@ OPK **不**进 Bundle（§6.2 L302、§6.3 L395–397），也 **MUST NOT** 被�
 
 算法用**令牌桶**：这两条方法的正常节奏是"一阵一阵的"（发布一批 OPK 是一次突发，建链时
 连着来几次），固定窗口会在边界上放过两倍流量。容量与补充速率走配置
-（`AGENTX_PREKEY_BURST` / `AGENTX_PREKEY_PER_MINUTE`）。
+（`ANPIOCLI_PREKEY_BURST` / `ANPIOCLI_PREKEY_PER_MINUTE`）。
 
 **已知弱点写在明处**：同域那半边按自报的 `sender_did` 计数，挡得住"一个身份发得太快"，
 挡不住"换一串 DID 的洪泛"；跨域那半边好一些——键取的是签名验出来的身份，伪造要拿到那颗

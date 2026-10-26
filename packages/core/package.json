@@ -1,5 +1,5 @@
 {
-  "name": "@agentx/core",
+  "name": "@anpio-cli/core",
   "version": "0.0.0",
   "description": "ANP protocol primitives: DID composition, RFC 9421 signing/verification, key parsing, CAIP-10 identity, JCS canonicalization, message envelope.",
   "keywords": [
@@ -16,7 +16,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/eccstartup/ANPMessageService.git",
+    "url": "git+https://github.com/eccstartup/anpio-cli.git",
     "directory": "packages/core"
   },
   "type": "module",

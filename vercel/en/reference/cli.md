@@ -8,7 +8,7 @@ description: "The complete command surface of the anpio-cli command-line client 
 `anpio-cli` is this repository's command-line client, written in Rust, with its source under `rust/crates/anpio-cli/`. Every command has the form `anpio-cli <command> [subcommand] [arguments] [options]`, and `anpio-cli help [<command> [<subcommand>]]` prints the same description (the authority on the command surface is exactly what it prints).
 
 > [!NOTE]
-> **`connectx` is frozen.** The TypeScript client in `packages/cli` (the `@agentx/cli` package) no longer gains features and is no longer the documentation entry point — this page describes `anpio-cli`, and the rest of this site has been switched to it too. The two speak the **same protocol**; the command names and flags differ, so take this page and `--help` as authoritative.
+> **`connectx` is frozen.** The TypeScript client in `packages/cli` (the `@anpio-cli/cli` package) no longer gains features and is no longer the documentation entry point — this page describes `anpio-cli`, and the rest of this site has been switched to it too. The two speak the **same protocol**; the command names and flags differ, so take this page and `--help` as authoritative.
 
 ## Install and store
 
@@ -92,7 +92,7 @@ The four options of `msg listen` are worth spelling out:
 The stream address is **derived** from the message service endpoint in the DID document: replace the last path segment with `stream`. A service that mounts the stream elsewhere cannot be reached by this command.
 
 > [!NOTE]
-> `msg inbox` / `msg show` / `msg read` hit an **implementation extension** (`x_agentx.inbox.v1`), not the specification. The ANP messaging spec deliberately leaves history and read state alone, so a service that implements only the spec answers `-32601` here — and the client reports that verbatim as `unsupported_extension`, exiting 1. That is **the correct answer**, not a defect: it says the peer lacks this extension, which is a different thing from "the peer refused me" (`message_send_failed`). `msg listen`'s handshake works the same way.
+> `msg inbox` / `msg show` / `msg read` hit an **implementation extension** (`x_anpiocli.inbox.v1`), not the specification. The ANP messaging spec deliberately leaves history and read state alone, so a service that implements only the spec answers `-32601` here — and the client reports that verbatim as `unsupported_extension`, exiting 1. That is **the correct answer**, not a defect: it says the peer lacks this extension, which is a different thing from "the peer refused me" (`message_send_failed`). `msg listen`'s handshake works the same way.
 
 ## `contacts` — names for DIDs
 
@@ -104,7 +104,7 @@ The stream address is **derived** from the message service endpoint in the DID d
 | `contacts remove <name>` | Take a contact out of the book (name or DID) |
 | `contacts resolve <name>` | Name in, DID out; `--json` gives the whole row, `subject` included |
 
-The book does not live in a local file — it lives in the **message service's store** (extension `x_agentx.contacts.v1`), keyed by the **verified signer of the request**, so one identity's remarks are invisible to another by construction. Rows are keyed by **`subject`**, not `did`: `did update` moves the DID (it embeds a key fingerprint), so a remark hung on the DID would silently vanish on a key rotation.
+The book does not live in a local file — it lives in the **message service's store** (extension `x_anpiocli.contacts.v1`), keyed by the **verified signer of the request**, so one identity's remarks are invisible to another by construction. Rows are keyed by **`subject`**, not `did`: `did update` moves the DID (it embeds a key fingerprint), so a remark hung on the DID would silently vanish on a key rotation.
 
 `resolve` is **the one to reach for from a script**: name in, DID out. A DID-shaped argument is **returned as-is** (no network, no store read). `add` refuses a non-DID **before opening any identity** — otherwise it would store a row keyed by a literal string, an entry that can never be sent to and that no DID will ever match.
 
@@ -124,7 +124,7 @@ The book does not live in a local file — it lives in the **message service's s
 
 A group's default policy is `open-join`; `admission_mode` inside `--policy` accepts only `admin-add` / `open-join`, and an out-of-set value is refused **before any network call**. Joining a group that is not `open-join` is refused by the service with `policyViolation` (3003) — that is the group's policy speaking, not a client fault.
 
-**`update-profile --name` and `set-remark` are not the same thing**: the former writes the group's **own** name, stored on the group's host and the same for everyone; the latter sets one **only you can see**, stored in a separate table in the service (extension `x_agentx.group_remarks.v1`), which `group info` prints on the line below `name:`. In `members`, a member the address book knows is followed by **the remark you gave them** (names hang on `subject`, so a peer's key rotation does not lose them).
+**`update-profile --name` and `set-remark` are not the same thing**: the former writes the group's **own** name, stored on the group's host and the same for everyone; the latter sets one **only you can see**, stored in a separate table in the service (extension `x_anpiocli.group_remarks.v1`), which `group info` prints on the line below `name:`. In `members`, a member the address book knows is followed by **the remark you gave them** (names hang on `subject`, so a peer's key rotation does not lose them).
 
 ## `group e2ee` — end-to-end encrypted groups
 

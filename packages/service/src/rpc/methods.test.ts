@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ORIGIN_PROOF_SCHEME, type AnpMeta, type AnpParams } from '@agentx/core'
+import { ORIGIN_PROOF_SCHEME, type AnpMeta, type AnpParams } from '@anpio-cli/core'
 import { DIRECT_SEND, GET_CAPABILITIES, checkMethod, groupMethodNames, lookupMethod, lookupStreamMethod, targetBindingHolds } from './methods'
 import type { MethodSpec } from './methods'
 import { GROUP_HANDLERS } from './groups'

@@ -120,7 +120,7 @@ JSON-RPC（§14.1 的示例就是一个完整信封），`content_type` 是**业
 
 ## 4. 对象字节放哪
 
-**文件系统，按摘要寻址**，目录由 `AGENTX_OBJECT_DIR` 给（不给就用数据库文件旁边那个
+**文件系统，按摘要寻址**，目录由 `ANPIOCLI_OBJECT_DIR` 给（不给就用数据库文件旁边那个
 目录）。路径就是 `sha-256` 的无填充 base64url：`<dir>/objects/<digest>`。
 
 三条理由：
@@ -139,8 +139,8 @@ JSON-RPC（§14.1 的示例就是一个完整信封），`content_type` 是**业
 就发出去，但它指向的东西到 `commit` 才存在——`object_uri` 是 locator，不是"东西已经在
 那了"的断言（§7.5 L489）。
 
-**大小上限**：`AGENTX_MAX_OBJECT_BYTES`（默认 64 MiB），超了回 6003。约束在**收流的
-过程中**，不是收完之后——先缓冲再判断，等于把上限变成了内存用量。它和 `AGENTX_MAX_BODY`
+**大小上限**：`ANPIOCLI_MAX_OBJECT_BYTES`（默认 64 MiB），超了回 6003。约束在**收流的
+过程中**，不是收完之后——先缓冲再判断，等于把上限变成了内存用量。它和 `ANPIOCLI_MAX_BODY`
 是两个数：控制面信封是几 KB 量级，对象是几 MiB 量级，用一个数就必然有一个是错的。
 
 **`object_uri` 里的 https 与回环例外**：§7.5 L488 要求 `object_uri` **MUST** 是 `https://`。
@@ -255,7 +255,7 @@ SHA-256**（不存原值——它是一张 bearer 凭据，台账里不该有明
 - §9.6 第 4 条无论如何都要查 Grant。查完 Grant 再查票据行，与只查票据行，
   差别是一次主键命中。
 - 验签要一把钥，而 v1 的服务端**还没有**自己的签名钥（[message-service.md](message-service.md)
-  §14 的 `AGENTX_KEY_FILE` 是给跨域外层身份准备的，见 C11）。为票据先引一套钥管理，
+  §14 的 `ANPIOCLI_KEY_FILE` 是给跨域外层身份准备的，见 C11）。为票据先引一套钥管理，
   是把 C11 的活提前到 C10，且提前得没有收益。
 
 有效期默认 **5 分钟**（§9.5 L696 的 SHOULD NOT 上限），`one_time`（§10.5.2 L1002）为真

@@ -26,8 +26,8 @@ import {
   type AnpMeta,
   type AnpParams,
   type AnpRejection,
-} from '@agentx/core'
-import { signDidDocumentProofSync } from '@agentx/core/advanced'
+} from '@anpio-cli/core'
+import { signDidDocumentProofSync } from '@anpio-cli/core/advanced'
 import type { DeliveryRecord, Storage } from '../storage/types'
 import { attachmentGrantsFor, insertAttachmentGrants, sha256b64u } from './attachments'
 import { isNonEmptyString, unknownField } from './body'

@@ -43,7 +43,7 @@ export function isObjectDigest(value: string): boolean {
  *  所以这既是卫生检查也是那一段的边界。 */
 const SLOT_ID_PATTERN = /^[A-Za-z0-9_-]{16,64}$/
 
-/** 上传超过 `AGENTX_MAX_OBJECT_BYTES`。数据面把它翻成 `413` + 6003（§12 L1091）。 */
+/** 上传超过 `ANPIOCLI_MAX_OBJECT_BYTES`。数据面把它翻成 `413` + 6003（§12 L1091）。 */
 export class ObjectTooLargeError extends Error {
   constructor(readonly limit: number) {
     super(`object exceeds the ${limit} byte limit`)
@@ -179,9 +179,9 @@ class FilesystemObjectStore implements ObjectStore {
 }
 
 export interface OpenObjectStoreOptions {
-  /** 对象目录：`AGENTX_OBJECT_DIR`，不给则由 config 推一个（attachments.md §4）。 */
+  /** 对象目录：`ANPIOCLI_OBJECT_DIR`，不给则由 config 推一个（attachments.md §4）。 */
   directory: string
-  /** 单个对象的上限，`AGENTX_MAX_OBJECT_BYTES`。 */
+  /** 单个对象的上限，`ANPIOCLI_MAX_OBJECT_BYTES`。 */
   maxBytes: number
 }
 

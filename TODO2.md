@@ -79,7 +79,7 @@ KeyPackage 的 `did_wba_binding` Object Proof 由设备自签，验证侧从**�
 
   - ~~**A3a 一份共享的 DID 文档缓存 + 可配 TTL。**~~
     （2026-10-02 落地，`8d3bdef`：受理、投递、出站共用 `config.didResolution.documentStore`，
-    `AGENTX_DID_CACHE_TTL_MS` 默认 5 分钟。不配它，一次投递会把同一份文档抓两遍——`discovery.ts`
+    `ANPIOCLI_DID_CACHE_TTL_MS` 默认 5 分钟。不配它，一次投递会把同一份文档抓两遍——`discovery.ts`
     找入口与 `devices.ts` 读清单各调一次 `resolveDidDocument`。它同时就是"对端身份变化的发现
     时延上界"：ANP 不为文档变化提供推送（P2 §5.5 规则 8），窗口封不到零，只能封成一个部署
     能声明的数。缓存不放松判定——core 不写、也不读出 `deactivated` / 带 `successorDid` 的文档。）
@@ -151,7 +151,7 @@ KeyPackage 的 `did_wba_binding` Object Proof 由设备自签，验证侧从**�
       轮。游标是 `group_members.last_did_checked_at`（schema v10，`addColumnIfMissing`）：它记的是
       "看过"不是"没问题"，解析失败也盖章，否则一个暂时不可达的对端会永远卡在队头，把所有人挡住。
       `staleAfterMs` 取 `intervalMs`，所以那个间隔是每个成员的**最短**复查周期。两个数是部署档位：
-      `AGENTX_DID_REFRESH_INTERVAL_MS`（缺省 6h）与 `AGENTX_DID_REFRESH_BATCH`（缺省 20）——一个
+      `ANPIOCLI_DID_REFRESH_INTERVAL_MS`（缺省 6h）与 `ANPIOCLI_DID_REFRESH_BATCH`（缺省 20）——一个
       1000 成员的部署按缺省约 12 天轮一遍，每轮仍是 20 次解析。启动时**不**立刻扫一轮：刚起来的
       进程正忙着开端口装订阅，几十次解析压在那个时刻没有好处。它单开一个 worker 是因为节奏与设备
       队列差四个数量级。测试：`refresh/memberDidRefresh.test.ts` 8 例（采纳并开编排行、无 leaf 的
@@ -177,8 +177,8 @@ KeyPackage 的 `did_wba_binding` Object Proof 由设备自签，验证侧从**�
   `maxAttempts` 默认 8（`packages/service/src/delivery/deviceQueue.ts:49`）、
   `maxQueueAgeMs` 默认 24h（`packages/service/src/delivery/deviceQueue.ts:55`），
   今天要调只能改代码。选项：提升到 `Config` 做成部署档位。**建议提**（运维会想调）。~~
-  （2026-10-02 落地，`ec4e273`：`AGENTX_DEVICE_QUEUE_MAX_ATTEMPTS`（缺省 8）与
-  `AGENTX_DEVICE_QUEUE_MAX_AGE_MS`（缺省 24h），解析口径与其他数值设置一致——空值当未设、
+  （2026-10-02 落地，`ec4e273`：`ANPIOCLI_DEVICE_QUEUE_MAX_ATTEMPTS`（缺省 8）与
+  `ANPIOCLI_DEVICE_QUEUE_MAX_AGE_MS`（缺省 24h），解析口径与其他数值设置一致——空值当未设、
   非正整数在启动时拒绝而不是悄悄钳住。worker 选项保留作覆盖，测试仍可钉住某一条上限。）
 
 - ~~**A6 §12.6 第 3 项"投递前复核"的判据。**
@@ -223,7 +223,7 @@ KeyPackage 的 `did_wba_binding` Object Proof 由设备自签，验证侧从**�
   **部署还差一步（运维侧，不是代码）：在需要接受对端端点的那台服务器上设
   `AWIKI_ALLOW_PEER_DECLARED_MESSAGE_SERVICE=1`。** 测试两条，都验过会红：一条走通
   "对端声明的 `did:wba:awiki.info` / `https://awiki.info/anp-im/rpc` 原样保留并发布"，
-  一条把 `serviceDid: "agentx.example"`、`serviceEndpoint` 为 `""` / `"not-a-url"` / `"https://"`
+  一条把 `serviceDid: "anpio.example"`、`serviceEndpoint` 为 `""` / `"not-a-url"` / `"https://"`
   逐个打回。按用户口径这条路是"独立出来"，后续 fork 与上游分叉是预期内的，不是要回收的债。）
   （2026-10-02 第三段：**这条按职责切开后就不是问题了。** 用户口径是 DID server 与 ANP
   message service 职责不同——**前者只管身份，后者承载社交应用**。于是"身份文档里那条
@@ -273,8 +273,8 @@ KeyPackage 的 `did_wba_binding` Object Proof 由设备自签，验证侧从**�
     §6.1，§1 加一句"本服务就是 Object Service 说的是作为目标的那一档"。）
 
   - **B1b `group.*` 那一半。** 见 [TODO3.md](TODO3.md)——用户 2026-10-02 裁定按**选项 1**
-    走：AgentXAgent **自己发布**群 DID 文档，不依赖 awiki 托管。
-- ~~**B2（= TODO1 E4，端到端）** `connectx msg send` → `AgentXAgent` → `connectx msg listen` 收到。
+    走：AnpioAgent **自己发布**群 DID 文档，不依赖 awiki 托管。
+- ~~**B2（= TODO1 E4，端到端）** `connectx msg send` → `AnpioAgent` → `connectx msg listen` 收到。
   今天 P4/P5/P6 都是**方法级**测过、**没串起来端到端跑过**。A1/A2 定了之后，这条应该顺带把
   P6 也串进去。~~
   （2026-10-02：补了第四个 workspace `packages/e2e`，3 条用例串起 发送/收取/补历史/实时推送 四段。
@@ -311,8 +311,8 @@ KeyPackage 的 `did_wba_binding` Object Proof 由设备自签，验证侧从**�
   按 job 分组跑。要真正的 CI 得补 workflow（我可以写，但 `.github/` 那条路径和要不要跑在
   GitHub 上得你定）。~~
   （2026-10-02 用户裁定**要**，已落地 `.github/workflows/ci.yml`，跑在 GitHub 上（远端是
-  `eccstartup/AgentX`）。一个 job 四步：`npm ci` → `npm run build` → `typecheck` → `test`。
-  两点是刻意的：**`build` 不是形式**——每个包的测试按包名 import `@agentx/core`，而那个名字解析到
+  `eccstartup/anpio-cli`）。一个 job 四步：`npm ci` → `npm run build` → `typecheck` → `test`。
+  两点是刻意的：**`build` 不是形式**——每个包的测试按包名 import `@anpio-cli/core`，而那个名字解析到
   `packages/core/dist`，所以空检出跑 `npm test` 会红得像是测试坏了而不是缺构建；**Node 钉
   `'24'`** 是钉 `engines` 声明的下限（>=24.16.0），声明了最小值却从没跑过它就只是个说法。
   整套顺序在本地从 `rm -rf packages/*/dist` 起验过一遍。e2e 也在里面——它最慢，但它是唯一一个
@@ -358,7 +358,7 @@ KeyPackage 的 `did_wba_binding` Object Proof 由设备自签，验证侧从**�
   `didToUrl` 对这种 DID 的映射是 `https://<host>/groups/<grp>/<e1_fp>/did.json`
   （`packages/core/src/crypto/resolveDid.ts:520`），与服务器的路由严丝合缝；而
   `packages/service/src` 里没有任何 `groups:` DID 的签发逻辑——
-  `AgentXAgent` 不托管群、只按 `ServiceLocator` 统一解析群 DID 去找 Host，与 B3 收敛后的
+  `AnpioAgent` 不托管群、只按 `ServiceLocator` 统一解析群 DID 去找 Host，与 B3 收敛后的
   口径一致。剩下真正未决的只有"谁来托管"这个设计问题，而它的答案是自洽的：**群挂在谁身上，
   谁的服务器就发布它的文档**，awiki 已经这么做了。上游要不要把这个行为固化成规范条文，
   是上游的事，不是本仓库的缺口。）

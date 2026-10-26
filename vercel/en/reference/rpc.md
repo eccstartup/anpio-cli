@@ -93,7 +93,7 @@ the same key gets back **the same** OPK.
 The first three **do not** grant download rights; a Grant is produced only when the message carrying
 the manifest is accepted.
 
-### Inbox surface (implementation extension `x_agentx.inbox.v1`)
+### Inbox surface (implementation extension `x_anpiocli.inbox.v1`)
 
 | Method | Target | Description |
 |---|---|---|

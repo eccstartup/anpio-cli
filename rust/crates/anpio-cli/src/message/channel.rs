@@ -31,7 +31,7 @@ pub const TRANSPORT_PROTECTED: &str = "transport-protected";
 
 /// JSON-RPC "no such method".
 pub const METHOD_NOT_FOUND: i64 = -32601;
-/// P1 §10.3: 1001 `anp.unsupported_profile`. On an `x_agentx.*` profile this says the same
+/// P1 §10.3: 1001 `anp.unsupported_profile`. On an `x_anpiocli.*` profile this says the same
 /// thing `-32601` does — the peer does not implement this extension.
 pub const UNSUPPORTED_PROFILE: &str = "anp.unsupported_profile";
 /// P1 §10.3: the peer refuses a DID that has a successor, and MUST NOT retarget on its own.
@@ -122,12 +122,12 @@ pub const GROUP_REMARKS_REMOVE: &str = "group_remarks.remove";
 /// service advertises as its specification conformance.
 ///
 /// One Profile per family, not one for all extensions: the service advertises them separately
-/// (`x_agentx.inbox.v1`, `x_agentx.contacts.v1` and `x_agentx.group_remarks.v1` are three
+/// (`x_anpiocli.inbox.v1`, `x_anpiocli.contacts.v1` and `x_anpiocli.group_remarks.v1` are three
 /// entries in `capabilities.extensionProfiles`), and a client that named the wrong one would
 /// be asking to be read under a Profile that does not define the method.
-pub const INBOX_PROFILE: &str = "x_agentx.inbox.v1";
-pub const CONTACTS_PROFILE: &str = "x_agentx.contacts.v1";
-pub const GROUP_REMARKS_PROFILE: &str = "x_agentx.group_remarks.v1";
+pub const INBOX_PROFILE: &str = "x_anpiocli.inbox.v1";
+pub const CONTACTS_PROFILE: &str = "x_anpiocli.contacts.v1";
+pub const GROUP_REMARKS_PROFILE: &str = "x_anpiocli.group_remarks.v1";
 
 // ---- the outbound network policy ---------------------------------------------
 

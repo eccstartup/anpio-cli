@@ -71,8 +71,8 @@
 // 设备），所以那里认到 DID 为止，设备是自报 + 资格判定——与 P5 的立场相同
 // （[e2ee-direct.md] §9 第 3 条），没有自造一条规范没给的禁令。
 
-import type { AnpMeta, AnpRejection } from '@agentx/core'
-import { anpRejection, profileRejection } from '@agentx/core'
+import type { AnpMeta, AnpRejection } from '@anpio-cli/core'
+import { anpRejection, profileRejection } from '@anpio-cli/core'
 import type { Storage } from '../storage/types'
 import type { EligibleDevice } from './eligibility'
 import { P1_AUTH_CODES } from './auth'

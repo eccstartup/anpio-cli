@@ -28,15 +28,15 @@
 // 本地名册该有的行为——要"先问群在不在"就得先往它的 Host 发一次 `group.get_info`，而那是
 // `group info` 的事，不是起名的事。`contacts.put` 同理不校验对方存在（它也校验不了）。
 
-import type { AnpMeta, AnpRejection } from '@agentx/core'
-import { anpRejection } from '@agentx/core'
+import type { AnpMeta, AnpRejection } from '@anpio-cli/core'
+import { anpRejection } from '@anpio-cli/core'
 import type { Storage, StoredGroupRemark } from '../storage/types'
 import { isNonEmptyString, unknownField } from './body'
 
-/** §4.2 这条扩展面自己的 Profile。与 `x_agentx.contacts.v1` 分开：P1 §6.2.2 L277 说
+/** §4.2 这条扩展面自己的 Profile。与 `x_anpiocli.contacts.v1` 分开：P1 §6.2.2 L277 说
  *  `meta.profile` 是"本次请求的唯一解释"，而"我给这个人起的名字"与"我给这个群起的名字"
  *  不是同一种解释。 */
-export const GROUP_REMARKS_PROFILE = 'x_agentx.group_remarks.v1'
+export const GROUP_REMARKS_PROFILE = 'x_anpiocli.group_remarks.v1'
 
 export const GROUP_REMARKS_LIST = 'group_remarks.list'
 export const GROUP_REMARKS_PUT = 'group_remarks.put'

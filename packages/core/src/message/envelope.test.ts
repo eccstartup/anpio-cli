@@ -91,7 +91,7 @@ describe('buildMessageRequest', () => {
       /Unknown core meta field "bogus"/,
     )
 
-    const extension = { ...meta(), x_agentx_retry: 1 } as unknown as AnpMeta
+    const extension = { ...meta(), x_anpiocli_retry: 1 } as unknown as AnpMeta
     expect(() => buildMessageRequest({ id: 'r', method: 'direct.send', meta: extension })).not.toThrow()
   })
 })

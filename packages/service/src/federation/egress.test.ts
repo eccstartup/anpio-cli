@@ -8,8 +8,8 @@ import {
   verifyHttpSignatureForServer,
   type AnpRequest,
   type LocateOptions,
-} from '@agentx/core'
-import { buildContentDigestValue, utf8 } from '@agentx/core/advanced'
+} from '@anpio-cli/core'
+import { buildContentDigestValue, utf8 } from '@anpio-cli/core/advanced'
 import { loadConfig } from '../config'
 import { createHttpSigner, type HttpSigner } from './signing'
 import { createEgress } from './egress'

@@ -20,13 +20,13 @@
 // 时同一个 id 要进 `proof.verificationMethod`，而那个方向不能反过来从这里取——见 import
 // 处那段说明。
 
-import { parsePrivateKey } from '@agentx/core'
+import { parsePrivateKey } from '@anpio-cli/core'
 import {
   buildBaseDidDocument,
   ed25519PublicKey,
   encodeMultibaseEd25519,
   signDidDocumentProofSync,
-} from '@agentx/core/advanced'
+} from '@anpio-cli/core/advanced'
 import type { Config } from '../config'
 import type { Storage } from '../storage/types'
 import { buildServiceEntry, type ServiceEntry } from '../well-known'
@@ -46,7 +46,7 @@ export function groupServiceEntry(config: Config, groupDid: string): ServiceEntr
 export interface GroupDidDocumentInput {
   groupDid: string
   /** hex 的 32 字节种子，就是 `group_keys.private_key` 那一列。
-   *  `parsePrivateKey` 与 `AGENTX_KEY_FILE` 认的是同一个形状（groups.md §2.1）。 */
+   *  `parsePrivateKey` 与 `ANPIOCLI_KEY_FILE` 认的是同一个形状（groups.md §2.1）。 */
   privateKeyHex: string
   serviceEntry: ServiceEntry
 }

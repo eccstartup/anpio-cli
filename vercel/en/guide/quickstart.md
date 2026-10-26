@@ -1,6 +1,6 @@
 ---
 title: Quickstart
-description: "Install AgentX from scratch, run a message service, and send your first message with anpio-cli."
+description: "Install anpio-cli from scratch, run a message service, and send your first message with anpio-cli."
 ---
 
 # Quickstart
@@ -10,7 +10,7 @@ This page walks the complete loop of a local development environment: install de
 ```mermaid
 flowchart LR
   A["Install dependencies<br/>npm install"] --> B["Build<br/>npm run build"]
-  B --> C["Start message service<br/>agentx"]
+  B --> C["Start message service<br/>anpio-service"]
   B --> D["Prepare identity<br/>anpio-cli did create"]
   D --> E["Query capabilities<br/>anpio-cli msg caps"]
   E --> F["Send message<br/>anpio-cli msg send"]
@@ -35,7 +35,7 @@ npm run build
 Build artifacts go in each package's `packages/*/dist/`. After that you can call the entry points in dist directly (once the workspace is installed, `node_modules/.bin` has an executable of the same name):
 
 ```bash
-node packages/service/dist/main.js    # or npx agentx
+node packages/service/dist/main.js    # or npx anpio-service
 ```
 
 The command-line client is **a separate thing**, under `rust/`, and the binary is called `anpio-cli`:
@@ -55,18 +55,18 @@ cargo build --release --manifest-path rust/Cargo.toml
 The server has **no command-line flags**; all configuration comes from environment variables. The minimal tier only needs a listen address:
 
 ```bash
-AGENTX_LISTEN=127.0.0.1:8787 node packages/service/dist/main.js
+ANPIOCLI_LISTEN=127.0.0.1:8787 node packages/service/dist/main.js
 ```
 
 On startup it prints who it is, where it is listening, and which database it uses:
 
 ```
-AgentXAgent listening on http://127.0.0.1:8787
+AnpioAgent listening on http://127.0.0.1:8787
   service did   did:web:127.0.0.1%3A8787
   rpc           http://127.0.0.1:8787/anp-im/rpc
-  database      ./agentx.db
+  database      ./anpio-cli.db
   objects       ./objects
-  outbound      unsigned (no AGENTX_KEY_FILE)
+  outbound      unsigned (no ANPIOCLI_KEY_FILE)
   did hosts     none (only inline DID documents will verify)
 ```
 

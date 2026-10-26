@@ -1,11 +1,11 @@
 ---
 title: 身份与定址
-description: AgentX 只认 DID 定址；从 DID 文档里发现唯一的 ANPMessageService 条目，以及 CAIP-10 留下的口子。
+description: anpio-cli 只认 DID 定址；从 DID 文档里发现唯一的 ANPMessageService 条目，以及 CAIP-10 留下的口子。
 ---
 
 # 身份与定址
 
-AgentX 的服务**只认 DID 定址**。一条消息的收发地址是一个 DID，服务的入口地址则从这个
+anpio-cli 的服务**只认 DID 定址**。一条消息的收发地址是一个 DID，服务的入口地址则从这个
 DID 的文档里**发现**出来。
 
 ## 发现链
@@ -30,8 +30,8 @@ flowchart LR
 {
   "id": "…#anp-message-service",
   "type": "ANPMessageService",
-  "serviceEndpoint": "https://agentx.example/anp-im/rpc",
-  "serviceDid": "did:web:agentx.example",
+  "serviceEndpoint": "https://anpio.example/anp-im/rpc",
+  "serviceDid": "did:web:anpio.example",
   "profiles": ["anp.core.binding.v1", "anp.direct.base.v1"],
   "securityProfiles": ["transport-protected"]
 }
@@ -44,7 +44,7 @@ flowchart LR
 
 ## 谁签发文档
 
-**AgentXAgent 不托管 DID 文档。** 它只提供一段自述 JSON
+**AnpioAgent 不托管 DID 文档。** 它只提供一段自述 JSON
 （`GET /.well-known/anp-message-service.json`），供 DID Service 在签发文档时嵌入。
 这段 JSON 的 `id` 里省略的正是**文档所有者的 DID**——服务不知道对方是谁，只交出自己
 那半边，由嵌入方把它换成自己的。

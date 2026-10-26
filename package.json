@@ -1,12 +1,12 @@
 {
-  "name": "agentx-monorepo",
+  "name": "anpio-cli-monorepo",
   "version": "0.0.0",
   "private": true,
-  "description": "ANP message layer: AgentXAgent ANPMessageService.",
+  "description": "ANP message layer: AnpioAgent ANPMessageService.",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/eccstartup/ANPMessageService.git"
+    "url": "git+https://github.com/eccstartup/anpio-cli.git"
   },
   "type": "module",
   "workspaces": [
@@ -16,12 +16,12 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "build": "npm run build --workspaces --if-present",
-    "build:core": "npm run build --workspace @agentx/core",
-    "build:service": "npm run build --workspace @agentx/service",
-    "typecheck:core": "npm run typecheck --workspace @agentx/core",
-    "typecheck:service": "npm run typecheck --workspace @agentx/service",
-    "test:core": "npm run test --workspace @agentx/core",
-    "test:service": "npm run test --workspace @agentx/service",
+    "build:core": "npm run build --workspace @anpio-cli/core",
+    "build:service": "npm run build --workspace @anpio-cli/service",
+    "typecheck:core": "npm run typecheck --workspace @anpio-cli/core",
+    "typecheck:service": "npm run typecheck --workspace @anpio-cli/service",
+    "test:core": "npm run test --workspace @anpio-cli/core",
+    "test:service": "npm run test --workspace @anpio-cli/service",
     "docs:dev": "npm --prefix vercel run docs:dev",
     "docs:build": "npm --prefix vercel run docs:build",
     "docs:preview": "npm --prefix vercel run docs:preview"

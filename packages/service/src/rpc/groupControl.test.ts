@@ -30,8 +30,8 @@ import {
   type DeviceResolver,
   type KeyResolver,
   type LocateOptions,
-} from '@agentx/core'
-import { signDidDocumentProofSync } from '@agentx/core/advanced'
+} from '@anpio-cli/core'
+import { signDidDocumentProofSync } from '@anpio-cli/core/advanced'
 import { loadConfig } from '../config'
 import { createHttpNonceStore } from '../federation/nonces'
 import { openObjectStore } from '../objects'
@@ -267,7 +267,7 @@ function harness(overrides: { storage?: Storage; devices?: Record<string, unknow
   const handle: RpcHandler = createDispatch({
     config,
     storage,
-    objects: openObjectStore({ directory: mkdtempSync(join(tmpdir(), 'agentx-groupcontrol-')), maxBytes: 1024 }),
+    objects: openObjectStore({ directory: mkdtempSync(join(tmpdir(), 'anpiocli-groupcontrol-')), maxBytes: 1024 }),
     resolver: inlineResolver(keyDocuments()),
     deviceResolver: deviceResolverFor(overrides.devices ?? defaultDeviceDocuments()),
     nonceStore: createHttpNonceStore(storage),

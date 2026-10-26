@@ -24,7 +24,7 @@ import {
   type NonceStore,
   type ServiceEntry,
   type ServiceLocator,
-} from '@agentx/core'
+} from '@anpio-cli/core'
 import {
   ANP_COMPONENTS,
   buildContentDigestValue,
@@ -33,7 +33,7 @@ import {
   serializeSignatureParams,
   signatureBaseBytes,
   utf8,
-} from '@agentx/core/advanced'
+} from '@anpio-cli/core/advanced'
 import { loadConfig, type Config } from '../config'
 import type { ForwardOutcome, Relay } from '../federation/forward'
 import { createHttpNonceStore } from '../federation/nonces'
@@ -169,7 +169,7 @@ function meta(overrides: Partial<AnpMeta> = {}): AnpMeta {
  *  `target.did` equal to `sender_did` because it is addressed to oneself. */
 function inboxMeta(overrides: Partial<AnpMeta> = {}): AnpMeta {
   return {
-    profile: 'x_agentx.inbox.v1',
+    profile: 'x_anpiocli.inbox.v1',
     security_profile: 'transport-protected',
     sender_did: sender.did,
     target: { kind: 'agent', did: sender.did },
@@ -333,7 +333,7 @@ function harness(
     // 这个文件里的方法没有一条会碰对象字节，但 `DispatchDeps` 要求它：一个广告了
     // `anp.attachment.v1` 的服务必须真的能存下字节（`dispatch.ts` 里有说明）。路径必须是
     // 真的可写目录，所以给一个系统临时目录；这个文件里没人往里写东西。
-    objects: openObjectStore({ directory: mkdtempSync(join(tmpdir(), 'agentx-dispatch-')), maxBytes: 1024 }),
+    objects: openObjectStore({ directory: mkdtempSync(join(tmpdir(), 'anpiocli-dispatch-')), maxBytes: 1024 }),
     resolver: inlineResolver(DOCUMENTS),
     locator: overrides.locator ?? locator(publishedBySender()),
     deviceResolver: overrides.deviceResolver ?? inlineDeviceResolver(),
@@ -1026,7 +1026,7 @@ describe('the pick-up extension surface (§9)', () => {
   it('takes the window from the deployment rather than a built-in number', async () => {
     // 一分钟的窗口：`NOW` 之前 1 天的那一条也落在外面了。数值来自 config，验的是
     // `dispatch` 把它交给了 `readDelta`，而不是那里写死了一个 30 天。
-    const h = harness({ config: loadConfig({ AGENTX_DELIVERY_READ_WINDOW_MS: '60000' }) })
+    const h = harness({ config: loadConfig({ ANPIOCLI_DELIVERY_READ_WINDOW_MS: '60000' }) })
     seedAt(h, '2026-09-30T00:00:00.000Z', 'recent')
 
     const outcome = await asOwner(h, 'sync.delta', { since: 0 })
@@ -1166,7 +1166,7 @@ async function selfCall(
     await signed({
       method,
       meta: {
-        profile: 'x_agentx.contacts.v1',
+        profile: 'x_anpiocli.contacts.v1',
         security_profile: 'transport-protected',
         sender_did: signer.did,
         target: { kind: 'agent', did: signer.did },
@@ -1347,7 +1347,7 @@ describe('the address book extension surface (TODO6 §3)', () => {
 // 所以下面那条"两个书架"的用例是这一族里最重要的，其余是它的边界。
 
 describe('the group-remark extension surface (TODO6 §4.2)', () => {
-  /** 一次自签名的群备注调用。Profile 是 `x_agentx.group_remarks.v1`，与 `selfCall` 只差这一处。 */
+  /** 一次自签名的群备注调用。Profile 是 `x_anpiocli.group_remarks.v1`，与 `selfCall` 只差这一处。 */
   async function remarkCall(
     h: Harness,
     signer: AnpSigningIdentity,
@@ -1359,7 +1359,7 @@ describe('the group-remark extension surface (TODO6 §4.2)', () => {
       await signed({
         method,
         meta: {
-          profile: 'x_agentx.group_remarks.v1',
+          profile: 'x_anpiocli.group_remarks.v1',
           security_profile: 'transport-protected',
           sender_did: signer.did,
           target: { kind: 'agent', did: signer.did },
@@ -1741,7 +1741,7 @@ describe('a group call whose group lives elsewhere (P8 §5.4)', () => {
   it('keeps a group in its own namespace local, without asking the network', async () => {
     // 本服务亲手建的群住在 `serviceDid:g:<id>` 里，它的文档也由**本服务**发布（groups.md
     // §2.2/§2.3）——"入口在哪"是本地常量。**这一档不是优化**：放它出站，那趟解析要么被
-    // `AGENTX_ALLOWED_DID_HOSTS` 拒（那份清单写的是对端域，不写自己），要么要求本服务的
+    // `ANPIOCLI_ALLOWED_DID_HOSTS` 拒（那份清单写的是对端域，不写自己），要么要求本服务的
     // `publicUrl` 是 https，于是一个自家的群会在自己的 `group.send` 上报 1012。
     const { relay, asked } = recording({ kind: 'answered', result: { accepted: true, seq: 99 } })
     const h = harness({ relay })

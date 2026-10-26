@@ -81,7 +81,7 @@ Authorization: Bearer {download_ticket}
 
 ## 存储
 
-对象字节按摘要寻址，落在 `<AGENTX_OBJECT_DIR>/objects/<sha-256 base64url>`；控制面与数据面
+对象字节按摘要寻址，落在 `<ANPIOCLI_OBJECT_DIR>/objects/<sha-256 base64url>`；控制面与数据面
 的状态（槽位、对象、授权、票据）在 SQLite 里。**没有 GC，也没有追溯撤销**——对象与 Grant
 从不删除，过期在**使用时**判定。
 

@@ -51,8 +51,8 @@ sequenceDiagram
 | `stream.ack` | 客户端 → 服务端 | `body: {seq}`，需 `origin_proof` |
 | `sync.delta` | 客户端 → 服务端 | `body: {device_id, since, limit?}`，取件面扩展 |
 
-`stream.auth` / `stream.ack` 属于传输自己的 Profile `x_agentx.stream.v1`；`sync.delta` 属于
-取件面 `x_agentx.inbox.v1`。**两个 Profile 都不在 `anp.get_capabilities` 里**：那张表是规范
+`stream.auth` / `stream.ack` 属于传输自己的 Profile `x_anpiocli.stream.v1`；`sync.delta` 属于
+取件面 `x_anpiocli.inbox.v1`。**两个 Profile 都不在 `anp.get_capabilities` 里**：那张表是规范
 符合性，`stream.hello` 里的 `profiles` 才是"这个端点能做什么"。
 
 约束：

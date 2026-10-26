@@ -18,7 +18,7 @@ use serde_json::Value;
 /// The store root's environment override.
 ///
 /// Its own name on purpose: this client shares neither the TS CLI's `CONNECTX_HOME` nor
-/// the service's `AGENTX_*`. Two clients pointed at one store root are one *device*, and
+/// the service's `ANPIOCLI_*`. Two clients pointed at one store root are one *device*, and
 /// their `msg listen` processes would consume each other's deliveries (TODO5 §8-A).
 pub const HOME_ENV: &str = "ANPIOCLI_HOME";
 

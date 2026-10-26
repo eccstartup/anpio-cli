@@ -11,7 +11,7 @@
 // ——它就是对裸字节做 Ed25519 签名，与本文件要的完全一样。
 
 import { readFile } from 'node:fs/promises'
-import { ed25519OriginProofSigner, parsePem, parsePrivateKey } from '@agentx/core'
+import { ed25519OriginProofSigner, parsePem, parsePrivateKey } from '@anpio-cli/core'
 import type { Config } from '../config'
 import {
   ANP_COMPONENTS,
@@ -21,7 +21,7 @@ import {
   serializeSignatureParams,
   signatureBaseBytes,
   utf8,
-} from '@agentx/core/advanced'
+} from '@anpio-cli/core/advanced'
 
 /** ANP-02 §3.1.2 的有效期。core 的登录流程用同一个值，没有理由不一样。 */
 const DEFAULT_TTL_SECONDS = 300

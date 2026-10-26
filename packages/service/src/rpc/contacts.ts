@@ -21,15 +21,15 @@
 // Rust 客户端的 `identity::did::subject_of` 与前者逐字同形——两边算出的键因此一样，
 // 客户端不必为了知道键而问服务端。
 
-import type { AnpMeta, AnpRejection } from '@agentx/core'
-import { anpRejection, subjectOf } from '@agentx/core'
+import type { AnpMeta, AnpRejection } from '@anpio-cli/core'
+import { anpRejection, subjectOf } from '@anpio-cli/core'
 import type { Storage, StoredContact } from '../storage/types'
 import { isNonEmptyString, unknownField } from './body'
 
 /** §3 这条扩展面自己的 Profile。`x_` 前缀是 P1 §12 给扩展留的命名空间，取值不是任何一个
  *  规范 Profile——混进去等于让一个只实现规范的服务看起来支持它（`capabilities.ts` 把
- *  `x_` 那批单独列在 `x_agentx` 块里）。 */
-export const CONTACTS_PROFILE = 'x_agentx.contacts.v1'
+ *  `x_` 那批单独列在 `x_anpiocli` 块里）。 */
+export const CONTACTS_PROFILE = 'x_anpiocli.contacts.v1'
 
 export const CONTACTS_LIST = 'contacts.list'
 export const CONTACTS_PUT = 'contacts.put'

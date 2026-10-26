@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import * as api from './index'
 import * as advanced from './advanced'
 
-// 公开 API 契约快照：主入口 `@agentx/core` 的运行时导出（函数 / 类 / 常量）必须
+// 公开 API 契约快照：主入口 `@anpio-cli/core` 的运行时导出（函数 / 类 / 常量）必须
 // 恰好等于下面这份清单。`export type` 在运行时被擦除，不在此断言；类型面由
 // src/index.ts 的显式 `export type` 列表锁定。
 //
@@ -216,11 +216,11 @@ const ADVANCED = [
 ]
 
 describe('public API surface', () => {
-  it('@agentx/core main entry exports exactly the curated value surface', () => {
+  it('@anpio-cli/core main entry exports exactly the curated value surface', () => {
     expect(Object.keys(api).sort()).toEqual([...MAIN].sort())
   })
 
-  it('@agentx/core/advanced entry exports exactly the low-level primitives', () => {
+  it('@anpio-cli/core/advanced entry exports exactly the low-level primitives', () => {
     expect(Object.keys(advanced).sort()).toEqual([...ADVANCED].sort())
   })
 

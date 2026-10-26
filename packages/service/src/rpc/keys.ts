@@ -47,7 +47,7 @@ import {
   type AnpMeta,
   type AnpParams,
   type AnpRejection,
-} from '@agentx/core'
+} from '@anpio-cli/core'
 import type { Storage } from '../storage/types'
 import type { EligibleDevice } from './eligibility'
 import { refusal } from './refusal'

@@ -12,7 +12,7 @@ import type { Config } from './config'
 import { RPC_PATH } from './http/server'
 
 /** P2 §7.1 L337–347：`id` / `type` / `serviceEndpoint` 是 MUST，其余三项（`profiles` /
- *  `securityProfiles` / `serviceDid`）是 v1 的标准 hint。`x_agentx` 是本服务的扩展块，
+ *  `securityProfiles` / `serviceDid`）是 v1 的标准 hint。`x_anpiocli` 是本服务的扩展块，
  *  不是标准字段——标准字段里放扩展就是撒谎（§13 L834–838）。 */
 export interface ServiceEntry {
   id: string
@@ -21,7 +21,7 @@ export interface ServiceEntry {
   serviceDid: string
   profiles: string[]
   securityProfiles: string[]
-  x_agentx: { profiles: string[]; methods: string[] }
+  x_anpiocli: { profiles: string[]; methods: string[] }
 }
 
 export function buildServiceEntry(config: Config): ServiceEntry {
@@ -39,7 +39,7 @@ export function buildServiceEntry(config: Config): ServiceEntry {
     serviceDid: config.serviceDid,
     profiles: capabilities.profiles,
     securityProfiles: capabilities.securityProfiles,
-    x_agentx: {
+    x_anpiocli: {
       profiles: capabilities.extensionProfiles,
       // 方法按 Profile 归属读：`stream.*` 那两个的传输是 WebSocket 而不是这个 rpc 端点
       // （realtime.md §9），块里列出它们是在说"这个服务有这些扩展方法"，不是在说它们都

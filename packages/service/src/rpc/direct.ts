@@ -11,7 +11,7 @@
 // 本服务上时，`relayed` 带着对端的答复进来，这里只记台账、不写投递。转发本身不属于这个
 // 文件——它连一个字节都不该知道。
 
-import { subjectOf, type AnpAuth, type AnpMeta, type AnpParams } from '@agentx/core'
+import { subjectOf, type AnpAuth, type AnpMeta, type AnpParams } from '@anpio-cli/core'
 import type { DeliveryRecord, Storage } from '../storage/types'
 import { attachmentGrantsFor, insertAttachmentGrants } from './attachments'
 

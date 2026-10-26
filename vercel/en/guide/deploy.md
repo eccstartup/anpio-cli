@@ -1,11 +1,11 @@
 ---
 title: Deployment and configuration
-description: "Running AgentXAgent: environment variables, secure defaults, the outbound signing key, DID document self-description, and runtime shape."
+description: "Running AnpioAgent: environment variables, secure defaults, the outbound signing key, DID document self-description, and runtime shape."
 ---
 
 # Deployment and configuration
 
-AgentXAgent is a **stateful, long-running process**: it holds a SQLite database, an attachment
+AnpioAgent is a **stateful, long-running process**: it holds a SQLite database, an attachment
 object directory, WebSocket subscription connections, and delivery workers. It needs Node ≥ 24.16.0,
 and needs neither Docker nor an external database.
 
@@ -20,11 +20,11 @@ and needs neither Docker nor an external database.
 
 ```mermaid
 graph TD
-  Client["anpio-cli / peer agent"] -->|"HTTPS POST /anp-im/rpc"| SVC["AgentXAgent"]
+  Client["anpio-cli / peer agent"] -->|"HTTPS POST /anp-im/rpc"| SVC["AnpioAgent"]
   Client -->|"WSS /anp-im/stream"| SVC
-  SVC --> DB[("AGENTX_DB<br/>SQLite (WAL)")]
-  SVC --> OBJ[("AGENTX_OBJECT_DIR<br/>object bytes")]
-  SVC -. "resolve DID document" .-> DID["Peer domain (must be within<br/>AGENTX_ALLOWED_DID_HOSTS)"]
+  SVC --> DB[("ANPIOCLI_DB<br/>SQLite (WAL)")]
+  SVC --> OBJ[("ANPIOCLI_OBJECT_DIR<br/>object bytes")]
+  SVC -. "resolve DID document" .-> DID["Peer domain (must be within<br/>ANPIOCLI_ALLOWED_DID_HOSTS)"]
   DIDService["DID Service (sibling project)"] -. "embed serviceEntry" .-> DOC["the agent's DID document"]
   SVC -->|"GET /.well-known/…<br/>serve self-description JSON"| DIDService
 ```
@@ -33,19 +33,19 @@ graph TD
 
 | Variable | Default | Description |
 |---|---|---|
-| `AGENTX_LISTEN` | `127.0.0.1:8787` | Listen address `host:port` (use brackets for IPv6). |
-| `AGENTX_PUBLIC_URL` | Derived from `LISTEN` | Public base URL, used for `serviceEndpoint` and `object_uri`. **Required** when listening on a non-loopback address. |
-| `AGENTX_SERVICE_DID` | `did:web` derived from `PUBLIC_URL` | Your own service DID; must be a DID string without a fragment / query. |
-| `AGENTX_KEY_FILE` | unset | Cross-domain outbound signing key (hex or PEM). If unset, outbound requests carry no outer identity. |
-| `AGENTX_KEY_ID` | required once `KEY_FILE` is set | The keyid for that key; a full DID URL that must hang under `SERVICE_DID`. |
-| `AGENTX_DB` | `./agentx.db` | SQLite path, or `:memory:`. |
-| `AGENTX_OBJECT_DIR` | `objects/` next to the database file | Attachment object directory. |
-| `AGENTX_MAX_BODY` | `1048576` (1 MiB) | Request body limit. Attachments go over the data plane and do not pass through here. |
-| `AGENTX_MAX_OBJECT_BYTES` | `67108864` (64 MiB) | Limit for a single attachment object; on a data-plane PUT the check runs as bytes arrive. |
-| `AGENTX_ALLOWED_DID_HOSTS` | **empty** | **Exact hostnames** allowed for outbound DID document resolution, separated by commas / whitespace. |
-| `AGENTX_DID_DEV_HOSTS` | **empty** | Development relaxation: these domains may resolve private addresses and use http, and are **also added to the allowlist**. |
-| `AGENTX_PREKEY_BURST` | `60` | Burst allowance per caller for the two Key methods. |
-| `AGENTX_PREKEY_PER_MINUTE` | `60` | Same as above; tokens replenished per minute. |
+| `ANPIOCLI_LISTEN` | `127.0.0.1:8787` | Listen address `host:port` (use brackets for IPv6). |
+| `ANPIOCLI_PUBLIC_URL` | Derived from `LISTEN` | Public base URL, used for `serviceEndpoint` and `object_uri`. **Required** when listening on a non-loopback address. |
+| `ANPIOCLI_SERVICE_DID` | `did:web` derived from `PUBLIC_URL` | Your own service DID; must be a DID string without a fragment / query. |
+| `ANPIOCLI_KEY_FILE` | unset | Cross-domain outbound signing key (hex or PEM). If unset, outbound requests carry no outer identity. |
+| `ANPIOCLI_KEY_ID` | required once `KEY_FILE` is set | The keyid for that key; a full DID URL that must hang under `SERVICE_DID`. |
+| `ANPIOCLI_DB` | `./anpio-cli.db` | SQLite path, or `:memory:`. |
+| `ANPIOCLI_OBJECT_DIR` | `objects/` next to the database file | Attachment object directory. |
+| `ANPIOCLI_MAX_BODY` | `1048576` (1 MiB) | Request body limit. Attachments go over the data plane and do not pass through here. |
+| `ANPIOCLI_MAX_OBJECT_BYTES` | `67108864` (64 MiB) | Limit for a single attachment object; on a data-plane PUT the check runs as bytes arrive. |
+| `ANPIOCLI_ALLOWED_DID_HOSTS` | **empty** | **Exact hostnames** allowed for outbound DID document resolution, separated by commas / whitespace. |
+| `ANPIOCLI_DID_DEV_HOSTS` | **empty** | Development relaxation: these domains may resolve private addresses and use http, and are **also added to the allowlist**. |
+| `ANPIOCLI_PREKEY_BURST` | `60` | Burst allowance per caller for the two Key methods. |
+| `ANPIOCLI_PREKEY_PER_MINUTE` | `60` | Same as above; tokens replenished per minute. |
 
 ## Secure defaults: fail-closed
 
@@ -53,15 +53,15 @@ graph TD
 integration, configure a loose **DID resolution policy**, don't open a back door — that door will be
 forgotten in some deployment.
 
-- `AGENTX_ALLOWED_DID_HOSTS` defaults to **empty**: only inline documents carried with the request
+- `ANPIOCLI_ALLOWED_DID_HOSTS` defaults to **empty**: only inline documents carried with the request
   are honored; any outbound resolution is rejected.
-- `AGENTX_DID_DEV_HOSTS` is for local development integration; it both adds domains to the
+- `ANPIOCLI_DID_DEV_HOSTS` is for local development integration; it both adds domains to the
   allowlist and permits private addresses and plaintext http.
 - Both require naming each host explicitly, so no value can make resolution unbounded.
 
 The cost: **receiving a cross-domain request requires resolving the peer's DID document**, so
 cross-domain receiving does not work under the default configuration; you must add the peer domain
-to `AGENTX_ALLOWED_DID_HOSTS`. Turning off the switch is far more dangerous than loosening the
+to `ANPIOCLI_ALLOWED_DID_HOSTS`. Turning off the switch is far more dangerous than loosening the
 allowlist, so this does not change.
 
 ## Outbound signing key
@@ -69,8 +69,8 @@ allowlist, so this does not change.
 For cross-domain calls, outer HTTP authentication must be signed with the sending domain's
 `serviceDid`. This needs a key and its `keyid`:
 
-- `AGENTX_KEY_FILE` provides the key (hex or PEM);
-- `AGENTX_KEY_ID` provides the full DID URL, and it **must hang under `AGENTX_SERVICE_DID`** —
+- `ANPIOCLI_KEY_FILE` provides the key (hex or PEM);
+- `ANPIOCLI_KEY_ID` provides the full DID URL, and it **must hang under `ANPIOCLI_SERVICE_DID`** —
   otherwise every request you sign will be rejected by the peer as `forbidden_did`, and that error
   looks like the peer's problem.
 
@@ -95,7 +95,7 @@ The service serves `GET /.well-known/anp-message-service.json`, returning the en
 Service to embed. Its `profiles[]` / `securityProfiles[]` come from **the same source** as the
 runtime `anp.get_capabilities` reply, so "the document says one thing and the runtime does another"
 cannot happen. Extension capabilities are not declared in that entry; they go in a separate
-`x_agentx` block.
+`x_anpiocli` block.
 
 See [HTTP endpoints and self-description](/en/reference/endpoints).
 

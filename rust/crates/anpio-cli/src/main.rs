@@ -1510,7 +1510,7 @@ async fn cmd_discover(endpoint: &str, allow_private: &[String]) -> anyhow::Resul
         ..Default::default()
     };
     let request = build_message_request(
-        &format!("agentx-discover-{}", std::process::id()),
+        &format!("anpiocli-discover-{}", std::process::id()),
         GET_CAPABILITIES,
         meta,
         None,

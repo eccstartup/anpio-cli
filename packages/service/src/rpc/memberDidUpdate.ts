@@ -34,7 +34,7 @@
 // 行从旧 DID 上搬走之后，旧 DID 的请求自然落到 `group.not_member`（3000），不需要另写一条
 // 判定——`requireActiveMember` 查的就是这一行。
 
-import { resolveDidChain, stableSubjectId, type DidChain, type DidChainAssurance } from '@agentx/core'
+import { resolveDidChain, stableSubjectId, type DidChain, type DidChainAssurance } from '@anpio-cli/core'
 import type { Config } from '../config'
 import type { DeliveryRecord, Storage } from '../storage/types'
 import {
