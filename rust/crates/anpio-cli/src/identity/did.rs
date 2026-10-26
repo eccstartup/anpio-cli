@@ -14,10 +14,13 @@
 //!    into exactly the relationships P6 demands; the awiki host rebuilds the document
 //!    from the same builder and rejects a document whose relationships differ, so
 //!    assembling by hand is not an option (TODO5 §8-J).
-//! 3. **The `proofValue` encoding.** `anp::proof::complete_w3c_proof` writes base64url;
-//!    ANP-03 §2.5.5 and the awiki host both require base58-btc multibase (`z…`). The
-//!    signing input is identical on both sides (`sha256(jcs(proof))‖sha256(jcs(unsigned
-//!    document))`), so only the encoding has to be redone.
+//! 3. **The `proofValue` encoding and signing input.** `anp::proof::complete_w3c_proof`
+//!    writes bare base64url over a signing input that leaves the document's `@context` out
+//!    of the proof configuration. W3C `vc-di-eddsa` — and so both the awiki host and
+//!    `anpio-key` — wants base58-btc multibase (`z…`) over
+//!    `sha256(jcs(proofConfig))‖sha256(jcs(document minus proof))`, with the document's
+//!    `@context` folded into the configuration. That is [`super::proof`]'s job; there is no
+//!    re-encoding step, because the signing input differs, not just the alphabet.
 
 use std::collections::BTreeMap;
 
@@ -30,16 +33,12 @@ use anp::authentication::did_wba::{
     build_anp_message_service, create_did_wba_document, AnpMessageServiceOptions, DidDocumentOptions,
     DidProfile, ANP_MESSAGE_SERVICE_TYPE,
 };
-use anp::proof::{
-    generate_w3c_proof, ProofGenerationOptions, CRYPTOSUITE_EDDSA_JCS_2022, PROOF_TYPE_DATA_INTEGRITY,
-};
 use anp::PrivateKeyMaterial;
 use anyhow::{anyhow, bail, Context, Result};
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use base64::Engine as _;
 use chrono::Utc;
 use serde_json::{json, Map, Value};
 
+use super::proof;
 use super::store::{Identity, StoredKeyPair};
 
 pub struct CreateIdentityInput {
@@ -133,21 +132,7 @@ pub fn create_identity(input: CreateIdentityInput) -> Result<Identity> {
     let key1 = bundle
         .load_private_key("key-1")
         .map_err(|err| anyhow!("loading #key-1: {err}"))?;
-    let signed = generate_w3c_proof(
-        &document,
-        &key1,
-        &root_key_id,
-        ProofGenerationOptions {
-            proof_purpose: Some("assertionMethod".to_string()),
-            proof_type: Some(PROOF_TYPE_DATA_INTEGRITY.to_string()),
-            cryptosuite: Some(CRYPTOSUITE_EDDSA_JCS_2022.to_string()),
-            created: Some(Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()),
-            domain: None,
-            challenge: None,
-        },
-    )
-    .map_err(|err| anyhow!("signing the DID document: {err}"))?;
-    let signed_document = to_multibase_proof_value(signed)?;
+    let signed_document = proof::sign_document(&document, &key1, &root_key_id)?;
 
     let mut keys = bundle
         .keys
@@ -313,21 +298,8 @@ pub fn retirement_document(
     retired.insert("deactivated".to_string(), Value::Bool(true));
     retired.insert("successorDid".to_string(), Value::String(successor_did.to_string()));
 
-    let signed = generate_w3c_proof(
-        &Value::Object(retired),
-        key1,
-        &format!("{did}#key-1"),
-        ProofGenerationOptions {
-            proof_purpose: Some("assertionMethod".to_string()),
-            proof_type: Some(PROOF_TYPE_DATA_INTEGRITY.to_string()),
-            cryptosuite: Some(CRYPTOSUITE_EDDSA_JCS_2022.to_string()),
-            created: Some(Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()),
-            domain: None,
-            challenge: None,
-        },
-    )
-    .map_err(|err| anyhow!("signing the retirement document: {err}"))?;
-    to_multibase_proof_value(signed)
+    proof::sign_document(&Value::Object(retired), key1, &format!("{did}#key-1"))
+        .map_err(|err| anyhow!("signing the retirement document: {err}"))
 }
 
 /// Load a stored key pair as signing material — `key-1`, for the two documents `did update`
@@ -347,24 +319,11 @@ pub fn load_stored_key(pair: &StoredKeyPair) -> Result<PrivateKeyMaterial> {
 ///
 /// Signed by key-1, and it has to be: the host refuses a document whose proof names any
 /// other root (`root_change_not_supported`), and key-1 is the key whose fingerprint *is* the
-/// DID. `generate_w3c_proof` drops whatever `proof` the document carried out of the signing
-/// input, so re-proving an already-proven document is what it is for.
+/// DID. [`proof::sign_document`] drops whatever `proof` the document carried out of the
+/// signing input, so re-proving an already-proven document is what it is for.
 pub fn resign_document(document: &Value, did: &str, key1: &PrivateKeyMaterial) -> Result<Value> {
-    let signed = generate_w3c_proof(
-        document,
-        key1,
-        &format!("{did}#key-1"),
-        ProofGenerationOptions {
-            proof_purpose: Some("assertionMethod".to_string()),
-            proof_type: Some(PROOF_TYPE_DATA_INTEGRITY.to_string()),
-            cryptosuite: Some(CRYPTOSUITE_EDDSA_JCS_2022.to_string()),
-            created: Some(Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()),
-            domain: None,
-            challenge: None,
-        },
-    )
-    .map_err(|err| anyhow!("signing the DID document: {err}"))?;
-    to_multibase_proof_value(signed)
+    proof::sign_document(document, key1, &format!("{did}#key-1"))
+        .map_err(|err| anyhow!("signing the DID document: {err}"))
 }
 
 /// The document with its `proof` removed, for comparing two documents without comparing
@@ -489,32 +448,6 @@ fn multibase(prefix: u8, key: &[u8]) -> String {
     format!("z{}", bs58::encode(bytes).into_string())
 }
 
-/// Re-encode the proof's `proofValue` from base64url to base58-btc multibase.
-///
-/// Only the encoding changes: the signature bytes and the signing input are untouched, so
-/// the proof still verifies — against the awiki host's verifier, which base58-decodes.
-fn to_multibase_proof_value(mut document: Value) -> Result<Value> {
-    let proof = document
-        .get_mut("proof")
-        .and_then(Value::as_object_mut)
-        .ok_or_else(|| anyhow!("the signed document has no proof"))?;
-    let encoded = proof
-        .get("proofValue")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("the proof has no proofValue"))?;
-    let signature = URL_SAFE_NO_PAD
-        .decode(encoded)
-        .context("decoding the proof's base64url signature")?;
-    if signature.len() != 64 {
-        bail!("an Ed25519 signature is 64 bytes; got {}", signature.len());
-    }
-    proof.insert(
-        "proofValue".to_string(),
-        Value::String(format!("z{}", bs58::encode(signature).into_string())),
-    );
-    Ok(document)
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -585,6 +518,64 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("cannot be the base"), "{err}");
+    }
+
+    /// The shape `awiki` and `anpio-key` verify: base58-btc `proofValue`, the document's
+    /// `@context` folded into the signing input, and no proof-level `@context` in the artifact.
+    ///
+    /// The verdict is `anp` 1.0.6's own binding check — the code path both of them run — not
+    /// a string match on the prefix.
+    #[test]
+    fn a_minted_document_binds_under_the_crate_verifier() {
+        let identity = mint("alice");
+        let document = &identity.did_document;
+        // The fold only happens when the document has one, so the fixture has to have it for
+        // this test to be about the case that used to fail.
+        let context = document
+            .get("@context")
+            .expect("the e1 document carries @context");
+
+        assert!(anp::authentication::validate_did_document_binding(document, true));
+        // Accepted as it stands: the canonical form is the first form the crate tries, so the
+        // fetch path never reaches its legacy re-encoding.
+        assert_eq!(document_in_crate_form(document), Some(document.clone()));
+
+        let proof = document["proof"].as_object().expect("the document carries a proof");
+        assert!(proof.get("@context").is_none(), "the proof must not restate @context");
+        let proof_value = proof["proofValue"].as_str().expect("a proofValue");
+        let signature = bs58::decode(proof_value.strip_prefix('z').expect("base58-btc multibase"))
+            .into_vec()
+            .expect("decodable base58-btc");
+        assert_eq!(signature.len(), 64);
+        assert_eq!(document["@context"], *context);
+    }
+
+    /// The same on a document with no `@context` — the branch where there is nothing to fold.
+    #[test]
+    fn a_document_without_a_context_binds_too() {
+        let identity = mint("alice");
+        let mut bare = without_proof(&identity.did_document);
+        bare.as_object_mut().unwrap().remove("@context");
+        let key1 = load_stored_key(&identity.keys["key-1"]).unwrap();
+
+        let signed = resign_document(&bare, &identity.did, &key1).unwrap();
+
+        assert!(anp::authentication::validate_did_document_binding(&signed, true));
+        assert!(!signed["proof"].as_object().unwrap().contains_key("@context"));
+    }
+
+    /// Re-proving does not touch the document's own `@context`: it is folded into the signing
+    /// input and read back by the verifier, never moved or rewritten.
+    #[test]
+    fn re_proving_keeps_the_documents_context() {
+        let identity = mint("alice");
+        let key1 = load_stored_key(&identity.keys["key-1"]).unwrap();
+        let context = identity.did_document["@context"].clone();
+
+        let resigned = resign_document(&identity.did_document, &identity.did, &key1).unwrap();
+
+        assert_eq!(resigned["@context"], context);
+        assert!(anp::authentication::validate_did_document_binding(&resigned, true));
     }
 
     /// The test that matters: the hop this client builds is one the crate can **verify**.

@@ -13,9 +13,11 @@ import {
   didDocumentProofOptions,
   didDocumentProofPayload,
 } from './dataIntegrity'
-import { ed25519Fingerprint } from './fingerprint'
+import { ed25519Fingerprint, jcsCanonicalize } from './fingerprint'
 import { encodeMultibaseEd25519 } from './multicodec'
 import { buildBaseDidDocument } from './didDocument'
+import { sha256 } from '@noble/hashes/sha2.js'
+import { utf8 } from './encoding'
 
 function hex(text: string): Uint8Array {
   const out = new Uint8Array(text.length / 2)
@@ -39,6 +41,12 @@ function docFor(did?: string) {
 // base58btc), not by this SDK. It pins the whole encoding chain at once: the JCS
 // payload, the Ed25519 signature, and the multibase `z…` base58btc wrapper.
 //
+// The payload includes the document's `@context` folded into the proof options, as
+// eddsa-jcs-2022 Create Proof requires. The vector this replaced was computed
+// WITHOUT that fold, which is why documents minted by the Rust client (canonical,
+// folded) verified nowhere in this SDK. The same Python harness reproduces the old
+// unfolded payload byte-for-byte, so the fold is the only difference.
+//
 // Seed 0x01..0x20; did:wba path with the matching e1_ fingerprint; proof created
 // 2026-01-01T00:00:00Z over the base document below.
 const VECTOR = {
@@ -47,9 +55,9 @@ const VECTOR = {
   publicKeyMultibase: 'z6MkneMkZqwqRiU5mJzSG3kDwzt9P8C59N4NGTfBLfSGE7c7',
   created: '2026-01-01T00:00:00Z',
   payloadHex:
-    '4bcd3bc5f97f66b69f1ac871ee70bd519e03fc25f46a8116c1702a96841a8b93' +
+    '5930666c16fb93aa2554d13cc7a6ecde893509dbcd6496baa359ef85becbe282' +
     'eaf53fff28ed5febbdae39599aa4acc83143786dad9c1219cb05b2fc36431306',
-  proofValue: 'zg1pf7bhsMXuHmsBa8BCoLLFL6WLaVF47c1PitEYhSuHrcPvaU9dBmFYtk7VATx8EtND5DassWaVaZsYVUMP8FiE',
+  proofValue: 'z2PLpEWPLUVatY5ZQMtrGPmgETc7CsdJR7CvoM36Fj5xL8dE8Cf7nhVBszNkN7GAnZJ5JsifRhdDciAU17uFWtVof',
 }
 
 describe('eddsa-jcs-2022 fixed vector (N3)', () => {
@@ -164,6 +172,48 @@ describe('signDidDocumentProof (eddsa-jcs-2022)', () => {
       domain: 'example.com',
       challenge: 'abc',
     })
+  })
+
+  // eddsa-jcs-2022 Create Proof: the document's `@context` is part of what the
+  // signature covers, even though it is never restated inside the proof. Without
+  // this, a document signed by any conformant implementation (the Rust client, the
+  // `anp` crate, anpio-key) verifies nowhere in this SDK.
+  it("folds the document's @context into the hashed options, and only there", () => {
+    const { priv, keyid, doc } = docFor()
+    const base = didDocumentProofOptions(keyid, { created: '2026-01-01T00:00:00Z' })
+    const proof = signDidDocumentProofSync(doc, keyid, priv, { created: '2026-01-01T00:00:00Z' })
+
+    // Same bytes as hashing the options WITH the @context written in explicitly.
+    expect(didDocumentProofPayload(base, doc)).toEqual(
+      didDocumentProofPayload({ ...base, '@context': doc['@context'] }, doc),
+    )
+    // …and NOT the bytes of the unfolded form, which is what the old vector pinned.
+    const bare = { ...doc }
+    delete bare['@context']
+    expect(didDocumentProofPayload(base, bare)).not.toEqual(didDocumentProofPayload(base, doc))
+
+    // The fold is hashing-only: the artifact keeps pointing at the document's context
+    // by not carrying one of its own.
+    expect(proof).not.toHaveProperty('@context')
+    expect({ ...doc, proof }).toMatchObject({ '@context': doc['@context'] })
+    expect(verifyDidDocumentProof({ ...doc, proof }, { did: doc.id as string })).toBe(true)
+  })
+
+  it('rejects a proof made over the options WITHOUT the @context fold', () => {
+    // The legacy shape this SDK used to emit: sign the unfolded payload, attach it to
+    // a document that has an `@context`. It must not verify — otherwise the two
+    // signed byte strings would both be accepted and the format would still be
+    // ambiguous.
+    const { priv, keyid, doc } = docFor()
+    const options = didDocumentProofOptions(keyid, { created: '2026-01-01T00:00:00Z' })
+    const unfolded = new Uint8Array(64)
+    unfolded.set(sha256(utf8(jcsCanonicalize(options))), 0)
+    unfolded.set(sha256(utf8(jcsCanonicalize(doc))), 32)
+    const legacy = {
+      ...doc,
+      proof: { ...options, proofValue: encodeProofValue(ed25519.sign(unfolded, priv)) },
+    }
+    expect(verifyDidDocumentProof(legacy, { did: doc.id as string })).toBe(false)
   })
 })
 

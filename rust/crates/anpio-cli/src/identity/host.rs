@@ -24,6 +24,14 @@ use super::store::Identity;
 /// alias the server keeps. The profile surface is a separate path with its own method set
 /// (`get_me` / `update_me`), which is why the nickname lives there and not under `did-auth`.
 const DID_AUTH_PATH: &str = "/user-service/v1/did-auth/rpc";
+
+/// The client version every user-service call carries. awiki.ai answers
+/// `-32004 client.upgrade_required` when the header is missing, and its grammar only
+/// knows three product names — `awiki-me`, `awiki-cli`, `awiki-daemon` — so a client
+/// that is not one of them presents itself as the CLI-shaped one. The value is the
+/// minimum awiki.ai currently accepts (the same one `anpio-extension` sends); bump it
+/// when the service raises the bar, or every call starts being refused again.
+const CLIENT_VERSION: &str = "awiki-cli/0815/1.0.58";
 const PROFILE_PATH: &str = "/user-service/v1/did/profile/rpc";
 /// The credential-free view of a profile, by DID. See [`fetch_public_profile`].
 const PUBLIC_PROFILE_PATH: &str = "/user-service/v1/users";
@@ -118,7 +126,10 @@ async fn call(
         "method": method,
         "params": params,
     });
-    let mut request = client.post(url.clone()).json(&body);
+    let mut request = client
+        .post(url.clone())
+        .header("x-awiki-client-version", CLIENT_VERSION)
+        .json(&body);
     if let Some(token) = token {
         request = request.bearer_auth(token);
     }
@@ -193,19 +204,27 @@ impl Issued {
 /// `register` is idempotent for a DID already on file only in the sense that it is refused
 /// as a conflict — a re-register after a lost response needs `update_document`, which is
 /// what `did publish` is for.
-pub async fn register_identity(client: &reqwest::Client, base: &Url, identity: &Identity) -> Result<Issued> {
-    let result = call(
-        client,
-        base,
-        DID_AUTH_PATH,
-        "register",
-        json!({
-            "handle": identity.handle,
-            "did_document": identity.did_document,
-        }),
-        None,
-    )
-    .await?;
+///
+/// `email` is the address the handle is registered under. awiki.ai's production
+/// registration is "one self-signed document + an email" (`anpio-extension`'s
+/// `registerDidDocument` sends exactly these three fields), and a host that wants one
+/// refuses the call without it; a host that does not care ignores the field. Sending it
+/// is not verification — the `auth/email-status` / `auth/email-send` round trip is what
+/// proves the address, and this client does not run it.
+pub async fn register_identity(
+    client: &reqwest::Client,
+    base: &Url,
+    identity: &Identity,
+    email: Option<&str>,
+) -> Result<Issued> {
+    let mut params = json!({
+        "handle": identity.handle,
+        "did_document": identity.did_document,
+    });
+    if let Some(email) = email {
+        params["email"] = Value::String(email.to_string());
+    }
+    let result = call(client, base, DID_AUTH_PATH, "register", params, None).await?;
     Ok(Issued::from_result(result))
 }
 

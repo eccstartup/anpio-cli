@@ -11,7 +11,7 @@ rust-version = "1.88.0"
 # The Rust client (`anpio-cli`) is a separate thing from the TS service and the
 # TS CLI (TODO5 §0). It talks to the official `anp` crate, pinned (TODO5 §0.1 #4).
 [workspace.dependencies]
-anp = "1.0.5"
+anp = "=1.0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # The host's `update_document` is CAS'd on `sha256:` of the **JCS** (RFC 8785) form of the
