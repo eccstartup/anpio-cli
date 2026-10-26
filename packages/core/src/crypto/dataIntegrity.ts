@@ -79,19 +79,39 @@ export function didDocumentProofOptions(
   return proofOptions
 }
 
-/** The 64-byte payload signed by eddsa-jcs-2022: sha256(jcs(options)) || sha256(jcs(doc)). */
+/** The 64-byte payload signed by eddsa-jcs-2022: sha256(jcs(options)) || sha256(jcs(doc)).
+ *
+ *  eddsa-jcs-2022 (Create Proof, step 2 / Verify Proof, step 2) folds the document's
+ *  `@context` into the proof options BEFORE hashing: "if `unsecuredDocument.@context`
+ *  is present, set `proof.@context` to `unsecuredDocument.@context`". Leaving it out
+ *  makes a document with an `@context` sign — and verify — over bytes no other
+ *  implementation computes, which is exactly how the Rust client's canonical
+ *  documents were rejected here as `key_unresolved`. The folded copy is only hashed;
+ *  it is never written back into the proof (see `signDidDocumentProof`). */
 export function didDocumentProofPayload(
   proofOptions: Record<string, unknown>,
   doc: Record<string, unknown>,
 ): Uint8Array {
   const withoutProof: Record<string, unknown> = {}
   for (const [k, v] of Object.entries(doc)) if (k !== 'proof') withoutProof[k] = v
-  const optionsHash = sha256(utf8(jcsCanonicalize(proofOptions)))
+  const options = withDocumentContext(proofOptions, doc)
+  const optionsHash = sha256(utf8(jcsCanonicalize(options)))
   const docHash = sha256(utf8(jcsCanonicalize(withoutProof)))
   const toBeSigned = new Uint8Array(64)
   toBeSigned.set(optionsHash, 0)
   toBeSigned.set(docHash, 32)
   return toBeSigned
+}
+
+/** The proof options as eddsa-jcs-2022 hashes them: a copy carrying the document's
+ *  `@context` when it has one. The document's value wins over anything already in
+ *  the proof — that is the algorithm — and the input is never mutated. */
+function withDocumentContext(
+  proofOptions: Record<string, unknown>,
+  doc: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!('@context' in doc)) return proofOptions
+  return { ...proofOptions, '@context': doc['@context'] }
 }
 
 /** Produce a signed `eddsa-jcs-2022` proof for `doc`. The returned object is the
