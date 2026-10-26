@@ -44,8 +44,9 @@ impl Signer {
     /// same value (`anpio-key`'s own recommendation). The local arm keeps the crate's
     /// established behavior — a random signature parameter — because nothing this client
     /// has verified depends on the two being equal.
-    // Seven names, one signature: the DAEMON.md ANP-02 signing base is fixed, so the
-    // parameters are not this function's to group.
+    // One argument per thing a signature names. Grouping them would only move the same
+    // seven values into a struct at each of the two call sites, and the two arms already
+    // disagree about which they need (`keyid` is local-only, `nonce` daemon-only).
     #[allow(clippy::too_many_arguments)]
     pub fn sign_headers(
         &self,
