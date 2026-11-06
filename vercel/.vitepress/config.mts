@@ -8,8 +8,26 @@
 // carries at least one Mermaid diagram (architecture, flow or sequence), so the
 // Mermaid plugin is part of the config rather than an optional flourish.
 
+import fs from 'node:fs'
+import path from 'node:path'
 import { defineConfig } from 'vitepress'
 import { withMermaid } from 'vitepress-plugin-mermaid'
+
+const FRONTMATTER_RE = /^---\r?\n[\s\S]*?\r?\n---\r?\n?/
+
+// The built site no longer serves the .md files, so stash each page's Markdown in its
+// page data for the Copy for Agent button to read at runtime.
+function readAgentMarkdown(filePath: string | undefined, srcDir: string) {
+  if (!filePath) return undefined
+  try {
+    return fs
+      .readFileSync(path.join(srcDir, filePath), 'utf8')
+      .replace(FRONTMATTER_RE, '')
+      .trimStart()
+  } catch {
+    return undefined
+  }
+}
 
 const REPO = 'https://github.com/eccstartup/anpio-cli'
 const DESCRIPTION =
@@ -161,6 +179,10 @@ export default withMermaid(
     title: 'anpio-cli',
     description: DESCRIPTION,
     cleanUrls: true,
+    transformPageData(pageData, { siteConfig }) {
+      const agentMarkdown = readAgentMarkdown(pageData.filePath, siteConfig.srcDir)
+      if (agentMarkdown) return { agentMarkdown }
+    },
     // Every page uses `<did>`, `<group_did>` and `<object_id>` as placeholders. With HTML
     // parsing on, `<dir>`-shaped ones become tags while `<upload_uri>` stays literal; off,
     // all of them are escaped the same way. No page here uses raw HTML.
