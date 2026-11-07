@@ -22,6 +22,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use anp::PublicKeyMaterial;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -30,6 +31,11 @@ use serde_json::Value;
 pub const BINARY_ENV: &str = "ANPIOCLI_ANPIO_KEY";
 
 const DEFAULT_BINARY: &str = "anpio-key";
+
+/// The protected configuration `anpio-key` itself defaults to. `key grant` records it
+/// beside the grant id so a later signing command reaches the same surface the
+/// administrator issued the grant on.
+pub const DEFAULT_PROTECTED_CONFIG: &str = "/etc/anpio-key/service.json";
 
 /// The purpose a device's own signature is made under (`ADAPTER.md` §11.6).
 ///
@@ -231,6 +237,12 @@ pub struct AnpioKey {
     /// (binding) key for the DID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kid: Option<String>,
+    /// The key's name inside `anpio-key` (`key create`). A named key has no DID of its
+    /// own: the DID belongs to this identity, and the daemon only learns it from the
+    /// `keyid` it is asked to sign under. Absent for identities attached before named
+    /// keys existed, and for ones whose key is addressed by DID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// The administrator-owned protected configuration (`anpio-key data --config`). When
     /// set, capabilities are negotiated on that protected surface; absent means the
     /// development socket named by `root` / `socket`.
@@ -325,7 +337,7 @@ fn runway_plan(status: &GrantStatus, now: i64) -> Result<bool> {
         bail!(
             "anpio-key reports grant {} as {} with {} of {} uses left, so this command's first \
              signature would already fail. Ask the anpio-key administrator for a fresh grant, \
-             then: anpio-cli did attach-anpio-key --grant <grant-id>",
+             then: anpio-cli did attach --grant <grant-id>",
             status.grant_id,
             status.state,
             status.remaining_uses(),
@@ -610,15 +622,123 @@ impl AnpioKey {
         if let Some(device) = &self.device {
             parts.push(format!("device {device}"));
         }
-        let key = match &self.kid {
-            Some(kid) => kid.clone(),
-            None => "the default key".to_string(),
+        let key = match (&self.name, &self.kid) {
+            (Some(name), _) => format!("key {name}"),
+            (None, Some(kid)) => kid.clone(),
+            (None, None) => "the default key".to_string(),
         };
         if parts.is_empty() {
             format!("anpio-key, {key}")
         } else {
             format!("anpio-key, {key} ({})", parts.join(", "))
         }
+    }
+
+    /// Whether the key is addressed by name rather than by a DID the daemon published.
+    pub fn is_named(&self) -> bool {
+        self.name.is_some()
+    }
+
+    /// Mint a key through `anpio-key key create --json`.
+    ///
+    /// No private material comes back: the daemon writes its own envelope, showing the
+    /// recovery words and reading the passphrase on the controlling terminal. This process
+    /// only learns the name and the public key, which is exactly what the identity needs.
+    pub fn create_named(&self) -> Result<NamedKey> {
+        let bytes = self.invoke(&["key".to_string(), "create".to_string(), "--json".to_string()])?;
+        parse_named_key(&bytes)
+    }
+
+    /// The fingerprint `anpio-key` records for the named key, if it holds one.
+    ///
+    /// Used by `did attach`: a DID's last segment *is* its root key's fingerprint, so a
+    /// matching thumbprint is what makes the name sufficient to identify the key the
+    /// identity signs with. `None` means this machine holds no key under that name.
+    pub fn named_thumbprint(&self, name: &str) -> Result<Option<String>> {
+        Ok(self
+            .named_keys()?
+            .into_iter()
+            .find(|(held, _)| held == name)
+            .map(|(_, thumbprint)| thumbprint))
+    }
+
+    /// The name of the key whose fingerprint is the one `did` ends in, if there is one.
+    ///
+    /// A record written before keys had names carries no name; the DID still identifies the
+    /// key, because its last segment is that key's fingerprint. This is how such a record
+    /// finds its name again after the daemon stopped answering by DID.
+    pub fn named_key_for(&self, did: &str) -> Result<Option<String>> {
+        let fingerprint = did.rsplit(':').next().unwrap_or_default();
+        Ok(self
+            .named_keys()?
+            .into_iter()
+            .find(|(_, thumbprint)| thumbprint == fingerprint)
+            .map(|(name, _)| name))
+    }
+
+    /// `(name, thumbprint)` for every named key `anpio-key` lists, in its own order.
+    fn named_keys(&self) -> Result<Vec<(String, String)>> {
+        let bytes = self.invoke(&[
+            "key".to_string(),
+            "list".to_string(),
+            "--json".to_string(),
+        ])?;
+        let rows: Vec<Value> = serde_json::from_slice(&bytes)
+            .context("anpio-key key list --json did not print a JSON array")?;
+        Ok(rows
+            .iter()
+            .filter_map(|row| {
+                let name = row.get("name").and_then(Value::as_str)?;
+                let thumbprint = row.get("thumbprint").and_then(Value::as_str)?;
+                (!name.is_empty()).then(|| (name.to_string(), thumbprint.to_string()))
+            })
+            .collect())
+    }
+
+    /// Ask `anpio-key` to proof a document built here, under `keyid`.
+    ///
+    /// The daemon verifies that the keyid's `e1_` segment is this envelope's fingerprint and
+    /// that the document's `id` names the same DID, then signs the document exactly as it
+    /// was handed over. This is the one document-signing path a named key has: `document
+    /// --did` cannot address a key that has no DID.
+    pub fn sign_document(&self, keyid: &str, document: &Value) -> Result<Value> {
+        let name = self.name.as_deref().ok_or_else(|| {
+            anyhow!("this anpio-key custody names no key, so there is nothing to sign the document with")
+        })?;
+        let input = write_temp_json(&serde_json::to_vec(document)?)?;
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|value| value.as_nanos())
+            .unwrap_or_default();
+        let output = std::env::temp_dir().join(format!(
+            "anpio-cli-signed-document-{}-{stamp}.json",
+            std::process::id()
+        ));
+        let args = vec![
+            "key".to_string(),
+            "sign-document".to_string(),
+            "--name".to_string(),
+            name.to_string(),
+            "--keyid".to_string(),
+            keyid.to_string(),
+            "--document".to_string(),
+            input.display().to_string(),
+            "--out".to_string(),
+            output.display().to_string(),
+        ];
+        let result = self.invoke(&args);
+        let _ = fs::remove_file(&input);
+        result?;
+        let bytes = fs::read(&output).with_context(|| {
+            format!(
+                "anpio-key reported a signed document but did not write {}",
+                output.display()
+            )
+        });
+        let _ = fs::remove_file(&output);
+        let signed = serde_json::from_slice(&bytes?)
+            .context("anpio-key wrote a signed document that is not JSON")?;
+        Ok(signed)
     }
 
     /// What this daemon can do, asking it only when no cached answer exists.
@@ -689,6 +809,15 @@ impl AnpioKey {
     /// already reflected there, and a cached document would make this client sign with a
     /// keyid the current document no longer names.
     pub fn document(&self, did: &str) -> Result<Value> {
+        if self.config.is_none() {
+            if let Some(name) = &self.name {
+                bail!(
+                    "key {name} is addressed by name and has no DID of its own, so anpio-key \
+                     publishes no document for {did}; the signed document in identity.json is \
+                     the one to use"
+                );
+            }
+        }
         let mut args = vec!["document".to_string(), "--did".to_string(), did.to_string()];
         if let Some(socket) = &self.socket {
             args.push("--socket".to_string());
@@ -711,32 +840,48 @@ impl AnpioKey {
     /// The body goes through a private temporary file because that is the daemon's input
     /// contract (`--body` takes a path, not text), and the daemon computes `Content-Digest`
     /// over the bytes it reads — the same bytes this client will put on the wire.
+    ///
+    /// Three surfaces, one decision each: a protected identity signs through `SIGN_HTTP`
+    /// under its grant; a named key on the development socket passes `--key` + `--keyid`
+    /// (the daemon checks the keyid's fingerprint against the envelope); an attached
+    /// DID-keyed identity keeps the `--did` path it has always used.
     pub fn sign_headers(
         &self,
         did: &str,
+        keyid: &str,
         method: &str,
         url: &str,
         body: Option<&[u8]>,
         nonce: Option<&str>,
     ) -> Result<BTreeMap<String, String>> {
+        if self.config.is_some() {
+            return self.sign_http_protected(method, url, body, nonce);
+        }
         let body_file = match body {
             Some(bytes) => Some(write_temp_json(bytes)?),
             None => None,
         };
 
-        let mut args = vec![
-            "sign".to_string(),
-            "--did".to_string(),
-            did.to_string(),
-            "--method".to_string(),
-            method.to_string(),
-            "--url".to_string(),
-            url.to_string(),
-        ];
-        if let Some(kid) = &self.kid {
-            args.push("--kid".to_string());
-            args.push(kid.clone());
-        }
+        let mut args = if let Some(name) = &self.name {
+            vec![
+                "sign".to_string(),
+                "--key".to_string(),
+                name.clone(),
+                "--keyid".to_string(),
+                keyid.to_string(),
+            ]
+        } else {
+            let mut args = vec!["sign".to_string(), "--did".to_string(), did.to_string()];
+            if let Some(kid) = &self.kid {
+                args.push("--kid".to_string());
+                args.push(kid.clone());
+            }
+            args
+        };
+        args.push("--method".to_string());
+        args.push(method.to_string());
+        args.push("--url".to_string());
+        args.push(url.to_string());
         if let Some(nonce) = nonce {
             args.push("--nonce".to_string());
             args.push(nonce.to_string());
@@ -755,6 +900,50 @@ impl AnpioKey {
             let _ = fs::remove_file(path);
         }
         parse_signed_headers(&result?, did)
+    }
+
+    /// One `SIGN_HTTP` request on the protected surface.
+    ///
+    /// The grant is the authorization for this exact target and method; the daemon checks
+    /// it against its policy, reserves one use, and signs with the key the grant names.
+    /// `content-type` is carried into the request because the daemon covers it whenever a
+    /// body is present, and this client sends the same header on the wire.
+    fn sign_http_protected(
+        &self,
+        method: &str,
+        url: &str,
+        body: Option<&[u8]>,
+        nonce: Option<&str>,
+    ) -> Result<BTreeMap<String, String>> {
+        let grant = self.grant_id()?.to_string();
+        let request_id = crate::message::uuid_v4();
+        let mut headers = BTreeMap::new();
+        if body.is_some() {
+            headers.insert("content-type".to_string(), "application/json".to_string());
+        }
+        let body = match body {
+            Some(bytes) => serde_json::json!({"state": "present", "bytes": bytes}),
+            None => serde_json::json!({"state": "absent"}),
+        };
+        let request = serde_json::json!({
+            "operation": "SIGN_HTTP",
+            "grant_id": grant,
+            "request_id": request_id,
+            "http": {
+                "method": method,
+                "url": url,
+                "headers": headers,
+                "body": body,
+                "nonce": nonce,
+            },
+        });
+        let data = self.protected_request(&request)?;
+        let result = signing_result(data, "SIGN_HTTP", &request_id)?;
+        let headers = result.get("headers").cloned().ok_or_else(|| {
+            anyhow!("anpio-key answered SIGN_HTTP without the headers it signed")
+        })?;
+        serde_json::from_value(headers)
+            .context("anpio-key returned SIGN_HTTP headers this client cannot read")
     }
 
     /// The request one `SIGN_ORIGIN_PROOF` sends, as the daemon reads it.
@@ -939,7 +1128,7 @@ impl AnpioKey {
         if self.config.is_none() {
             bail!(
                 "{did} reaches anpio-key over its development socket, which cannot make {}. \
-                 Re-run: anpio-cli did attach-anpio-key --config <service.json>",
+                 Re-run: anpio-cli did attach --config <service.json>",
                 operation.purpose()
             );
         }
@@ -947,7 +1136,7 @@ impl AnpioKey {
             anyhow!(
                 "{did} has no anpio-key grant, so the daemon has no authorization for {}. Ask \
                  the anpio-key administrator for a grant that covers it, then re-run: \
-                 anpio-cli did attach-anpio-key --grant <grant-id>",
+                 anpio-cli did attach --grant <grant-id>",
                 operation.daemon_name()
             )
         })
@@ -967,7 +1156,7 @@ impl AnpioKey {
         let config = self.config.as_ref().ok_or_else(|| {
             anyhow!(
                 "this anpio-key identity names no protected config, so {operation} cannot be \
-                 requested; re-run: anpio-cli did attach-anpio-key --config <service.json>"
+                 requested; re-run: anpio-cli did attach --config <service.json>"
             )
         })?;
         let path = write_temp_json(&serde_json::to_vec(request)?)?;
@@ -1003,7 +1192,7 @@ impl AnpioKey {
         self.grant.as_deref().ok_or_else(|| {
             anyhow!(
                 "this anpio-key identity records no grant; ask the anpio-key administrator for \
-                 one, then re-run: anpio-cli did attach-anpio-key --grant <grant-id>"
+                 one, then re-run: anpio-cli did attach --grant <grant-id>"
             )
         })
     }
@@ -1158,7 +1347,7 @@ impl AnpioKey {
         let output = Command::new(DEFAULT_BINARY).args(args).output().map_err(|err| {
             anyhow!(
                 "could not run {DEFAULT_BINARY}: {err}. The protected entry uses the installed \
-                 binary on PATH; install anpio-key or re-run: anpio-cli did attach-anpio-key"
+                 binary on PATH; install anpio-key or re-run: anpio-cli did attach"
             )
         })?;
         if !output.status.success() {
@@ -1171,6 +1360,78 @@ impl AnpioKey {
             );
         }
         Ok(output.stdout)
+    }
+}
+
+/// What `anpio-key key create --json` answers with.
+///
+/// `public_multibase` is the daemon's public key in the same `z`+base58btc+`0xed01`
+/// encoding a DID document carries, so the document built here publishes exactly the key
+/// the daemon holds.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct NamedKey {
+    pub name: String,
+    pub thumbprint: String,
+    pub public_multibase: String,
+    #[serde(default)]
+    pub algorithm: Option<String>,
+}
+
+fn parse_named_key(bytes: &[u8]) -> Result<NamedKey> {
+    let key: NamedKey = serde_json::from_slice(bytes)
+        .context("anpio-key's `key create --json` answer is not a key description")?;
+    if key.name.trim().is_empty() || key.public_multibase.trim().is_empty() {
+        bail!("anpio-key reported a key with no name or no public key");
+    }
+    Ok(key)
+}
+
+/// Decode the `z`-prefixed multibase key anpio-key reports into the public key an `anp`
+/// document builder takes.
+pub fn ed25519_public_key(public_multibase: &str, name: &str) -> Result<PublicKeyMaterial> {
+    let encoded = public_multibase.strip_prefix('z').ok_or_else(|| {
+        anyhow!(
+            "anpio-key reported key {name}'s public key as {public_multibase:?}, which is not \
+             base58btc (a leading `z`)"
+        )
+    })?;
+    let bytes = bs58::decode(encoded)
+        .into_vec()
+        .with_context(|| format!("anpio-key reported key {name}'s public key in a form that is not base58btc"))?;
+    if bytes.len() != 34 || bytes[0] != 0xed || bytes[1] != 0x01 {
+        bail!(
+            "anpio-key reported key {name}'s public key as {} bytes of multicodec {:?}, not an \
+             Ed25519 key (0xed01 + 32 bytes)",
+            bytes.len(),
+            bytes.get(..2)
+        );
+    }
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&bytes[2..]);
+    let verifying = ed25519_dalek::VerifyingKey::from_bytes(&key)
+        .map_err(|err| anyhow!("anpio-key reported key {name}'s public key, but it is not a valid Ed25519 point: {err}"))?;
+    Ok(PublicKeyMaterial::Ed25519(verifying))
+}
+
+/// Whether this process has a controlling terminal to prompt on.
+///
+/// `--key anpio-key` mints a key and proofs a document: both read the passphrase (and show
+/// the recovery words) on `/dev/tty`, and both are the administrator's own actions. Without
+/// a terminal this client refuses before anything is written, rather than falling back to
+/// a local key — a fallback would be the quiet downgrade the second line exists to prevent.
+pub fn controlling_terminal() -> bool {
+    #[cfg(unix)]
+    {
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/tty")
+            .is_ok()
+    }
+    #[cfg(not(unix))]
+    {
+        use std::io::IsTerminal;
+        std::io::stdin().is_terminal()
     }
 }
 

@@ -131,7 +131,7 @@ pub fn device_signer(identity: &Identity) -> Result<DeviceSigner> {
         let device = key.device.as_deref().ok_or_else(|| {
             AnpioError::MessageInvalid(format!(
                 "{} has no anpio-key device binding, so group E2EE has no key to sign with; \
-                 re-run: anpio-cli did attach-anpio-key --device <device-id>",
+                 re-run: anpio-cli did attach --device <device-id>",
                 identity.did
             ))
         })?;
@@ -194,7 +194,7 @@ fn device_signing_method(
         .ok_or_else(|| {
             AnpioError::MessageInvalid(format!(
                 "{did} publishes no {device}-sign entry; re-run: anpio-cli \
-                 did attach-anpio-key --device <device-id> with a name the document knows"
+                 did attach --device <device-id> with a name the document knows"
             ))
         })?;
     let public_multibase = method

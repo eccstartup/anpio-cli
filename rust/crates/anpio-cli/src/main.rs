@@ -6,7 +6,7 @@
 //! store — lives in the library; what is here parses arguments, calls in, and renders.
 
 use anyhow::Context as _;
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use reqwest::Url;
 use serde_json::{json, Map, Value};
 use std::path::PathBuf;
@@ -25,9 +25,13 @@ use anpio_cli::group_e2ee::{
 };
 use anpio_cli::anp::login::login;
 use anpio_cli::anp::{LoginError, Superseded};
-use anpio_cli::custody::{document_has_key, document_keyids, split_did, AnpioKey, Operation};
+use anpio_cli::custody::{
+    controlling_terminal, document_has_key, document_keyids, ed25519_public_key, split_did,
+    AnpioKey, Operation, DEFAULT_PROTECTED_CONFIG,
+};
 use anpio_cli::identity::{
-    check_handle, clear_pending, create_identity, current_agent_path, deliver, describe_status,
+    build_external_identity, check_handle, clear_pending, create_identity, current_agent_path,
+    deliver, describe_status,
     document_hash, document_is_superseded,
     email_verified, fetch_host_service, fetch_profile, fetch_public_profile, list_identities,
     load_pending, load_session, load_stored_key,
@@ -39,8 +43,8 @@ use anpio_cli::identity::{
     successor_of, superseded_refusal_text, update_document, update_profile, wait_for_email,
     without_proof, Accepted, ChainError,
     ChainResolution, Custody, HandleDecision, Supersession,
-    CreateIdentityInput, Hop, Identity, IdentityLocation, Issued, SessionWrite, UpdateError,
-    DEFAULT_SESSION_TTL_SECONDS,
+    CreateIdentityInput, ExternalIdentity, Hop, Identity, IdentityLocation, Issued, SessionWrite,
+    UpdateError, DEFAULT_SESSION_TTL_SECONDS,
 };
 use anpio_cli::message::{
     build_message_request, call, call_device, call_extension, call_group, decode_message, device_of,
@@ -91,6 +95,45 @@ struct Cli {
     command: Command,
 }
 
+/// Where an identity's private key lives.
+///
+/// This is the one choice `did create` makes about custody. Everything else — the host,
+/// the handle, the document, registration — is the same on either line.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+enum KeyProvider {
+    /// A key this store mints and keeps as a `0600` file. No daemon, no grant.
+    #[default]
+    Local,
+    /// A named key inside `anpio-key`. The CLI mints it through the daemon and never sees
+    /// the private half; signing is authorized separately with a grant.
+    AnpioKey,
+}
+
+#[derive(Subcommand)]
+enum KeyCommand {
+    /// Record an anpio-key grant in an identity, so later signatures use it.
+    ///
+    /// The grant is the administrator's decision (`anpio-key grant create`); this command
+    /// only writes its id beside the key name the identity already holds, and nothing is
+    /// expanded by it. A grant that expired, was spent, or never covered this target is
+    /// refused by the daemon at signing time, with its own code.
+    Grant {
+        /// The grant id `anpio-key grant create` printed.
+        grant_id: String,
+        /// `--agent` > `$ANPIOCLI_AGENT` > the current agent > `default`.
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
+        profile: Option<String>,
+        /// The protected configuration the grant was issued on. The ordinary value is
+        /// stored; this exists only for a daemon installed somewhere else.
+        #[arg(long, value_name = "PATH", hide = true)]
+        config: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Ask an ANP message service what it can do (P1 §8.2).
@@ -107,6 +150,11 @@ enum Command {
     Did {
         #[command(subcommand)]
         command: DidCommand,
+    },
+    /// The key behind an identity, on the anpio-key line: record its grant.
+    Key {
+        #[command(subcommand)]
+        command: KeyCommand,
     },
     /// Which local agent every later command acts as.
     ///
@@ -285,17 +333,36 @@ enum DidCommand {
         /// Skip the email round trip entirely, for a host that does not require it.
         #[arg(long)]
         no_email: bool,
+        /// Where the identity's private key lives.
+        ///
+        /// `local` (the default) mints a key in this store. `anpio-key` asks the daemon to
+        /// mint a named key and to proof the document; it must be run by a person at a
+        /// terminal, and signing stays unauthorized until the administrator issues a grant.
+        #[arg(long, value_enum, default_value_t = KeyProvider::Local)]
+        key: KeyProvider,
     },
-    /// Attach an identity whose key is held by an `anpio-key` daemon.
+    /// Re-attach an identity whose key is held by an `anpio-key` daemon.
     ///
-    /// The DID document comes from the daemon, not from a local key: this store keeps no
-    /// private bytes for such an identity. The ANP-02 commands (`anp sign`, `anp login`)
-    /// and the host's document surface work; message, group and DID-update commands need
-    /// signatures `anpio-key` does not make, and refuse by name.
-    AttachAnpioKey {
+    /// This is the recovery entry, not the way to create an identity: `did create --key
+    /// anpio-key` already records everything this command would ask for. Use it when the
+    /// store lost the record (a new machine, a wiped profile) and anpio-key still holds the
+    /// key.
+    ///
+    /// The DID document comes from the daemon, or from the DID's host for a named key: this
+    /// store keeps no private bytes for such an identity. The ANP-02 commands (`anp sign`,
+    /// `anp login`) and the host's document surface work; message, group and DID-update
+    /// commands need signatures `anpio-key` does not make, and refuse by name.
+    #[command(alias = "attach-anpio-key")]
+    Attach {
         /// The DID whose key anpio-key holds (`did:wba:…:e1_…`).
         #[arg(long)]
         did: String,
+        /// The key's name in anpio-key (`k-7f3a2c91`), as `key list` prints it.
+        ///
+        /// Required for a key minted by `did create --key anpio-key`: named keys carry no
+        /// DID of their own, so the name is the only way to address one.
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
         /// anpio-key's key directory (`--root`), when it is not `~/.anpio-key`.
         #[arg(long, value_name = "DIR")]
         key_root: Option<PathBuf>,
@@ -1129,6 +1196,7 @@ async fn main() -> anyhow::Result<()> {
                 reuse_key,
                 no_wait,
                 no_email,
+                key,
             } => {
                 cmd_did_create(
                     &host,
@@ -1139,11 +1207,13 @@ async fn main() -> anyhow::Result<()> {
                     reuse_key,
                     no_wait,
                     no_email,
+                    key,
                 )
                 .await
             }
-            DidCommand::AttachAnpioKey {
+            DidCommand::Attach {
                 did,
+                name,
                 key_root,
                 socket,
                 kid,
@@ -1155,20 +1225,24 @@ async fn main() -> anyhow::Result<()> {
                 profile,
                 force,
                 json,
-            } => cmd_did_attach_anpio_key(AttachArgs {
-                did,
-                key_root,
-                socket,
-                kid,
-                config,
-                grant,
-                device,
-                host,
-                agent,
-                profile,
-                force,
-                json,
-            }),
+            } => {
+                cmd_did_attach(AttachArgs {
+                    did,
+                    name,
+                    key_root,
+                    socket,
+                    kid,
+                    config,
+                    grant,
+                    device,
+                    host,
+                    agent,
+                    profile,
+                    force,
+                    json,
+                }, &allow_private)
+                .await
+            }
             DidCommand::Show {
                 agent,
                 profile,
@@ -1199,6 +1273,21 @@ async fn main() -> anyhow::Result<()> {
                 .await
             }
             DidCommand::Restore => cmd_did_restore(),
+        },
+        Command::Key { command } => match command {
+            KeyCommand::Grant {
+                grant_id,
+                agent,
+                profile,
+                config,
+                json,
+            } => cmd_key_grant(
+                &grant_id,
+                agent.as_deref(),
+                profile.as_deref(),
+                config,
+                json,
+            ),
         },
         Command::Agent { command } => match command {
             AgentCommand::Show { json } => cmd_agent_show(json),
@@ -1624,7 +1713,21 @@ async fn cmd_did_create(
     reuse_key: bool,
     no_wait: bool,
     no_email: bool,
+    key_provider: KeyProvider,
 ) -> anyhow::Result<()> {
+    // Line 2 mints its key and proofs its document on the controlling terminal, and both
+    // are the administrator's own actions. Refuse here, before the network or the store is
+    // touched, and never fall back to a local key: a quiet downgrade is the one thing
+    // `--key anpio-key` exists to rule out.
+    if key_provider == KeyProvider::AnpioKey && !controlling_terminal() {
+        anyhow::bail!(
+            "--key anpio-key mints the key and proofs the DID document through anpio-key, and \
+             both read the passphrase (and show the recovery words) on a terminal. Run it in \
+             an interactive shell as the anpio-key administrator — a local key would be a \
+             different identity, so this command will not switch to one"
+        );
+    }
+
     // The agent is NOT run through `resolve_agent_id`: `create` names a new identity, and
     // the current selection must not decide where a second one lands. No `--agent` means
     // the handle, which is what the DID path segment will be. The profile still resolves
@@ -1677,7 +1780,13 @@ async fn cmd_did_create(
                 HandleDecision::Unavailable => {
                     create_stage(2, &format!("Checking the handle {handle}"), "unavailable");
                     let pending = load_pending()?.is_some();
-                    print_unavailable_handle(handle, host, email.as_deref(), pending);
+                    print_unavailable_handle(
+                        handle,
+                        host,
+                        email.as_deref(),
+                        pending,
+                        key_provider,
+                    );
                     anyhow::bail!("the handle {handle} is not available on {host}");
                 }
             }
@@ -1695,33 +1804,101 @@ async fn cmd_did_create(
         service_did: service.service_did,
     };
 
-    let identity = if reuse_key {
-        let pending = load_pending()?.ok_or_else(|| {
-            anyhow::anyhow!(
-                "--reuse-key was given, but there is no pending key at {}. Run without \
-                 --reuse-key to mint one.",
-                pending_path().display()
-            )
-        })?;
-        if pending.custody.is_some() {
-            anyhow::bail!(
-                "the pending identity is held by anpio-key, not locally; retry with \
-                 --key anpio-key"
-            );
+    let identity = match (key_provider, reuse_key) {
+        (KeyProvider::Local, true) => {
+            let pending = load_pending()?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--reuse-key was given, but there is no pending key at {}. Run without \
+                     --reuse-key to mint one.",
+                    pending_path().display()
+                )
+            })?;
+            if pending.custody.is_some() {
+                anyhow::bail!(
+                    "the pending identity is held by anpio-key, not locally; retry with \
+                     --key anpio-key"
+                );
+            }
+            let identity = rebuild_identity(input, &pending.keys)?;
+            create_stage(3, "Reusing the pending key", "ok");
+            identity
         }
-        let identity = rebuild_identity(input, &pending.keys)?;
-        create_stage(3, "Reusing the pending key", "ok");
-        identity
-    } else {
-        let identity = create_identity(input)?;
-        create_stage(3, "Generating keys", "ok");
-        identity
+        (KeyProvider::Local, false) => {
+            let identity = create_identity(input)?;
+            create_stage(3, "Generating keys", "ok");
+            identity
+        }
+        // The pending record is the same file on either line, so a retry after a taken
+        // handle reuses the named key and signs the same public key into the new path.
+        (KeyProvider::AnpioKey, true) => {
+            let pending = load_pending()?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--reuse-key was given, but there is no pending key at {}. Run without \
+                     --reuse-key to ask anpio-key for one.",
+                    pending_path().display()
+                )
+            })?;
+            let name = match &pending.custody {
+                Some(Custody::AnpioKey(key)) => key.name.clone().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "the pending identity is held by anpio-key but records no key name; \
+                         there is nothing to reuse"
+                    )
+                })?,
+                _ => anyhow::bail!(
+                    "the pending identity is a local one; retry with --key local --reuse-key"
+                ),
+            };
+            let public_multibase = root_public_multibase(&pending.did_document).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "the pending document publishes no #key-1 public key, so the key cannot be \
+                     reused"
+                )
+            })?;
+            let external = build_external_identity(
+                &input,
+                ed25519_public_key(&public_multibase, &name)?,
+            )?;
+            let custody = AnpioKey {
+                name: Some(name.clone()),
+                ..Default::default()
+            };
+            let signed = custody
+                .sign_document(&format!("{}#key-1", external.did), &external.unsigned_document)?;
+            create_stage(3, "Reusing the key in anpio-key", &format!("ok   {name}"));
+            external_identity(input, external, signed, custody)
+        }
+        (KeyProvider::AnpioKey, false) => {
+            let named = AnpioKey::default().create_named()?;
+            create_stage(3, "Asking anpio-key to generate the key", &format!("ok   {}", named.name));
+            println!(
+                "      key: {} (kept by anpio-key; this identity records the name)",
+                named.name
+            );
+            let external = build_external_identity(
+                &input,
+                ed25519_public_key(&named.public_multibase, &named.name)?,
+            )?;
+            let custody = AnpioKey {
+                name: Some(named.name.clone()),
+                ..Default::default()
+            };
+            let signed = custody
+                .sign_document(&format!("{}#key-1", external.did), &external.unsigned_document)?;
+            external_identity(input, external, signed, custody)
+        }
     };
-    // Said once, at the only moment the boundary can still change the decision.
-    println!(
-        "      note: the private key is a 0600 file under {}; any code running as your user can read it.",
-        store_root().display()
-    );
+    match &identity.custody {
+        Some(Custody::AnpioKey(_)) => println!(
+            "      note: the private key is in anpio-key and never enters this store; signing \
+             stays unauthorized until an administrator issues a grant."
+        ),
+        // Said once, at the only moment the boundary can still change the decision.
+        None => println!(
+            "      note: the private key is a 0600 file under {}; any code running as your user can read it.",
+            store_root().display()
+        ),
+    }
     create_stage(4, "Building and signing the DID document", "ok");
 
     // The key is durable from here on, and stays durable if anything below fails.
@@ -1778,22 +1955,94 @@ async fn cmd_did_create(
             }
             create_stage(5, "Registering", "ok");
             println!("      registered  {}", identity.did);
-            println!(
-                "      signer: local key ({})",
-                location.identity_path().display()
-            );
+            println!("      signer: {}", identity.signer_line(&location));
+            if let Some(Custody::AnpioKey(key)) = &identity.custody {
+                let name = key.name.as_deref().unwrap_or("(unnamed)");
+                let target = format!(
+                    "{}/user-service/v1/did-auth/rpc",
+                    identity.did_host.trim_end_matches('/')
+                );
+                println!();
+                println!(
+                    "the key is in anpio-key; signing is authorized separately. As the \
+                     anpio-key administrator:"
+                );
+                println!(
+                    "  anpio-key grant create --key {name} --did {} \\",
+                    identity.did
+                );
+                println!("    --target {target}");
+                println!("then hand the grant id to this CLI once:");
+                // The identity landed under the handle, not under `default`, and `create`
+                // deliberately does not move the current agent — so name the agent here
+                // instead of printing a command that reads the wrong directory.
+                let profile = if location.profile == "default" {
+                    String::new()
+                } else {
+                    format!(" --profile {}", location.profile)
+                };
+                println!("  anpio-cli key grant <grant-id> --agent {}{profile}", location.agent);
+            }
             Ok(())
         }
         Err(err) => {
             eprintln!("      registration failed: {err:#}");
             eprintln!(
-                "      the key is kept at {}; retry the same handle, or another one with \
-                 --reuse-key, before minting a new key",
-                pending_path.display()
+                "      the key is kept in {}; retry the same handle, or another one with \
+                 --reuse-key{}, before minting a new key",
+                pending_path.display(),
+                if key_provider == KeyProvider::AnpioKey {
+                    " --key anpio-key"
+                } else {
+                    ""
+                }
             );
             Err(err)
         }
     }
+}
+
+/// The identity record for a key anpio-key holds: the daemon's proof over the document the
+/// CLI built, and an empty key map — there are no private bytes here to name.
+fn external_identity(
+    input: CreateIdentityInput,
+    external: ExternalIdentity,
+    signed_document: Value,
+    custody: AnpioKey,
+) -> Identity {
+    Identity {
+        did: external.did,
+        device_id: external.device_id,
+        agent: input.agent,
+        profile: input.profile,
+        handle: input.handle,
+        did_host: input.did_host_url,
+        created_at: now_rfc3339(),
+        keys: std::collections::BTreeMap::new(),
+        did_document: signed_document,
+        custody: Some(Custody::AnpioKey(custody)),
+    }
+}
+
+/// The `#key-1` public key a document publishes, in the multibase form anpio-key reports.
+///
+/// A pending identity carries no key material to reuse on line 2, so the retry reads the
+/// public key back out of the document the daemon proved: it is the same key, and its
+/// fingerprint is the DID's `e1_` segment.
+fn root_public_multibase(document: &Value) -> Option<String> {
+    document
+        .get("verificationMethod")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|method| {
+            method
+                .get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id.ends_with("#key-1"))
+        })?
+        .get("publicKeyMultibase")
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 /// One `[n/5]` stage line, with its outcome in a column.
@@ -1814,7 +2063,13 @@ fn fallback_full_handle(handle: &str, domain: &str) -> String {
     }
 }
 
-fn print_unavailable_handle(handle: &str, host: &str, email: Option<&str>, pending: bool) {
+fn print_unavailable_handle(
+    handle: &str,
+    host: &str,
+    email: Option<&str>,
+    pending: bool,
+    key_provider: KeyProvider,
+) {
     eprintln!("the handle {handle} is not available on {host}.");
     if pending {
         eprintln!("the key is kept; no new key will be minted. retry with another name:");
@@ -1823,20 +2078,25 @@ fn print_unavailable_handle(handle: &str, host: &str, email: Option<&str>, pendi
     }
     eprintln!();
     let email = email.map(|email| format!(" --email {email}")).unwrap_or_default();
+    let key = match key_provider {
+        KeyProvider::Local => "",
+        KeyProvider::AnpioKey => " --key anpio-key",
+    };
     eprintln!(
-        "  anpio-cli did create --host {host} --handle <another-name>{}{email}",
+        "  anpio-cli did create --host {host} --handle <another-name>{email}{key}{}",
         if pending { " --reuse-key" } else { "" }
     );
     eprintln!();
     eprintln!("if this is the name you want, release or recover it on {host} first.");
 }
 
-/// Everything `did attach-anpio-key` was given, in one value.
+/// Everything `did attach` was given, in one value.
 ///
-/// All twelve come from a single clap variant, so a parameter list would only be a second
+/// All of it comes from a single clap variant, so a parameter list would only be a second
 /// place for the same fields to drift.
 struct AttachArgs {
     did: String,
+    name: Option<String>,
     key_root: Option<PathBuf>,
     socket: Option<PathBuf>,
     kid: Option<String>,
@@ -1850,19 +2110,24 @@ struct AttachArgs {
     json: bool,
 }
 
-/// `did attach-anpio-key` — adopt a DID whose key lives in an `anpio-key` daemon.
+/// `did attach` — adopt a DID whose key lives in an `anpio-key` daemon.
 ///
-/// This is the only way an identity enters the store without private bytes: the daemon
-/// holds the key, publishes the document, and signs ANP-02 requests on request. Everything
-/// that needs the key *here* — an origin proof, an MLS device key, a DID-document proof —
-/// is refused by [`Custody::refuse`] at the command that would have needed it.
+/// This is the recovery entry, kept for a store that lost its record while anpio-key still
+/// holds the key. [`create_identity`]'s anpio-key line writes everything this command would
+/// ask for, so nobody should reach for it in the ordinary flow.
 ///
-/// The identity is created only after the daemon answers with a document naming this DID
-/// and carrying the key to be used, so a half-attached identity cannot be written: either
-/// the daemon holds the key, or the store is untouched.
-fn cmd_did_attach_anpio_key(args: AttachArgs) -> anyhow::Result<()> {
+/// It is the only way an identity enters the store without private bytes: the daemon holds
+/// the key, publishes the document, and signs ANP-02 requests on request. Everything that
+/// needs the key *here* — an origin proof, an MLS device key, a DID-document proof — is
+/// refused by [`Custody::refuse`] at the command that would have needed it.
+///
+/// The identity is created only after a document naming this DID and carrying the key to be
+/// used has been obtained, so a half-attached identity cannot be written: either the key is
+/// accounted for, or the store is untouched.
+async fn cmd_did_attach(args: AttachArgs, allow_private: &[String]) -> anyhow::Result<()> {
     let AttachArgs {
         did,
+        name,
         key_root,
         socket,
         kid,
@@ -1893,16 +2158,19 @@ fn cmd_did_attach_anpio_key(args: AttachArgs) -> anyhow::Result<()> {
         root: key_root,
         socket,
         kid,
+        name,
         config,
         grant,
         device: device.map(str::to_string),
         ..AnpioKey::default()
     };
 
-    // Fetching the document is the check that the daemon is reachable and actually holds
-    // this DID. No key bytes are fetched, because there are none to fetch. Which entry
-    // answers depends on the surface: the development socket publishes `document`, while
-    // the protected one reaches it through LIST_AUTHORIZED_KEYS + GET_DOCUMENT.
+    // Fetching the document is the check that the key is reachable and accounted for. No key
+    // bytes are fetched, because there are none to fetch. Which surface answers depends on
+    // the custody: the development socket publishes `document` by DID, the protected one
+    // reaches it through LIST_AUTHORIZED_KEYS + GET_DOCUMENT, and a named key has no DID of
+    // its own — so its document is the one the DID's host publishes, which is also the one
+    // verifiers fetch.
     let (document, keyid) = if key.config.is_some() {
         let (document, keyid) = key.authorized_document(did)?;
         if key.grant.is_some() {
@@ -1930,6 +2198,26 @@ fn cmd_did_attach_anpio_key(args: AttachArgs) -> anyhow::Result<()> {
         key.signing_purposes = capabilities
             .signing_purposes()
             .map(|purposes| purposes.into_iter().map(str::to_string).collect());
+        (document, keyid)
+    } else if key.is_named() {
+        let name = key.name.clone().unwrap_or_default();
+        let published = did.rsplit(':').next().unwrap_or_default().to_string();
+        let held = key.named_thumbprint(&name)?;
+        match held {
+            None => anyhow::bail!(
+                "anpio-key holds no key named {name}; `anpio-key key list` shows what this \
+                 machine has"
+            ),
+            Some(thumbprint) if thumbprint != published => anyhow::bail!(
+                "anpio-key's key {name} has fingerprint {thumbprint}, but {did} is built on \
+                 {published}; this is not the key that DID belongs to"
+            ),
+            Some(_) => {}
+        }
+        let client = http_client()?;
+        let policy = policy_for(&[did_host(did)?], allow_private);
+        let document = resolve_did_document(&client, did, &policy).await?;
+        let keyid = key.resolved_keyid(&document, did);
         (document, keyid)
     } else {
         let document = key.document(did)?;
@@ -2143,6 +2431,8 @@ fn cmd_anp_sign(own: &OwnIdentity, target: &str, method: &str, nonce: &str) -> a
     let location = own.location()?;
     let identity = Identity::load(&location)?;
     let signed = anpio_cli::anp::sign(&identity, target, method, nonce)?;
+    // stderr, so the signed request on stdout stays the machine-readable object callers parse.
+    eprintln!("signer: {}", identity.signer_line(&location));
     println!("{}", serde_json::to_string_pretty(&signed)?);
     Ok(())
 }
@@ -2169,7 +2459,9 @@ async fn cmd_anp_login(
     // signs through the same call as a stored one — and the document the peer compares
     // against is the one the key belongs to, not a copy in the store.
     let signing = identity.signing()?;
-
+    // Which key signs, said before the request goes out: with a daemon-held key the
+    // signature is an authorization decision, not a file read, and the line names both.
+    eprintln!("signer: {}", identity.signer_line(&location));
     // The allowlist is the bare host, but the token is cached — and named — under the authority
     // that issued it, port included: two servers on one machine are two different issuers.
     let policy_host = target_host(target)?;
@@ -2341,6 +2633,9 @@ fn cmd_did_show(agent: Option<&str>, profile: Option<&str>, json: bool) -> anyho
         }
         println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
+        // The first line answers the question a person actually has after a command ran
+        // somewhere else: where does this identity's key live, and who authorizes its use?
+        println!("key:        {}", identity.signer_line(&location));
         println!("did:        {}", identity.did);
         println!("device:     {}", identity.device_id);
         println!("handle:     {}", identity.handle);
@@ -2348,10 +2643,9 @@ fn cmd_did_show(agent: Option<&str>, profile: Option<&str>, json: bool) -> anyho
         println!("created:    {}", identity.created_at);
         match &identity.custody {
             // No key names to list: the point of custody is that there are no key bytes here
-            // to name. What the line can say is which daemon holds the key, and which proofs
-            // this build can actually ask it for.
+            // to name. What the line can say is which proofs this build can actually ask it
+            // for; the first line already said which key, and under which grant.
             Some(Custody::AnpioKey(key)) => {
-                println!("key:        held by {}", key.describe());
                 match key.capabilities() {
                     Ok(capabilities) => {
                         let effective = capabilities.effective();
@@ -2386,6 +2680,60 @@ fn cmd_did_show(agent: Option<&str>, profile: Option<&str>, json: bool) -> anyho
                 location.identity_path().display()
             );
         }
+    }
+    Ok(())
+}
+
+/// `key grant <id>` — write the administrator's grant into the identity.
+///
+/// The identity already names the key inside `anpio-key`; this adds which grant authorizes
+/// it, and the protected configuration the grant was issued on. Both land in
+/// `identity.json`, so a later signature needs neither a flag nor a second lookup.
+fn cmd_key_grant(
+    grant_id: &str,
+    agent: Option<&str>,
+    profile: Option<&str>,
+    config: Option<PathBuf>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let grant_id = grant_id.trim();
+    if grant_id.is_empty() {
+        anyhow::bail!("the grant id is empty");
+    }
+    let location = IdentityLocation::resolve(agent, profile)?;
+    let mut identity = Identity::load(&location)?;
+    let config = config.unwrap_or_else(|| PathBuf::from(DEFAULT_PROTECTED_CONFIG));
+    let key = match identity.custody.as_mut() {
+        Some(Custody::AnpioKey(key)) => key,
+        None => anyhow::bail!(
+            "{}/{} signs with a local key, so there is no grant to record: a grant authorizes \
+             a key inside anpio-key",
+            location.agent,
+            location.profile
+        ),
+    };
+    key.grant = Some(grant_id.to_string());
+    key.config = Some(config.clone());
+    // Read back before the save: the borrow of `identity` cannot outlive it.
+    let key_line = key.describe();
+    let name = key.name.clone();
+    identity.save(&location)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "did": identity.did,
+                "key": name,
+                "grant": grant_id,
+                "config": config.display().to_string(),
+                "signer": identity.signer_line(&location),
+            }))?
+        );
+    } else {
+        println!("grant {grant_id} recorded for {}", identity.did);
+        println!("  key:    {key_line}");
+        println!("  config: {}", config.display());
+        println!("  signer: {}", identity.signer_line(&location));
     }
     Ok(())
 }
@@ -2466,7 +2814,7 @@ async fn cmd_did_register(agent: Option<&str>, profile: Option<&str>, email: Opt
         },
     };
     // Registration publishes the document. For an `anpio-key` identity that document lives in
-    // the daemon, so it is read on the way in rather than from the snapshot `did attach-anpio-key`
+    // the daemon, so it is read on the way in rather than from the snapshot `did attach`
     // wrote — a key rotated since then would otherwise be registered as somebody else's.
     let identity = match &identity.custody {
         Some(Custody::AnpioKey(key)) => Identity {

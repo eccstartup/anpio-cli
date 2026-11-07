@@ -408,9 +408,12 @@ impl Custody {
 
     fn has_grant(&self, operation: Operation) -> bool {
         match self {
-            // The development surface's HTTP signing predates grants; every protected
-            // operation needs one.
-            Custody::AnpioKey(key) => operation == Operation::Http || key.grant.is_some(),
+            // The development surface's HTTP signing predates grants; on the protected
+            // surface the grant is the whole authorization, so it is required there.
+            Custody::AnpioKey(key) => match operation {
+                Operation::Http => key.config.is_none() || key.grant.is_some(),
+                _ => key.grant.is_some(),
+            },
         }
     }
 
@@ -450,7 +453,7 @@ impl Custody {
             format!(
                 "{command} needs {}. {daemon} announces {}, but this identity records no grant \
                  for it; ask the administrator to create one, then re-run: anpio-cli \
-                 did attach-anpio-key",
+                 did attach",
                 operation.purpose(),
                 operation.daemon_name()
             )
@@ -601,15 +604,59 @@ impl Identity {
     /// What signs for this identity, and the document the peer will verify against.
     ///
     /// The one place the two custody modes meet. A local identity's key is read here; an
-    /// `anpio-key` identity is handed to the daemon, which chooses and uses the key itself —
-    /// so `document` comes from the daemon too, not from the copy in this file.
+    /// `anpio-key` identity is handed to the daemon, which chooses and uses the key itself.
+    ///
+    /// Which document answers depends on the surface the identity names: a protected
+    /// identity has no `document` entry, so it is reached the way any other protected
+    /// client reaches it (`LIST_AUTHORIZED_KEYS` → `GET_DOCUMENT`); a named key has no DID
+    /// of its own, so the signed document this store holds is the only one there is; an
+    /// attached DID-keyed identity keeps the development `document` entry.
     pub fn signing(&self) -> Result<Signing> {
         match &self.custody {
-            Some(Custody::AnpioKey(key)) => {
-                let document = key.document(&self.did)?;
+            Some(Custody::AnpioKey(held)) => {
+                let mut key = held.clone();
+                let (document, keyid) = if key.config.is_some() {
+                    key.authorized_document(&self.did)?
+                } else if key.name.is_some() {
+                    (
+                        self.did_document.clone(),
+                        format!("{}#{}", self.did, key.kid.as_deref().unwrap_or("key-1")),
+                    )
+                } else {
+                    // A record written before keys had names. The DID-addressed envelope
+                    // path answers for as long as the daemon still publishes one; when it
+                    // cannot, the key may be one anpio-key now addresses by name, and the
+                    // DID's fingerprint says which. A lookup that fails on its own (no
+                    // binary, no daemon) is not allowed to hide the original answer.
+                    match key.document(&self.did) {
+                        Ok(document) => {
+                            let keyid = key.resolved_keyid(&document, &self.did);
+                            (document, keyid)
+                        }
+                        Err(err) => {
+                            let Some(name) = key.named_key_for(&self.did).ok().flatten() else {
+                                return Err(err.context(format!(
+                                    "anpio-key holds no document for {} and no key named after \
+                                     its fingerprint either; re-attach the identity with \
+                                     `anpio-cli did attach --name NAME --did {}`",
+                                    self.did, self.did
+                                )));
+                            };
+                            key.name = Some(name);
+                            (
+                                self.did_document.clone(),
+                                format!(
+                                    "{}#{}",
+                                    self.did,
+                                    key.kid.as_deref().unwrap_or("key-1")
+                                ),
+                            )
+                        }
+                    }
+                };
                 Ok(Signing {
-                    keyid: key.resolved_keyid(&document, &self.did),
-                    signer: crate::anp::request::Signer::AnpioKey(key.clone()),
+                    keyid,
+                    signer: crate::anp::request::Signer::AnpioKey(key),
                     document,
                 })
             }
@@ -627,6 +674,28 @@ impl Identity {
                     keyid: format!("{}#key-1", self.did),
                 })
             }
+        }
+    }
+
+    /// Where the key behind this identity lives, as every signature reports it.
+    ///
+    /// One sentence, so a person or an agent reading a command's output never has to guess
+    /// whether a signature came from a file it can read or a daemon it cannot.
+    pub fn signer_line(&self, location: &IdentityLocation) -> String {
+        match &self.custody {
+            Some(Custody::AnpioKey(key)) => {
+                let key_label = match (&key.name, &key.kid) {
+                    (Some(name), _) => format!("key {name}"),
+                    (None, Some(kid)) => format!("key {kid}"),
+                    (None, None) => "default key".to_string(),
+                };
+                let grant = key.grant.as_deref().unwrap_or("none");
+                format!("anpio-key ({key_label}, grant {grant})")
+            }
+            None => format!(
+                "local key ({}, no daemon grant)",
+                location.identity_path().display()
+            ),
         }
     }
 }
@@ -984,7 +1053,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("records no grant"), "{err}");
-        assert!(err.contains("attach-anpio-key"), "{err}");
+        assert!(err.contains("did attach"), "{err}");
     }
 
     #[test]

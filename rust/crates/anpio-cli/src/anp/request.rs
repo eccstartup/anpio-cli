@@ -36,9 +36,10 @@ pub enum Signer {
 impl Signer {
     /// Sign one request, dispatching to the holder of the key.
     ///
-    /// `keyid` is the credential to make the signature under, and only the local arm uses
-    /// it: `anpio-key` resolves the key itself, refuses to sign with one the document does
-    /// not authorize, and reports which one it used in `Signature-Input`.
+    /// `keyid` is the credential to make the signature under. The local arm signs with it
+    /// directly; a named `anpio-key` key is told to sign under it and checks the
+    /// fingerprint itself; a grant-backed one resolves the key from the grant and reports
+    /// which one it used in `Signature-Input`.
     ///
     /// `nonce` is the request body's nonce, passed to the daemon so both places carry the
     /// same value (`anpio-key`'s own recommendation). The local arm keeps the crate's
@@ -60,7 +61,7 @@ impl Signer {
     ) -> Result<BTreeMap<String, String>> {
         match self {
             Signer::Local(key) => sign_headers(document, url, method, key, keyid, body),
-            Signer::AnpioKey(key) => key.sign_headers(did, method, url, body, nonce),
+            Signer::AnpioKey(key) => key.sign_headers(did, keyid, method, url, body, nonce),
         }
     }
 }
