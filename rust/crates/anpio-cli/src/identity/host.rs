@@ -106,22 +106,14 @@ pub async fn check_handle(
             bail!("POST {url} failed: HTTP {status}: {}", snippet(&text));
         }
     };
-    if let Some(error) = envelope.get("error") {
+    if let Some(error) = error_object(&envelope) {
         let code = error.get("code").and_then(Value::as_i64).unwrap_or(0);
-        let named = error
-            .get("data")
-            .and_then(|data| data.get("type").or_else(|| data.get("code")))
-            .and_then(Value::as_str);
         // -32601 is JSON-RPC's "method not found"; a host that kept the route but not the
         // method is in the same place as one that never had it.
-        if code == -32601 || named == Some("method_not_found") {
+        if code == -32601 || named_error(error) == Some("method_not_found") {
             return Ok(None);
         }
-        let message = error
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("the host refused the precheck");
-        bail!("registration_check refused: {code}: {message}");
+        bail!("registration_check refused: {}", describe_error(error));
     }
     let result = envelope.get("result").ok_or_else(|| {
         anyhow!(
@@ -165,6 +157,7 @@ pub async fn email_verified(
         .with_context(|| format!("{base} cannot serve {EMAIL_STATUS_PATH}"))?;
     let response = client
         .get(url.clone())
+        .header("x-awiki-client-version", CLIENT_VERSION)
         .query(&[("email", normalize_email(email)), ("handle", handle.to_string())])
         .send()
         .await
@@ -176,7 +169,17 @@ pub async fn email_verified(
     }
     let value: Value =
         serde_json::from_str(&text).with_context(|| format!("{url} did not return JSON"))?;
-    Ok(value.get("verified").and_then(Value::as_bool).unwrap_or(false))
+    // The version gate answers HTTP 200 with an error body, so a plain status check would
+    // read the refusal as "not verified" and poll until the deadline.
+    if let Some(error) = error_object(&value) {
+        bail!("email-status refused: {}", describe_error(error));
+    }
+    // No `verified` field is a reply this client does not understand — reporting it as
+    // `false` is what turned a protocol error into a silent five-minute timeout.
+    match value.get("verified").and_then(Value::as_bool) {
+        Some(verified) => Ok(verified),
+        None => bail!("{url} answered without a `verified` field: {}", snippet(&text)),
+    }
 }
 
 /// Ask the host to send the verification email.
@@ -191,6 +194,7 @@ pub async fn send_verification_email(
         .with_context(|| format!("{base} cannot serve {EMAIL_SEND_PATH}"))?;
     let response = client
         .post(url.clone())
+        .header("x-awiki-client-version", CLIENT_VERSION)
         .json(&json!({"email": normalize_email(email), "handle": handle}))
         .send()
         .await
@@ -199,6 +203,11 @@ pub async fn send_verification_email(
     let text = response.text().await.with_context(|| format!("reading {url}"))?;
     if !status.is_success() {
         bail!("POST {url} failed: HTTP {status}: {}", snippet(&text));
+    }
+    if let Ok(value) = serde_json::from_str::<Value>(&text) {
+        if let Some(error) = error_object(&value) {
+            bail!("email-send refused: {}", describe_error(error));
+        }
     }
     Ok(())
 }
@@ -337,23 +346,8 @@ async fn call(
     // codes *and* a JSON-RPC body, so the body is worth reading before falling back to the
     // status. Only when it is not JSON does the status stand alone.
     if let Ok(envelope) = serde_json::from_str::<Value>(&text) {
-        if let Some(error) = envelope.get("error") {
-            let code = error.get("code").and_then(Value::as_i64).unwrap_or(0);
-            let message = error
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("the host refused the call");
-            // The host names its typed refusals in `data` (`did_document_changed`,
-            // `did_already_registered`, …) and that string, not the numeric code, is what a
-            // caller branches on and what a person recognises.
-            let named = error
-                .get("data")
-                .and_then(|data| data.get("type").or_else(|| data.get("code")))
-                .and_then(Value::as_str);
-            return Err(match named {
-                Some(named) => anyhow!("{method} refused: {named} ({code}: {message})"),
-                None => anyhow!("{method} refused: {code}: {message}"),
-            });
+        if let Some(error) = error_object(&envelope) {
+            return Err(anyhow!("{method} refused: {}", describe_error(error)));
         }
         if let Some(result) = envelope.get("result") {
             return Ok(result.clone());
@@ -521,6 +515,43 @@ pub fn document_hash(document: &Value) -> Result<String> {
     let digest = Sha256::digest(&canonical);
     let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
     Ok(format!("sha256:{encoded}"))
+}
+
+/// The refusal in a JSON-RPC reply, when it carries one.
+///
+/// awiki's user-service writes the `error` key on **every** reply — `"error": null` when the
+/// call succeeded. Presence alone therefore says nothing; only a non-null object is a
+/// refusal, and treating the null as one failed every `did-auth` and handle call.
+fn error_object(envelope: &Value) -> Option<&Value> {
+    envelope.get("error").filter(|error| !error.is_null())
+}
+
+/// The host's typed name for a refusal: `did_document_changed`, `client.upgrade_required`,
+/// …. That string, not the numeric code, is what a caller branches on and what a person
+/// recognises; `awiki_code` is how the user-service names its upgrade gate.
+fn named_error(error: &Value) -> Option<&str> {
+    error
+        .get("data")
+        .and_then(|data| {
+            data.get("type")
+                .or_else(|| data.get("code"))
+                .or_else(|| data.get("awiki_code"))
+        })
+        .and_then(Value::as_str)
+}
+
+/// One line for a refusal: the typed name when the host gave one, the JSON-RPC code, and
+/// the message. The code is `0` only when the host omitted it, which is a fact worth seeing.
+fn describe_error(error: &Value) -> String {
+    let code = error.get("code").and_then(Value::as_i64).unwrap_or(0);
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("the host gave no message");
+    match named_error(error) {
+        Some(named) => format!("{named} ({code}: {message})"),
+        None => format!("{code}: {message}"),
+    }
 }
 
 fn snippet(text: &str) -> String {

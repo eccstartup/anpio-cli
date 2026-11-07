@@ -34,6 +34,10 @@ struct Config {
     /// How many `email-status` polls answer `false` before it flips. `None` never flips.
     verify_after_polls: Option<usize>,
     register_ok: bool,
+    /// When set, `email-status` answers HTTP 200 with this body instead of a normal reply.
+    email_status_body: Option<&'static str>,
+    /// When set, `email-send` answers HTTP 200 with this body instead of a normal reply.
+    email_send_body: Option<&'static str>,
 }
 
 impl Default for Config {
@@ -42,6 +46,8 @@ impl Default for Config {
             decision: Some(Decision::Register),
             verify_after_polls: Some(0),
             register_ok: true,
+            email_status_body: None,
+            email_send_body: None,
         }
     }
 }
@@ -51,6 +57,7 @@ struct Recorded {
     method: String,
     path: String,
     body: String,
+    client_version: Option<String>,
 }
 
 struct State {
@@ -171,6 +178,11 @@ fn serve(mut stream: std::net::TcpStream, port: u16, state: &Arc<Mutex<State>>) 
             method: method.clone(),
             path: path.clone(),
             body: body.clone(),
+            client_version: head.lines().find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("x-awiki-client-version")
+                    .then(|| value.trim().to_string())
+            }),
         });
         route(&method, &path, &mut state, port)
     };
@@ -210,6 +222,8 @@ fn route(method: &str, path: &str, state: &mut State, port: u16) -> (u16, String
                         "jsonrpc": "2.0",
                         "id": "registration-check",
                         "result": {"decision": decision, "full_handle": "mybot.example"},
+                        // awiki writes the key on every reply, success included.
+                        "error": null,
                     })
                     .to_string(),
                 )
@@ -217,13 +231,19 @@ fn route(method: &str, path: &str, state: &mut State, port: u16) -> (u16, String
         },
         ("GET", "/user-service/v1/auth/email-status") => {
             state.polls += 1;
+            if let Some(body) = state.config.email_status_body {
+                return (200, body.to_string());
+            }
             let verified = state
                 .config
                 .verify_after_polls
                 .is_some_and(|after| state.polls > after);
             (200, json!({"verified": verified}).to_string())
         }
-        ("POST", "/user-service/v1/auth/email-send") => (200, "{}".to_string()),
+        ("POST", "/user-service/v1/auth/email-send") => match state.config.email_send_body {
+            Some(body) => (200, body.to_string()),
+            None => (200, "{}".to_string()),
+        },
         ("POST", "/user-service/v1/did-auth/rpc") => {
             if state.config.register_ok {
                 (
@@ -232,6 +252,7 @@ fn route(method: &str, path: &str, state: &mut State, port: u16) -> (u16, String
                         "jsonrpc": "2.0",
                         "id": "anpio-cli-register",
                         "result": {"access_token": "fake-token", "token_type": "Bearer"},
+                        "error": null,
                     })
                     .to_string(),
                 )
@@ -697,8 +718,7 @@ async fn waiting_for_email_times_out_without_being_an_error() {
 
 /// The precheck sends the shape the host's contract names.
 #[tokio::test]
-async fn the_precheck_sends_the_contract_shape() {
-    let host = FakeHost::start(Config::default());
+async fn the_precheck_sends_the_contract_shape() {    let host = FakeHost::start(Config::default());
     let base = reqwest::Url::parse(&host.base).expect("a URL");
     let check = anpio_cli::identity::check_handle(
         &reqwest::Client::new(),
@@ -726,4 +746,138 @@ async fn the_precheck_sends_the_contract_shape() {
         body["params"],
         json!({"handle": "mybot", "domain": "example", "check_invite": false})
     );
+}
+
+/// awiki writes `"error": null` on success. Reading that key as a refusal broke every
+/// `did-auth` call, so the fake host writes it too, and the golden path proves it is read
+/// as success. This test names the shape so a future mock cannot quietly drop it.
+#[tokio::test]
+async fn a_null_error_key_is_success_not_a_refusal() {
+    let host = FakeHost::start(Config::default());
+    let base = reqwest::Url::parse(&host.base).expect("a URL");
+
+    let check = anpio_cli::identity::check_handle(
+        &reqwest::Client::new(),
+        &base,
+        "mybot",
+        "example",
+    )
+    .await
+    .expect("a null error is not a refusal")
+    .expect("the route exists");
+    assert_eq!(check.decision, anpio_cli::identity::HandleDecision::Register);
+}
+
+/// The two email requests carry the same version header as every other user-service call;
+/// without it awiki answers `client.upgrade_required`.
+#[test]
+fn the_email_requests_carry_the_client_version() {
+    let host = FakeHost::start(Config {
+        verify_after_polls: None,
+        ..Config::default()
+    });
+    let home = Home::new("email-version");
+
+    let out = run(
+        &home,
+        &[
+            "did", "create", "--host", &host.base, "--handle", "mybot", "--email",
+            "you@example.com", "--no-wait",
+        ],
+    );
+    assert!(out.status.success(), "stderr:\n{}", stderr(&out));
+
+    let requests = host.requests();
+    for path in [
+        "/user-service/v1/auth/email-status",
+        "/user-service/v1/auth/email-send",
+    ] {
+        let request = requests
+            .iter()
+            .find(|request| request.path == path)
+            .unwrap_or_else(|| panic!("{path} was called: {:?}", paths(&requests)));
+        assert_eq!(
+            request.client_version.as_deref(),
+            Some("awiki-cli/0815/1.0.58"),
+            "{path} must carry the version header"
+        );
+    }
+}
+
+/// The version gate answers HTTP 200 with an error body. That must surface as an error:
+/// reading it as `verified: false` polled a refusal until the five-minute deadline.
+#[test]
+fn a_version_gate_on_email_status_is_an_error() {
+    let host = FakeHost::start(Config {
+        email_status_body: Some(
+            r#"{"error":{"code":-32004,"message":"current client version is no longer supported",
+            "data":{"awiki_code":"client.upgrade_required","min_version":"1.0.58"}}}"#,
+        ),
+        ..Config::default()
+    });
+    let home = Home::new("email-status-gate");
+
+    let out = run(
+        &home,
+        &[
+            "did", "create", "--host", &host.base, "--handle", "mybot", "--email",
+            "you@example.com",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(1));
+    let err = stderr(&out);
+    assert!(err.contains("email-status refused"), "{err}");
+    assert!(err.contains("client.upgrade_required"), "{err}");
+    assert!(!err.contains("not verified yet"), "a refusal is not a timeout:\n{err}");
+}
+
+/// A 200 whose body is not a status at all is an error too, not `false`.
+#[test]
+fn an_email_status_reply_without_verified_is_an_error() {
+    let host = FakeHost::start(Config {
+        email_status_body: Some(r#"{"ok":true}"#),
+        ..Config::default()
+    });
+    let home = Home::new("email-status-shape");
+
+    let out = run(
+        &home,
+        &[
+            "did", "create", "--host", &host.base, "--handle", "mybot", "--email",
+            "you@example.com",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains("without a `verified` field"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+/// `email-send` answers 200 on the version gate as well, so its body is checked too.
+#[test]
+fn a_version_gate_on_email_send_is_reported() {
+    let host = FakeHost::start(Config {
+        verify_after_polls: None,
+        email_send_body: Some(
+            r#"{"error":{"code":-32004,"message":"current client version is no longer supported",
+            "data":{"awiki_code":"client.upgrade_required"}}}"#,
+        ),
+        ..Config::default()
+    });
+    let home = Home::new("email-send-gate");
+
+    let out = run(
+        &home,
+        &[
+            "did", "create", "--host", &host.base, "--handle", "mybot", "--email",
+            "you@example.com", "--no-wait",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(1));
+    let err = stderr(&out);
+    assert!(err.contains("email-send refused"), "{err}");
+    assert!(err.contains("client.upgrade_required"), "{err}");
+    assert!(!stdout(&out).contains("verification email sent"), "{}", stdout(&out));
 }
