@@ -20,3 +20,5 @@ objects/
 opc-src/
 scripts/opc-*.sh
 testruns/
+
+audit/

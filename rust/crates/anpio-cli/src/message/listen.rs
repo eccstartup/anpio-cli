@@ -1052,6 +1052,7 @@ mod tests {
     fn test_sender() -> Sender {
         let identity = create_identity(CreateIdentityInput {
             authority: "localhost%3A8765".to_string(),
+            domain: "localhost".to_string(),
             agent: "carol".to_string(),
             profile: "default".to_string(),
             handle: "carol".to_string(),

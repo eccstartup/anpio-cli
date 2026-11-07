@@ -9,7 +9,7 @@ use anyhow::Context as _;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use reqwest::Url;
 use serde_json::{json, Map, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anpio_cli::contacts::{
@@ -26,14 +26,16 @@ use anpio_cli::group_e2ee::{
 use anpio_cli::anp::login::login;
 use anpio_cli::anp::{LoginError, Superseded};
 use anpio_cli::custody::{
-    controlling_terminal, document_has_key, document_keyids, ed25519_public_key, split_did,
-    AnpioKey, Operation, DEFAULT_PROTECTED_CONFIG,
+    controlling_terminal, device_key_names, device_public_multibases, document_has_key,
+    document_keyids, ed25519_public_key, installed_config, public_key_from_multibase, split_did,
+    AnpioKey, Operation, DEFAULT_PROTECTED_CONFIG, INSTALLED_PROTECTED_CONFIG,
 };
 use anpio_cli::identity::{
     build_external_identity, check_handle, clear_pending, create_identity, current_agent_path,
     deliver, describe_status,
     document_hash, document_is_superseded,
-    email_verified, fetch_host_service, fetch_profile, fetch_public_profile, list_identities,
+    email_verified, fetch_host_service, fetch_profile, fetch_public_profile, fresh_challenge,
+    list_identities,
     load_pending, load_session, load_stored_key,
     parse_ttl_seconds, pending_path,
     read_current_agent, rebuild_identity, register_identity, resign_document,
@@ -49,7 +51,7 @@ use anpio_cli::identity::{
 use anpio_cli::message::{
     build_message_request, call, call_device, call_extension, call_group, decode_message, device_of,
     did_host, did_to_url,
-    discover, document_in_crate_form, document_url, group_e2ee_security_profile, http_client, now_rfc3339,
+    discover, document_in_crate_form, document_is_bound, document_url, group_e2ee_security_profile, http_client, now_rfc3339,
     open_channel, open_channel_for, parse_capabilities, payload_from, payload_of, policy_for, post_message,
     resolve_did_document, rejection, run_listen, uuid_v4, view_for, websocket_connect, AnpMeta,
     AnpResponse, AnpTarget, CallRequest, Channel, ConnectFn, ListenArgs, ListenDeps, ListenEvent,
@@ -105,8 +107,27 @@ enum KeyProvider {
     #[default]
     Local,
     /// A named key inside `anpio-key`. The CLI mints it through the daemon and never sees
-    /// the private half; signing is authorized separately with a grant.
+    /// the private half. Named-key signatures are made under the daemon's development
+    /// switch, not a grant: protected installs cannot enrol a named key yet.
     AnpioKey,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+enum KeyGrantPurpose {
+    /// `SIGN_HTTP`, signed by a Hot key.
+    #[default]
+    Http,
+    /// `SIGN_DOCUMENT_PROOF`, signed by a Root key.
+    DocumentProof,
+}
+
+impl KeyGrantPurpose {
+    fn custody_key(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::DocumentProof => "document_proof",
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -115,11 +136,16 @@ enum KeyCommand {
     ///
     /// The grant is the administrator's decision (`anpio-key grant create`); this command
     /// only writes its id beside the key name the identity already holds, and nothing is
-    /// expanded by it. A grant that expired, was spent, or never covered this target is
-    /// refused by the daemon at signing time, with its own code.
+    /// expanded by it. It applies to DID-bound keys: a named key cannot be enrolled in the
+    /// protected catalog yet, so there is no grant of its own to record.
     Grant {
         /// The grant id `anpio-key grant create` printed.
         grant_id: String,
+        /// Which protected operation this grant authorizes: `http` (`SIGN_HTTP`, a Hot
+        /// key) or `document-proof` (`SIGN_DOCUMENT_PROOF`, a Root key). One identity
+        /// normally records both.
+        #[arg(long, value_enum, default_value_t = KeyGrantPurpose::Http)]
+        purpose: KeyGrantPurpose,
         /// `--agent` > `$ANPIOCLI_AGENT` > the current agent > `default`.
         #[arg(long)]
         agent: Option<String>,
@@ -336,8 +362,8 @@ enum DidCommand {
         /// Where the identity's private key lives.
         ///
         /// `local` (the default) mints a key in this store. `anpio-key` asks the daemon to
-        /// mint a named key and to proof the document; it must be run by a person at a
-        /// terminal, and signing stays unauthorized until the administrator issues a grant.
+        /// mint three named keys and to proof the document; it must be run by a person at a
+        /// terminal, and signing then needs the daemon's development named-key switch.
         #[arg(long, value_enum, default_value_t = KeyProvider::Local)]
         key: KeyProvider,
     },
@@ -369,18 +395,29 @@ enum DidCommand {
         /// anpio-key's socket, when it is not the one derived from the key directory.
         #[arg(long, value_name = "PATH")]
         socket: Option<PathBuf>,
-        /// The key fragment (`key-1`, `recovery-1`, …); the daemon's default key if omitted.
+        /// The key fragment (`key-1`, `<agent>/<profile>-sign`, …).
+        ///
+        /// Required with `--config`, where it names which authorized key the identity
+        /// signs with; the HTTP grant covers the hot key. Optional on the named-key
+        /// surface, where the daemon's default key is used.
         #[arg(long)]
         kid: Option<String>,
         /// anpio-key's protected v2 surface (`data --config`), an administrator-owned file.
+        ///
+        /// Defaults to the installed service when this machine has one and neither
+        /// `--key-root` nor `--socket` was given.
         ///
         /// Mutually exclusive with `--key-root` / `--socket`: one identity points at one
         /// surface, so a command can never choose between them at signing time.
         #[arg(long, value_name = "PATH", conflicts_with_all = ["key_root", "socket"])]
         config: Option<PathBuf>,
-        /// The grant this identity signs under, issued by the anpio-key administrator.
-        #[arg(long, requires = "config")]
-        grant: Option<String>,
+        /// The grant(s) this identity signs under, issued by the anpio-key administrator.
+        ///
+        /// Repeatable, each as `<purpose>=<grant-id>`: `http` covers `SIGN_HTTP` (a Hot
+        /// key), `document_proof` covers `SIGN_DOCUMENT_PROOF` (the Root key). A bare
+        /// grant-id keeps its older meaning — the HTTP grant.
+        #[arg(long, value_name = "[PURPOSE=]GRANT", requires = "config")]
+        grant: Vec<String>,
         /// This machine's device name in the DID document (`{device}-sign`,
         /// `{device}-agreement`), for the paths that sign as a device (group E2EE).
         ///
@@ -389,6 +426,13 @@ enum DidCommand {
         /// not publish.
         #[arg(long, value_name = "ID")]
         device: Option<String>,
+        /// The DID document, read from a file instead of being resolved.
+        ///
+        /// For a machine whose DNS answers through a local proxy: fetch the document with
+        /// another client, then attach from the file. The document is checked the same way
+        /// a fetched one is, and the file must be the document for this DID.
+        #[arg(long, value_name = "PATH", conflicts_with = "config")]
+        document: Option<PathBuf>,
         /// The DID host's URL, when the DID's authority is not the host to publish to.
         #[arg(long)]
         host: Option<String>,
@@ -1220,6 +1264,7 @@ async fn main() -> anyhow::Result<()> {
                 config,
                 grant,
                 device,
+                document,
                 host,
                 agent,
                 profile,
@@ -1235,6 +1280,7 @@ async fn main() -> anyhow::Result<()> {
                     config,
                     grant,
                     device,
+                    document,
                     host,
                     agent,
                     profile,
@@ -1277,12 +1323,14 @@ async fn main() -> anyhow::Result<()> {
         Command::Key { command } => match command {
             KeyCommand::Grant {
                 grant_id,
+                purpose,
                 agent,
                 profile,
                 config,
                 json,
             } => cmd_key_grant(
                 &grant_id,
+                purpose,
                 agent.as_deref(),
                 profile.as_deref(),
                 config,
@@ -1728,6 +1776,27 @@ async fn cmd_did_create(
         );
     }
 
+    // A machine with the protected service installed has no way to provision a *new*
+    // identity's keys into it yet (the daemon has no key-provisioning op), and minting
+    // them under the operator's own account would put the identity back on the local
+    // store this command exists to leave. Say so, and point at the one path that works:
+    // adopt an identity that already exists. Never suggest a development daemon.
+    if key_provider == KeyProvider::AnpioKey {
+        if let Some(config) = installed_config() {
+            anyhow::bail!(
+                "this machine runs the protected anpio-key service ({}), which cannot yet \
+                 provision the keys of a new identity. An identity that already has keys is \
+                 adopted into the service instead:\n  sudo ./install.sh --adopt --identity \
+                 <identity.json> --cli-binary <anpio-cli> --cli-sha256 <sha256> \
+                 --target <https-url>\nand the adopted record is then recovered for an agent \
+                 with `anpio-cli did attach --config {} --kid <fragment> --grant \
+                 http=<grant-id> --grant document_proof=<grant-id> ...`",
+                config.display(),
+                config.display()
+            );
+        }
+    }
+
     // The agent is NOT run through `resolve_agent_id`: `create` names a new identity, and
     // the current selection must not decide where a second one lands. No `--agent` means
     // the handle, which is what the DID path segment will be. The profile still resolves
@@ -1796,6 +1865,7 @@ async fn cmd_did_create(
 
     let input = CreateIdentityInput {
         authority: service.authority,
+        domain: domain.clone(),
         agent: location.agent.clone(),
         profile: location.profile.clone(),
         handle: handle.to_string(),
@@ -1838,60 +1908,110 @@ async fn cmd_did_create(
                     pending_path().display()
                 )
             })?;
-            let name = match &pending.custody {
-                Some(Custody::AnpioKey(key)) => key.name.clone().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "the pending identity is held by anpio-key but records no key name; \
-                         there is nothing to reuse"
-                    )
-                })?,
+            let mut custody = match &pending.custody {
+                Some(Custody::AnpioKey(key)) => key.clone(),
                 _ => anyhow::bail!(
                     "the pending identity is a local one; retry with --key local --reuse-key"
                 ),
             };
+            let name = custody.name.clone().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "the pending identity is held by anpio-key but records no key name; \
+                     there is nothing to reuse"
+                )
+            })?;
             let public_multibase = root_public_multibase(&pending.did_document).ok_or_else(|| {
                 anyhow::anyhow!(
                     "the pending document publishes no #key-1 public key, so the key cannot be \
                      reused"
                 )
             })?;
+            // A pending record written before this line published device keys has only the
+            // root. The root is the one thing that cannot be re-minted without changing the
+            // DID, so keep it and mint the missing halves here.
+            let (signing_public, agreement_public) = match device_public_multibases(&pending.did_document) {
+                Some((signing, agreement)) => (
+                    public_key_from_multibase(&signing, &name)?,
+                    public_key_from_multibase(&agreement, &name)?,
+                ),
+                None => {
+                    let signing = custody.create_named()?;
+                    let agreement = custody.create_named_on("x25519")?;
+                    println!(
+                        "      device keys: {} (Ed25519), {} (X25519)",
+                        signing.name, agreement.name
+                    );
+                    custody
+                        .device_keys
+                        .insert("sign".to_string(), signing.name.clone());
+                    custody
+                        .device_keys
+                        .insert("agreement".to_string(), agreement.name.clone());
+                    (
+                        ed25519_public_key(&signing.public_multibase, &signing.name)?,
+                        public_key_from_multibase(&agreement.public_multibase, &agreement.name)?,
+                    )
+                }
+            };
             let external = build_external_identity(
                 &input,
                 ed25519_public_key(&public_multibase, &name)?,
+                signing_public,
+                agreement_public,
             )?;
-            let custody = AnpioKey {
-                name: Some(name.clone()),
-                ..Default::default()
-            };
-            let signed = custody
-                .sign_document(&format!("{}#key-1", external.did), &external.unsigned_document)?;
+            let signed = custody.sign_document(
+                &format!("{}#key-1", external.did),
+                &external.unsigned_document,
+                Some(&domain),
+                Some(&fresh_challenge()),
+            )?;
             create_stage(3, "Reusing the key in anpio-key", &format!("ok   {name}"));
             external_identity(input, external, signed, custody)
         }
         (KeyProvider::AnpioKey, false) => {
-            let named = AnpioKey::default().create_named()?;
-            create_stage(3, "Asking anpio-key to generate the key", &format!("ok   {}", named.name));
-            println!(
-                "      key: {} (kept by anpio-key; this identity records the name)",
-                named.name
+            let mut custody = AnpioKey::default();
+            let root = custody.create_named()?;
+            let signing = custody.create_named()?;
+            let agreement = custody.create_named_on("x25519")?;
+            create_stage(
+                3,
+                "Asking anpio-key to generate the keys",
+                &format!("ok   {}", root.name),
             );
+            println!(
+                "      root:      {} (Ed25519, proofs the document)",
+                root.name
+            );
+            println!(
+                "      device:    {} (Ed25519, signs device assertions)",
+                signing.name
+            );
+            println!("      agreement: {} (X25519, ECDH only)", agreement.name);
+            custody
+                .device_keys
+                .insert("sign".to_string(), signing.name.clone());
+            custody
+                .device_keys
+                .insert("agreement".to_string(), agreement.name.clone());
             let external = build_external_identity(
                 &input,
-                ed25519_public_key(&named.public_multibase, &named.name)?,
+                ed25519_public_key(&root.public_multibase, &root.name)?,
+                ed25519_public_key(&signing.public_multibase, &signing.name)?,
+                public_key_from_multibase(&agreement.public_multibase, &agreement.name)?,
             )?;
-            let custody = AnpioKey {
-                name: Some(named.name.clone()),
-                ..Default::default()
-            };
-            let signed = custody
-                .sign_document(&format!("{}#key-1", external.did), &external.unsigned_document)?;
+            custody.name = Some(root.name.clone());
+            let signed = custody.sign_document(
+                &format!("{}#key-1", external.did),
+                &external.unsigned_document,
+                Some(&domain),
+                Some(&fresh_challenge()),
+            )?;
             external_identity(input, external, signed, custody)
         }
     };
     match &identity.custody {
         Some(Custody::AnpioKey(_)) => println!(
-            "      note: the private key is in anpio-key and never enters this store; signing \
-             stays unauthorized until an administrator issues a grant."
+            "      note: the private keys are in anpio-key and never enter this store."
         ),
         // Said once, at the only moment the boundary can still change the decision.
         None => println!(
@@ -1956,32 +2076,23 @@ async fn cmd_did_create(
             create_stage(5, "Registering", "ok");
             println!("      registered  {}", identity.did);
             println!("      signer: {}", identity.signer_line(&location));
-            if let Some(Custody::AnpioKey(key)) = &identity.custody {
-                let name = key.name.as_deref().unwrap_or("(unnamed)");
-                let target = format!(
-                    "{}/user-service/v1/did-auth/rpc",
-                    identity.did_host.trim_end_matches('/')
-                );
+            if let Some(Custody::AnpioKey(_)) = &identity.custody {
                 println!();
                 println!(
-                    "the key is in anpio-key; signing is authorized separately. As the \
-                     anpio-key administrator:"
+                    "the key is in anpio-key, and this store holds no private bytes. Signing \
+                     is grant-gated by a protected anpio-key service: install it and adopt \
+                     this identity so the service holds the keys and the grants:"
                 );
                 println!(
-                    "  anpio-key grant create --key {name} --did {} \\",
-                    identity.did
+                    "  sudo ./install.sh --adopt --identity {} --cli-binary <anpio-cli> \
+                     --cli-sha256 <sha256> --target <https-url>",
+                    location.identity_path().display()
                 );
-                println!("    --target {target}");
-                println!("then hand the grant id to this CLI once:");
-                // The identity landed under the handle, not under `default`, and `create`
-                // deliberately does not move the current agent — so name the agent here
-                // instead of printing a command that reads the wrong directory.
-                let profile = if location.profile == "default" {
-                    String::new()
-                } else {
-                    format!(" --profile {}", location.profile)
-                };
-                println!("  anpio-cli key grant <grant-id> --agent {}{profile}", location.agent);
+                println!(
+                    "then recover the agent record with `anpio-cli did attach --config {} \
+                     --kid <fragment> --grant http=<grant-id>` and sign with `anp sign`.",
+                    INSTALLED_PROTECTED_CONFIG
+                );
             }
             Ok(())
         }
@@ -2101,13 +2212,61 @@ struct AttachArgs {
     socket: Option<PathBuf>,
     kid: Option<String>,
     config: Option<PathBuf>,
-    grant: Option<String>,
+    grant: Vec<String>,
     device: Option<String>,
+    document: Option<PathBuf>,
     host: Option<String>,
     agent: Option<String>,
     profile: Option<String>,
     force: bool,
     json: bool,
+}
+
+/// Split repeated `--grant` values into the legacy single id and the per-purpose map.
+///
+/// `<purpose>=<grant-id>` names the operation a grant reaches; a bare id keeps the meaning
+/// it had before the split (the HTTP grant). Purposes are checked here so a misspelling
+/// fails before any daemon call, rather than as a refusal several steps later.
+fn parse_attach_grants(
+    values: &[String],
+) -> anyhow::Result<(Option<String>, std::collections::BTreeMap<String, String>)> {
+    let mut legacy = None;
+    let mut grants = std::collections::BTreeMap::new();
+    for value in values {
+        let value = value.trim();
+        if value.is_empty() {
+            anyhow::bail!("--grant needs a grant id");
+        }
+        match value.split_once('=') {
+            Some((purpose, id)) => {
+                let id = id.trim();
+                if id.is_empty() {
+                    anyhow::bail!("--grant {purpose}= needs a grant id after the `=`");
+                }
+                let purpose = match purpose.trim() {
+                    "http" => "http",
+                    "document_proof" => "document_proof",
+                    other => anyhow::bail!(
+                        "unknown grant purpose {other}; use http (SIGN_HTTP) or \
+                         document_proof (SIGN_DOCUMENT_PROOF)"
+                    ),
+                };
+                if grants.insert(purpose.to_string(), id.to_string()).is_some() {
+                    anyhow::bail!("--grant {purpose}= was given more than once");
+                }
+            }
+            None => {
+                if legacy.replace(value.to_string()).is_some() {
+                    anyhow::bail!(
+                        "only one bare --grant is understood (the HTTP grant); name the \
+                         purposes for the others: --grant http=<id> \
+                         --grant document_proof=<id>"
+                    );
+                }
+            }
+        }
+    }
+    Ok((legacy, grants))
 }
 
 /// `did attach` — adopt a DID whose key lives in an `anpio-key` daemon.
@@ -2124,6 +2283,30 @@ struct AttachArgs {
 /// The identity is created only after a document naming this DID and carrying the key to be
 /// used has been obtained, so a half-attached identity cannot be written: either the key is
 /// accounted for, or the store is untouched.
+/// The document a caller resolved out of band, verified exactly as a fetched one is.
+///
+/// A machine whose DNS answers through a local proxy resolves the DID's host to an address
+/// the fetch policy refuses; the document can still be fetched with another client, and
+/// attaching from that file keeps the same checks: this DID's id, and a proof bound to the
+/// key the DID spells.
+fn read_did_document(path: &Path, did: &str) -> anyhow::Result<serde_json::Value> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading the DID document {}", path.display()))?;
+    let document: serde_json::Value = serde_json::from_str(&text)
+        .with_context(|| format!("{} did not hold a JSON DID document", path.display()))?;
+    if document.get("id").and_then(serde_json::Value::as_str) != Some(did) {
+        anyhow::bail!("{} is not the document for {did}", path.display());
+    }
+    if !document_is_bound(&document) {
+        anyhow::bail!(
+            "the document in {} is not bound to {did}: its proof does not verify against the \
+             key the DID spells",
+            path.display()
+        );
+    }
+    Ok(document)
+}
+
 async fn cmd_did_attach(args: AttachArgs, allow_private: &[String]) -> anyhow::Result<()> {
     let AttachArgs {
         did,
@@ -2134,6 +2317,7 @@ async fn cmd_did_attach(args: AttachArgs, allow_private: &[String]) -> anyhow::R
         config,
         grant,
         device,
+        document,
         host,
         agent,
         profile,
@@ -2154,6 +2338,21 @@ async fn cmd_did_attach(args: AttachArgs, allow_private: &[String]) -> anyhow::R
     // The flag names a fragment; a caller who pasted a whole `did#key-1` is understood
     // rather than refused, because that is what anpio-key's own `list` prints.
     let kid = kid.map(|value| value.rsplit('#').next().unwrap_or(value).to_string());
+    let (grant, grants) = parse_attach_grants(&grant)?;
+    // The protected service is the default surface when the machine has one and no other
+    // surface was named: the named-key daemon is the legacy path, not a fallback.
+    let config = match (config, key_root.is_some(), socket.is_some()) {
+        (None, false, false) => installed_config(),
+        (config, _, _) => config,
+    };
+    if config.is_some() && kid.is_none() {
+        anyhow::bail!(
+            "a protected identity must name the key it signs with. Pass --kid <fragment>, \
+             choosing the hot key (for example `<agent>/<profile>-sign`) that the HTTP grant \
+             covers; `anpio-key admin --config {} catalog` lists the fragments",
+            config.as_deref().map(|path| path.display().to_string()).unwrap_or_default()
+        );
+    }
     let mut key = AnpioKey {
         root: key_root,
         socket,
@@ -2161,9 +2360,16 @@ async fn cmd_did_attach(args: AttachArgs, allow_private: &[String]) -> anyhow::R
         name,
         config,
         grant,
+        grants,
         device: device.map(str::to_string),
         ..AnpioKey::default()
     };
+    if key.config.is_some() && document.is_some() {
+        anyhow::bail!(
+            "--document is read by the named-key surface; the protected service answers \
+             GET_DOCUMENT itself, so there is no file to supply"
+        );
+    }
 
     // Fetching the document is the check that the key is reachable and accounted for. No key
     // bytes are fetched, because there are none to fetch. Which surface answers depends on
@@ -2173,17 +2379,42 @@ async fn cmd_did_attach(args: AttachArgs, allow_private: &[String]) -> anyhow::R
     // verifiers fetch.
     let (document, keyid) = if key.config.is_some() {
         let (document, keyid) = key.authorized_document(did)?;
-        if key.grant.is_some() {
-            let status = key.grant_status()?;
+        if !key.has_grant_for(Operation::Http) {
+            anyhow::bail!(
+                "a protected identity needs the grant that covers SIGN_HTTP; pass \
+                 --grant http=<grant-id> (and --grant document_proof=<id> when the daemon \
+                 should also publish its document)"
+            );
+        }
+        // Every recorded grant is checked now: attaching one the daemon will refuse would
+        // produce an identity that cannot sign. The document-proof grant is checked only
+        // when it was named — an older single grant covered HTTP alone.
+        for (operation, named) in [
+            (Operation::Http, key.grant_for(Operation::Http).is_some()),
+            (
+                Operation::DocumentProof,
+                key.grants.contains_key("document_proof"),
+            ),
+        ] {
+            if !named {
+                continue;
+            }
+            let status = key.grant_status(operation)?;
             if !status.usable() {
                 anyhow::bail!(
-                    "anpio-key reports grant {} as {} with {} of {} uses left; attaching it \
-                     would produce an identity that cannot sign. Ask the administrator for a \
-                     fresh grant",
+                    "anpio-key reports the {} grant {} as {} with {} of {} uses left; \
+                     attaching it would produce an identity that cannot {}. Ask the \
+                     administrator for a fresh grant",
+                    operation.cli_name(),
                     status.grant_id,
                     status.state,
                     status.remaining_uses(),
-                    status.max_uses
+                    status.max_uses,
+                    if operation == Operation::DocumentProof {
+                        "publish its document"
+                    } else {
+                        "sign"
+                    },
                 );
             }
         }
@@ -2214,10 +2445,30 @@ async fn cmd_did_attach(args: AttachArgs, allow_private: &[String]) -> anyhow::R
             ),
             Some(_) => {}
         }
-        let client = http_client()?;
-        let policy = policy_for(&[did_host(did)?], allow_private);
-        let document = resolve_did_document(&client, did, &policy).await?;
+        let document = match document {
+            Some(path) => read_did_document(&path, did)?,
+            None => {
+                let client = http_client()?;
+                let policy = policy_for(&[did_host(did)?], allow_private);
+                resolve_did_document(&client, did, &policy).await?
+            }
+        };
         let keyid = key.resolved_keyid(&document, did);
+        // A record rebuilt for an existing DID should name the device keys this machine
+        // holds: `install.sh --adopt` reads those names to bind the signing and agreement
+        // envelopes to the DID. The document decides which public key each role has; the
+        // store only answers which local name holds it.
+        let held = key.named_keys_with_public()?;
+        for (role, name) in device_key_names(&document, &held) {
+            match name {
+                Some(name) => {
+                    key.device_keys.insert(role.to_string(), name);
+                }
+                None => println!(
+                    "note: anpio-key holds no named key for the document's {role} key"
+                ),
+            }
+        }
         (document, keyid)
     } else {
         let document = key.document(did)?;
@@ -2691,6 +2942,7 @@ fn cmd_did_show(agent: Option<&str>, profile: Option<&str>, json: bool) -> anyho
 /// `identity.json`, so a later signature needs neither a flag nor a second lookup.
 fn cmd_key_grant(
     grant_id: &str,
+    purpose: KeyGrantPurpose,
     agent: Option<&str>,
     profile: Option<&str>,
     config: Option<PathBuf>,
@@ -2702,7 +2954,9 @@ fn cmd_key_grant(
     }
     let location = IdentityLocation::resolve(agent, profile)?;
     let mut identity = Identity::load(&location)?;
-    let config = config.unwrap_or_else(|| PathBuf::from(DEFAULT_PROTECTED_CONFIG));
+    let config = config
+        .or_else(installed_config)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_PROTECTED_CONFIG));
     let key = match identity.custody.as_mut() {
         Some(Custody::AnpioKey(key)) => key,
         None => anyhow::bail!(
@@ -2712,7 +2966,12 @@ fn cmd_key_grant(
             location.profile
         ),
     };
-    key.grant = Some(grant_id.to_string());
+    key.grants
+        .insert(purpose.custody_key().to_string(), grant_id.to_string());
+    if purpose == KeyGrantPurpose::Http {
+        // This field predates the per-purpose map, and the grant it held was the HTTP one.
+        key.grant = Some(grant_id.to_string());
+    }
     key.config = Some(config.clone());
     // Read back before the save: the borrow of `identity` cannot outlive it.
     let key_line = key.describe();
@@ -2725,12 +2984,17 @@ fn cmd_key_grant(
                 "did": identity.did,
                 "key": name,
                 "grant": grant_id,
+                "purpose": purpose.custody_key(),
                 "config": config.display().to_string(),
                 "signer": identity.signer_line(&location),
             }))?
         );
     } else {
-        println!("grant {grant_id} recorded for {}", identity.did);
+        println!(
+            "grant {grant_id} recorded for {} ({})",
+            identity.did,
+            purpose.custody_key()
+        );
         println!("  key:    {key_line}");
         println!("  config: {}", config.display());
         println!("  signer: {}", identity.signer_line(&location));
@@ -4619,7 +4883,7 @@ async fn cmd_msg_listen(
     // say what the administrator would have to do if it cannot be renewed.
     if let Some(Custody::AnpioKey(key)) = identity.custody.as_ref() {
         if key.config.is_some() {
-            if let Some(renewed) = key.ensure_runway()? {
+            if let Some(renewed) = key.ensure_runway(Operation::Http)? {
                 let when = chrono::DateTime::from_timestamp(renewed.expiry, 0)
                     .map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
                     .unwrap_or_else(|| format!("{} (unix seconds)", renewed.expiry));

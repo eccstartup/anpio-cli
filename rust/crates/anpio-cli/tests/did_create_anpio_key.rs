@@ -24,6 +24,10 @@ use serde_json::{json, Value};
 
 /// The RFC 8032 test vector's public key, as `ed25519_public_key` reads it.
 const PUBLIC_MULTIBASE: &str = "z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw";
+/// A second Ed25519 key for the device signing role.
+const SIGNING_MULTIBASE: &str = "z6MkwSD8dBdqcXQzKJZQFPy2hh2izzxskndKCjdmC2dBpfME";
+/// An X25519 key for the device agreement role.
+const AGREEMENT_MULTIBASE: &str = "z6LSkdrX4EvewpktHBjvNxRDogPdC5iVF8LT3LPKefGAgi89";
 
 // ---------------------------------------------------------------------------------------
 // The fake host
@@ -196,8 +200,9 @@ fn route(method: &str, path: &str, port: u16) -> String {
 // ---------------------------------------------------------------------------------------
 
 /// The script `$ANPIOCLI_ANPIO_KEY` names. It logs every call and answers the four
-/// subcommands this line uses. `$2`'s placeholder is the key's fingerprint, which the
-/// tests know only once the CLI has derived a DID from the public key.
+/// subcommands this line uses. Each `key create` answers with the next of the three keys
+/// the identity needs — root, device signing, device agreement — because a named key has
+/// no DID, so the CLI derives one from the first public key it is given.
 const FAKE_ANPIO_KEY: &str = r#"#!/bin/sh
 log="$ANPIOCLI_TEST_ANPIO_KEY_LOG"
 printf '%s\n' "$*" >> "$log"
@@ -206,10 +211,17 @@ case "$1" in
   key)
     case "$2" in
       create)
-        printf '%s\n' '{"name":"k-test","thumbprint":"e1_test","public_multibase":"__MULTIBASE__","algorithm":"Ed25519"}'
+        n=$(cat "$log.count" 2>/dev/null || printf '0')
+        n=$((n + 1))
+        printf '%s' "$n" > "$log.count"
+        case "$n" in
+          1) printf '%s\n' '{"name":"k-root","thumbprint":"e1_root","public_multibase":"__ROOT__","algorithm":"Ed25519"}' ;;
+          2) printf '%s\n' '{"name":"k-sign","thumbprint":"e1_sign","public_multibase":"__SIGN__","algorithm":"Ed25519"}' ;;
+          *) printf '%s\n' '{"name":"k-agree","thumbprint":"x1_agree","public_multibase":"__AGREE__","algorithm":"X25519"}' ;;
+        esac
         ;;
       list)
-        printf '%s\n' '[{"name":"k-test","did":"","kid":"","thumbprint":"e1_test","algorithm":"Ed25519","state":"unlocked"}]'
+        printf '%s\n' '[{"name":"k-root","did":"","kid":"","thumbprint":"e1_root","public_multibase":"__ROOT__","algorithm":"Ed25519","state":"unlocked"},{"name":"k-sign","did":"","kid":"","thumbprint":"e1_sign","public_multibase":"__SIGN__","algorithm":"Ed25519","state":"unlocked"},{"name":"k-agree","did":"","kid":"","thumbprint":"x1_agree","public_multibase":"__AGREE__","algorithm":"X25519","state":"unlocked"}]'
         ;;
       sign-document)
         shift 2
@@ -244,6 +256,56 @@ case "$1" in
 esac
 "#;
 
+/// The protected surface's fake: it logs the invocation and the request, and answers the
+/// operations `did attach` uses with the `{code, data}` envelope the real binary prints.
+///
+/// The catalog and the document are woven in at construction time, so each test reads a
+/// fixed DID and the key fragments that belong to it.
+const FAKE_PROTECTED_ANPIO_KEY: &str = r#"#!/bin/sh
+log="$ANPIOCLI_TEST_ANPIO_KEY_LOG"
+printf '%s\n' "$*" >> "$log"
+if [ "$1" = "data" ]; then
+  shift 1
+  file=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --file) file="$2"; shift 2 ;;
+      --config) shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  request=$(cat "$file")
+  printf 'REQ %s\n' "$request" >> "$log"
+  op=$(printf '%s' "$request" | sed -n 's/.*"operation"[[:space:]]*:[[:space:]]*"\([A-Z_]*\)".*/\1/p')
+  printf 'DATA %s\n' "$op" >> "$log"
+  case "$op" in
+    LIST_AUTHORIZED_KEYS)
+      printf '%s\n' '{"code":"OK","data":{"keys":[{"key_id":"key-root","kid":"__DID__#key-1","did":"__DID__","role":"root"},{"key_id":"key-sign","kid":"__DID__#__SIGN__","did":"__DID__","role":"hot"}]}}'
+      ;;
+    GET_DOCUMENT)
+      printf '{"code":"OK","data":{"document":__DOC__}}\n'
+      ;;
+    GET_GRANT_STATUS)
+      grant=$(printf '%s' "$request" | sed -n 's/.*"grant_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+      printf '{"code":"OK","data":{"grant_id":"%s","key_id":"key-sign","state":"__STATE__","expiry":4102444800,"kind":"request","max_uses":100,"used_uses":__USED__,"max_renewals":0,"renewals":0}}\n' "$grant"
+      ;;
+    GET_CAPABILITIES)
+      printf '%s\n' '{"code":"OK","data":{"operations":["SIGN_HTTP","SIGN_DOCUMENT_PROOF"],"signing_purposes":["device_assertion"]}}'
+      ;;
+    *)
+      exit 64
+      ;;
+  esac
+  exit 0
+fi
+exit 64
+"#;
+
+/// The DID the protected fake holds, in the E1 shape `did attach` accepts.
+const PROTECTED_DID: &str = "did:wba:example.com:user:alice:e1_abc";
+/// The hot fragment the HTTP grant covers; the binding key is `key-1`.
+const PROTECTED_SIGN_KID: &str = "alice/default-sign";
+
 struct FakeKey {
     path: PathBuf,
     log: PathBuf,
@@ -253,7 +315,53 @@ impl FakeKey {
     fn new(dir: &Path, name: &str) -> Self {
         let path = dir.join(format!("anpio-key-{name}"));
         let log = dir.join(format!("anpio-key-{name}.log"));
-        let script = FAKE_ANPIO_KEY.replace("__MULTIBASE__", PUBLIC_MULTIBASE);
+        let script = FAKE_ANPIO_KEY
+            .replace("__ROOT__", PUBLIC_MULTIBASE)
+            .replace("__SIGN__", SIGNING_MULTIBASE)
+            .replace("__AGREE__", AGREEMENT_MULTIBASE);
+        Self::write(path, log, script)
+    }
+
+    /// An `anpio-key data --config` service that reports `state` for every grant, with
+    /// `used` of the 100 uses already spent.
+    fn protected_with(dir: &Path, name: &str, state: &str, used: u32) -> Self {
+        let path = dir.join(format!("anpio-key-{name}"));
+        let log = dir.join(format!("anpio-key-{name}.log"));
+        let document = json!({
+            "id": PROTECTED_DID,
+            "verificationMethod": [
+                {
+                    "id": format!("{}#key-1", PROTECTED_DID),
+                    "type": "Multikey",
+                    "controller": PROTECTED_DID,
+                    "publicKeyMultibase": PUBLIC_MULTIBASE,
+                },
+                {
+                    "id": format!("{}#{}", PROTECTED_DID, PROTECTED_SIGN_KID),
+                    "type": "Multikey",
+                    "controller": PROTECTED_DID,
+                    "publicKeyMultibase": SIGNING_MULTIBASE,
+                },
+            ],
+            "authentication": [
+                format!("{}#key-1", PROTECTED_DID),
+                format!("{}#{}", PROTECTED_DID, PROTECTED_SIGN_KID),
+            ],
+        });
+        let script = FAKE_PROTECTED_ANPIO_KEY
+            .replace("__DID__", PROTECTED_DID)
+            .replace("__SIGN__", PROTECTED_SIGN_KID)
+            .replace("__DOC__", &document.to_string())
+            .replace("__STATE__", state)
+            .replace("__USED__", &used.to_string());
+        Self::write(path, log, script)
+    }
+
+    fn protected(dir: &Path, name: &str) -> Self {
+        Self::protected_with(dir, name, "active", 0)
+    }
+
+    fn write(path: PathBuf, log: PathBuf, script: String) -> Self {
         fs::write(&path, script).expect("write the fake anpio-key");
         let mut permissions = fs::metadata(&path).expect("stat the fake anpio-key").permissions();
         #[cfg(unix)]
@@ -271,6 +379,38 @@ impl FakeKey {
             .unwrap_or_default()
             .lines()
             .filter(|line| !line.is_empty() && !line.starts_with("DOC "))
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The operations a protected service was asked for, in order.
+    fn data_calls(&self) -> Vec<String> {
+        fs::read_to_string(&self.log)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| line.strip_prefix("DATA ").map(str::to_string))
+            .collect()
+    }
+
+    /// The request bodies the protected service was given, in order.
+    fn protected_requests(&self) -> Vec<Value> {
+        fs::read_to_string(&self.log)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| line.strip_prefix("REQ "))
+            .map(|line| serde_json::from_str(line).expect("a protected request is JSON"))
+            .collect()
+    }
+
+    /// Every command line, without the request/document payload lines.
+    fn invocations(&self) -> Vec<String> {
+        fs::read_to_string(&self.log)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| !line.is_empty())
+            .filter(|line| {
+                !line.starts_with("DATA ") && !line.starts_with("REQ ") && !line.starts_with("DOC ")
+            })
             .map(str::to_string)
             .collect()
     }
@@ -322,6 +462,9 @@ fn base_command(home: &Home, key: &FakeKey) -> Command {
         .env("ANPIOCLI_HOME", &home.0)
         .env("ANPIOCLI_ANPIO_KEY", &key.path)
         .env("ANPIOCLI_TEST_ANPIO_KEY_LOG", &key.log)
+        // A path with no file behind it is how this suite says "no protected service is
+        // installed here", so the tests read the same on a machine that has one.
+        .env("ANPIOCLI_ANPIO_KEY_CONFIG", home.0.join("no-protected-service.json"))
         .env_remove("ANPIOCLI_AGENT")
         .env_remove("ANPIOCLI_PROFILE");
     command
@@ -339,6 +482,17 @@ fn run(home: &Home, key: &FakeKey, args: &[&str]) -> Output {
 /// `script(1)` is the only pty available without a dependency; where it is missing the
 /// caller gets `None` and the test says it skipped.
 fn run_with_a_terminal(home: &Home, key: &FakeKey, args: &[&str]) -> Option<Output> {
+    run_with_a_terminal_seeing(home, key, args, &home.0.join("no-protected-service.json"))
+}
+
+/// The same, with `$ANPIOCLI_ANPIO_KEY_CONFIG` naming `config`: a path that exists says a
+/// protected service is installed, a path with no file behind it says there is none.
+fn run_with_a_terminal_seeing(
+    home: &Home,
+    key: &FakeKey,
+    args: &[&str],
+    config: &Path,
+) -> Option<Output> {
     let mut runner = if cfg!(target_os = "macos") {
         let mut runner = Command::new("script");
         runner
@@ -349,6 +503,7 @@ fn run_with_a_terminal(home: &Home, key: &FakeKey, args: &[&str]) -> Option<Outp
             .env("ANPIOCLI_HOME", &home.0)
             .env("ANPIOCLI_ANPIO_KEY", &key.path)
             .env("ANPIOCLI_TEST_ANPIO_KEY_LOG", &key.log)
+            .env("ANPIOCLI_ANPIO_KEY_CONFIG", config)
             .env_remove("ANPIOCLI_AGENT")
             .env_remove("ANPIOCLI_PROFILE");
         runner
@@ -369,6 +524,7 @@ fn run_with_a_terminal(home: &Home, key: &FakeKey, args: &[&str]) -> Option<Outp
             .env("ANPIOCLI_HOME", &home.0)
             .env("ANPIOCLI_ANPIO_KEY", &key.path)
             .env("ANPIOCLI_TEST_ANPIO_KEY_LOG", &key.log)
+            .env("ANPIOCLI_ANPIO_KEY_CONFIG", config)
             .env_remove("ANPIOCLI_AGENT")
             .env_remove("ANPIOCLI_PROFILE");
         runner
@@ -429,24 +585,30 @@ fn a_named_key_create_records_the_name_and_no_private_bytes() {
     for stage in ["[1/5]", "[2/5]", "[3/5]", "[4/5]", "[5/5]"] {
         assert!(printed.contains(stage), "no {stage} line:\n{printed}");
     }
-    assert!(printed.contains("k-test"), "the key name is printed:\n{printed}");
+    assert!(printed.contains("k-root"), "the root key name is printed:\n{printed}");
+    assert!(printed.contains("k-sign"), "the device signing key name is printed:\n{printed}");
+    assert!(printed.contains("k-agree"), "the agreement key name is printed:\n{printed}");
     assert!(
-        printed.contains("signer: anpio-key (key k-test, grant none)"),
+        printed.contains("signer: anpio-key (key k-root, grant none)"),
         "{printed}"
     );
-    // The grant is a separate administrator step, and the command says so where a person
-    // will act on it.
-    assert!(printed.contains("anpio-key grant create --key k-test"), "{printed}");
+    // A store whose keys are named has no second, unprotected daemon to fall back to: the
+    // summary points at the protected install that adopts the identity onto the one service
+    // the machine runs.
+    assert!(printed.contains("install.sh --adopt"), "{printed}");
     assert!(
-        printed.contains("anpio-cli key grant <grant-id> --agent mybot"),
-        "the handoff names the agent the identity landed under:\n{printed}"
+        !printed.contains("serve --development") && !printed.contains("allow-named-key-signing"),
+        "no development daemon is suggested:\n{printed}"
     );
+    assert!(!printed.contains("anpio-key grant create --key"), "{printed}");
 
     let identity = read_json(&home.identity("mybot"));
     let did = identity["did"].as_str().expect("a DID").to_string();
     assert!(did.ends_with(&identity_fingerprint(&identity["did_document"])), "{did}");
     assert_eq!(identity["custody"]["kind"], "anpio-key");
-    assert_eq!(identity["custody"]["name"], "k-test");
+    assert_eq!(identity["custody"]["name"], "k-root");
+    assert_eq!(identity["custody"]["device_keys"]["sign"], "k-sign");
+    assert_eq!(identity["custody"]["device_keys"]["agreement"], "k-agree");
     assert!(
         identity["custody"]["grant"].is_null(),
         "a grant is only written by `key grant`: {}",
@@ -476,28 +638,56 @@ fn a_named_key_create_records_the_name_and_no_private_bytes() {
     let submitted: Value = serde_json::from_str(&documents[0]).expect("the submitted document");
     assert_eq!(submitted["id"], did);
     assert_eq!(submitted["verificationMethod"][0]["publicKeyMultibase"], PUBLIC_MULTIBASE);
+    assert_eq!(submitted["verificationMethod"][1]["publicKeyMultibase"], SIGNING_MULTIBASE);
+    assert_eq!(submitted["verificationMethod"][2]["publicKeyMultibase"], AGREEMENT_MULTIBASE);
+    assert_eq!(
+        submitted["deviceManifest"]["devices"].as_array().map(Vec::len),
+        Some(1),
+        "awiki accepts exactly one device: {}",
+        submitted["deviceManifest"]
+    );
+    assert_eq!(
+        submitted["deviceManifest"]["devices"][0]["device_id"],
+        "mybot/default"
+    );
     assert_eq!(identity["did_document"]["proof"]["type"], "FakeSignature2020");
 
     let register = host.register_body();
     assert_eq!(register["params"]["did_document"]["proof"]["type"], "FakeSignature2020");
     assert_eq!(register["params"]["did_document"]["id"], did);
 
-    // Exactly two conversations with the daemon, in this order: mint, then proof.
+    // Exactly four conversations with the daemon, in this order: three mints (root,
+    // device signing, device agreement), then one proof.
     let calls = key.calls();
-    assert_eq!(calls.len(), 2, "{calls:?}");
-    assert_eq!(calls[0], "key create --json");
-    assert!(
-        calls[1].starts_with(&format!("key sign-document --name k-test --keyid {did}#key-1")),
-        "{}",
-        calls[1]
+    assert_eq!(calls.len(), 4, "{calls:?}");
+    assert_eq!(calls[0], "key create --json --algorithm ed25519");
+    assert_eq!(calls[1], "key create --json --algorithm ed25519");
+    assert_eq!(
+        calls[2], "key create --json --algorithm x25519",
+        "the agreement key is minted on the curve ECDH needs"
     );
+    assert!(
+        calls[3].starts_with(&format!("key sign-document --name k-root --keyid {did}#key-1")),
+        "{}",
+        calls[3]
+    );
+    // Both are proof options the awiki host checks, so they have to reach the signer —
+    // adding them to the document afterwards would invalidate the signature.
+    assert!(calls[3].contains(" --domain localhost"), "{}", calls[3]);
+    let challenge = calls[3]
+        .split(" --challenge ")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .expect("a challenge reaches anpio-key");
+    assert_eq!(challenge.len(), 32, "{challenge}");
+    assert!(challenge.chars().all(|c| c.is_ascii_hexdigit()), "{challenge}");
     assert!(!home.pending().exists(), "a registered identity leaves no pending key");
 
     // Re-registering uses the document the daemon proofed, not a lookup by DID — a named
     // key has none to look up.
     let again = run(&home, &key, &["did", "register", "--agent", "mybot"]);
     assert!(again.status.success(), "{}", text(&again.stderr));
-    assert_eq!(key.calls().len(), 2, "the daemon is not asked for a document: {:?}", key.calls());
+    assert_eq!(key.calls().len(), 4, "the daemon is not asked for a document: {:?}", key.calls());
 }
 
 /// Without a controlling terminal the command refuses before anything is touched, and it
@@ -517,6 +707,38 @@ fn a_named_key_create_refuses_without_a_terminal() {
     let printed = text(&out.stderr);
     assert!(printed.contains("interactive shell"), "{printed}");
     assert!(printed.contains("will not switch to one"), "{printed}");
+
+    assert!(key.calls().is_empty(), "the daemon is never asked: {:?}", key.calls());
+    assert!(host.requests().is_empty(), "the host is never asked");
+    assert!(!home.pending().exists());
+    assert!(!home.identity("mybot").exists());
+}
+
+/// A machine with the protected service installed has no way to put a new identity's keys
+/// into it, so the command refuses before the host or the daemon is asked — and names the
+/// one path that works, adopting an identity that already exists. It never offers a second,
+/// unprotected daemon on the same machine.
+#[test]
+fn a_named_key_create_refuses_when_the_protected_service_is_installed() {
+    let host = FakeHost::start();
+    let home = Home::new("named-protected-refusal");
+    let key = FakeKey::new(&home.0, "keys");
+    let config = home.0.join("service.json");
+    fs::write(&config, "{}").expect("a service configuration");
+
+    let Some(out) =
+        run_with_a_terminal_seeing(&home, &key, &create_args(&host.base), &config)
+    else {
+        return;
+    };
+    assert!(!out.status.success(), "{}", text(&out.stdout));
+    let printed = text(&out.stdout) + &text(&out.stderr);
+    assert!(printed.contains("cannot yet provision"), "{printed}");
+    assert!(printed.contains("install.sh --adopt"), "{printed}");
+    assert!(
+        !printed.contains("serve --development") && !printed.contains("allow-named-key-signing"),
+        "no development daemon is suggested:\n{printed}"
+    );
 
     assert!(key.calls().is_empty(), "the daemon is never asked: {:?}", key.calls());
     assert!(host.requests().is_empty(), "the host is never asked");
@@ -553,7 +775,7 @@ fn a_grant_is_written_once_and_shown_first() {
     let first = text(&show.stdout).lines().next().unwrap_or_default().to_string();
     assert_eq!(
         first.trim(),
-        "key:        anpio-key (key k-test, grant g-7f3a)",
+        "key:        anpio-key (key k-root, grant g-7f3a)",
         "the first line says where the key is and who authorizes it"
     );
 }
@@ -588,7 +810,7 @@ fn a_named_signature_names_the_key_and_the_keyid() {
     );
     assert!(sign.status.success(), "{}", text(&sign.stderr));
     assert!(
-        text(&sign.stderr).contains("signer: anpio-key (key k-test, grant none)"),
+        text(&sign.stderr).contains("signer: anpio-key (key k-root, grant none)"),
         "{}",
         text(&sign.stderr)
     );
@@ -603,7 +825,7 @@ fn a_named_signature_names_the_key_and_the_keyid() {
         .into_iter()
         .find(|call| call.starts_with("sign "))
         .expect("the daemon signs the request");
-    assert!(call.starts_with(&format!("sign --key k-test --keyid {did}#key-1")), "{call}");
+    assert!(call.starts_with(&format!("sign --key k-root --keyid {did}#key-1")), "{call}");
     assert!(call.contains("--url https://awiki.me/anp-im/rpc"), "{call}");
     assert!(!call.contains("--did"), "a named key signs without a DID: {call}");
 }
@@ -651,6 +873,235 @@ fn attaching_an_unknown_name_writes_nothing() {
     assert!(!out.status.success(), "{}", text(&out.stdout));
     let printed = text(&out.stderr);
     assert!(printed.contains("holds no key named nope"), "{printed}");
+    assert!(!home.identity("alice").exists());
+}
+
+/// A document file is held to the same identity check as a fetched one: it must be the
+/// document for this DID, so a file for another identity cannot be attached. This is the
+/// path a machine behind a local DNS proxy uses.
+#[test]
+fn a_document_file_must_name_the_did_it_is_attached_to() {
+    let home = Home::new("attach-document");
+    let key = FakeKey::new(&home.0, "keys");
+    let document = home.0.join("did.json");
+    fs::write(
+        &document,
+        r#"{"id":"did:wba:example.com:user:alice:e1_other"}"#,
+    )
+    .expect("a document file");
+    let document_text = document.display().to_string();
+
+    let out = run(
+        &home,
+        &key,
+        &[
+            "did",
+            "attach",
+            "--did",
+            "did:wba:example.com:user:alice:e1_root",
+            "--name",
+            "k-root",
+            "--document",
+            &document_text,
+            "--agent",
+            "alice",
+        ],
+    );
+    assert!(!out.status.success(), "{}", text(&out.stdout));
+    let printed = text(&out.stderr);
+    assert!(printed.contains("is not the document for"), "{printed}");
+    assert!(!home.identity("alice").exists());
+}
+
+/// Attaching through the protected service is a different conversation from the named-key
+/// one: the catalog is listed, the document is read by key, each recorded grant is checked,
+/// and the negotiated capabilities are cached. The record names the hot key and keeps one
+/// grant per purpose — never a second daemon.
+#[test]
+fn attaching_through_the_protected_service_records_the_hot_key_and_both_grants() {
+    let home = Home::new("protected-attach");
+    let key = FakeKey::protected(&home.0, "protected");
+    let config = home.0.join("service.json");
+    fs::write(&config, "{}").expect("a service configuration");
+    let config_text = config.display().to_string();
+    let config_arg = config_text.as_str();
+
+    let out = run(
+        &home,
+        &key,
+        &[
+            "did",
+            "attach",
+            "--did",
+            PROTECTED_DID,
+            "--config",
+            config_arg,
+            "--kid",
+            PROTECTED_SIGN_KID,
+            "--grant",
+            "http=g-http",
+            "--grant",
+            "document_proof=g-doc",
+            "--agent",
+            "alice",
+        ],
+    );
+    assert!(out.status.success(), "{}", text(&out.stderr));
+
+    let identity = read_json(&home.identity("alice"));
+    assert_eq!(identity["did"], PROTECTED_DID);
+    let custody = &identity["custody"];
+    assert_eq!(custody["kind"], "anpio-key");
+    assert_eq!(custody["config"].as_str(), Some(config_arg));
+    assert_eq!(custody["kid"], PROTECTED_SIGN_KID);
+    assert!(
+        custody["grant"].is_null(),
+        "the per-purpose map replaces the single id: {custody}"
+    );
+    assert_eq!(custody["grants"]["http"], "g-http");
+    assert_eq!(custody["grants"]["document_proof"], "g-doc");
+    assert_eq!(identity["did_document"]["id"], PROTECTED_DID);
+    let operations = custody["operations"].as_array().expect("cached capabilities");
+    for operation in ["SIGN_HTTP", "SIGN_DOCUMENT_PROOF"] {
+        assert!(
+            operations.iter().any(|cached| cached == operation),
+            "{operation} missing from {operations:?}"
+        );
+    }
+    assert_eq!(custody["signing_purposes"][0], "device_assertion");
+
+    // Every call goes through `data --config`, with a request file — the development
+    // socket is never reached.
+    let invocations = key.invocations();
+    assert_eq!(invocations.len(), 5, "{invocations:?}");
+    for call in &invocations {
+        assert!(
+            call.starts_with(&format!("data --config {config_arg} --file ")),
+            "{call}"
+        );
+    }
+    assert_eq!(
+        key.data_calls(),
+        vec![
+            "LIST_AUTHORIZED_KEYS",
+            "GET_DOCUMENT",
+            "GET_GRANT_STATUS",
+            "GET_GRANT_STATUS",
+            "GET_CAPABILITIES",
+        ]
+    );
+    let requests = key.protected_requests();
+    assert_eq!(
+        requests[1]["key_id"], "key-sign",
+        "the document is read for the key the identity will sign with: {requests:?}"
+    );
+    assert_eq!(requests[2]["grant_id"], "g-http");
+    assert_eq!(requests[3]["grant_id"], "g-doc");
+}
+
+/// A protected identity must name its key: without a fragment the service could pick the
+/// binding key, and the HTTP grant does not cover it.
+#[test]
+fn a_protected_attach_requires_the_key_fragment() {
+    let home = Home::new("protected-no-kid");
+    let key = FakeKey::protected(&home.0, "protected");
+    let config = home.0.join("service.json");
+    fs::write(&config, "{}").expect("a service configuration");
+    let config_text = config.display().to_string();
+
+    let out = run(
+        &home,
+        &key,
+        &[
+            "did",
+            "attach",
+            "--did",
+            PROTECTED_DID,
+            "--config",
+            &config_text,
+            "--grant",
+            "http=g-http",
+            "--agent",
+            "alice",
+        ],
+    );
+    assert!(!out.status.success(), "{}", text(&out.stdout));
+    let printed = text(&out.stderr);
+    assert!(printed.contains("must name the key it signs with"), "{printed}");
+    assert!(printed.contains("--kid <fragment>"), "{printed}");
+    assert!(key.invocations().is_empty(), "{:?}", key.invocations());
+    assert!(!home.identity("alice").exists());
+}
+
+/// A fragment the catalog does not offer is an exact requirement, so attaching fails and
+/// the message lists what the principal does hold.
+#[test]
+fn a_protected_attach_refuses_a_kid_the_catalog_does_not_offer() {
+    let home = Home::new("protected-wrong-kid");
+    let key = FakeKey::protected(&home.0, "protected");
+    let config = home.0.join("service.json");
+    fs::write(&config, "{}").expect("a service configuration");
+    let config_text = config.display().to_string();
+
+    let out = run(
+        &home,
+        &key,
+        &[
+            "did",
+            "attach",
+            "--did",
+            PROTECTED_DID,
+            "--config",
+            &config_text,
+            "--kid",
+            "alice/other-sign",
+            "--grant",
+            "http=g-http",
+            "--agent",
+            "alice",
+        ],
+    );
+    assert!(!out.status.success(), "{}", text(&out.stdout));
+    let printed = text(&out.stderr);
+    assert!(printed.contains("authorizes no key"), "{printed}");
+    assert!(printed.contains("it offers:"), "{printed}");
+    assert!(printed.contains("alice/default-sign"), "{printed}");
+    assert!(!home.identity("alice").exists());
+}
+
+/// A grant the daemon already reports unusable would produce an identity that cannot sign,
+/// so it is refused at attach time instead of at the first signature.
+#[test]
+fn a_protected_attach_refuses_an_exhausted_grant() {
+    let home = Home::new("protected-exhausted");
+    let key = FakeKey::protected_with(&home.0, "protected", "exhausted", 100);
+    let config = home.0.join("service.json");
+    fs::write(&config, "{}").expect("a service configuration");
+    let config_text = config.display().to_string();
+
+    let out = run(
+        &home,
+        &key,
+        &[
+            "did",
+            "attach",
+            "--did",
+            PROTECTED_DID,
+            "--config",
+            &config_text,
+            "--kid",
+            PROTECTED_SIGN_KID,
+            "--grant",
+            "http=g-http",
+            "--agent",
+            "alice",
+        ],
+    );
+    assert!(!out.status.success(), "{}", text(&out.stdout));
+    let printed = text(&out.stderr);
+    assert!(printed.contains("exhausted"), "{printed}");
+    assert!(printed.contains("0 of 100 uses left"), "{printed}");
+    assert!(printed.contains("fresh grant"), "{printed}");
     assert!(!home.identity("alice").exists());
 }
 

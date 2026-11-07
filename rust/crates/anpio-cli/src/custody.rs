@@ -13,8 +13,8 @@
 //! Everything goes through the `anpio-key` binary: this crate does not link the daemon, and
 //! the daemon's socket protocol is its own (`docs/ADAPTER.md` over there). The development
 //! surface uses `anpio-key` on `PATH`, or `$ANPIOCLI_ANPIO_KEY`; the protected `data
-//! --config` surface is pinned to the administrator-installed binary and never reads that
-//! override.
+//! --config` surface runs the administrator-installed binary by absolute path, never a
+//! PATH lookup, so the config and the program that enforces it cannot drift apart.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -32,10 +32,55 @@ pub const BINARY_ENV: &str = "ANPIOCLI_ANPIO_KEY";
 
 const DEFAULT_BINARY: &str = "anpio-key";
 
+/// The environment override for the protected service configuration, for a checkout that
+/// points at a test service instead of the installed one.
+pub const CONFIG_ENV: &str = "ANPIOCLI_ANPIO_KEY_CONFIG";
+
 /// The protected configuration `anpio-key` itself defaults to. `key grant` records it
 /// beside the grant id so a later signing command reaches the same surface the
 /// administrator issued the grant on.
 pub const DEFAULT_PROTECTED_CONFIG: &str = "/etc/anpio-key/service.json";
+
+/// The configuration the macOS installer writes. Reading this path is how a command knows
+/// a protected service is installed even when the identity record does not name it yet.
+#[cfg(target_os = "macos")]
+pub const INSTALLED_PROTECTED_CONFIG: &str = "/Library/ANPIOKey/service.json";
+#[cfg(not(target_os = "macos"))]
+pub const INSTALLED_PROTECTED_CONFIG: &str = DEFAULT_PROTECTED_CONFIG;
+
+/// The binary the protected surface runs: the installer's absolute path, never `PATH`.
+#[cfg(target_os = "macos")]
+const INSTALLED_BINARY: &str = "/Library/ANPIOKey/bin/anpio-key";
+#[cfg(not(target_os = "macos"))]
+const INSTALLED_BINARY: &str = "/usr/local/libexec/anpio-key";
+
+/// The configuration of the installed protected service, when this machine has one.
+///
+/// `$ANPIOCLI_ANPIO_KEY_CONFIG` answers first so a checkout can point at a test service;
+/// otherwise this is the path the installer wrote. Either way the file must exist: a path
+/// with no configuration behind it is not an installed service, and `None` is the fact a
+/// command uses to refuse falling back to a development daemon by accident. A test that
+/// wants the absent-service behaviour can therefore set the variable to a path that is not
+/// there instead of depending on what the machine happens to have installed.
+pub fn installed_config() -> Option<PathBuf> {
+    if let Ok(value) = std::env::var(CONFIG_ENV) {
+        let value = value.trim();
+        if !value.is_empty() {
+            let path = PathBuf::from(value);
+            return path.is_file().then_some(path);
+        }
+    }
+    let path = PathBuf::from(INSTALLED_PROTECTED_CONFIG);
+    path.is_file().then_some(path)
+}
+
+/// The binary that answers the protected entry.
+fn protected_binary() -> String {
+    match std::env::var(BINARY_ENV) {
+        Ok(value) if !value.trim().is_empty() => value,
+        _ => INSTALLED_BINARY.to_string(),
+    }
+}
 
 /// The purpose a device's own signature is made under (`ADAPTER.md` §11.6).
 ///
@@ -221,6 +266,14 @@ pub struct SharedSecret {
     pub peer_fingerprint: String,
 }
 
+/// One row of `anpio-key key list --json`.
+#[derive(Debug, Clone)]
+struct NamedKeyRow {
+    name: String,
+    thumbprint: String,
+    public_multibase: Option<String>,
+}
+
 /// Which `anpio-key` daemon holds a key, and which key of it signs.
 ///
 /// The DID is not stored here: it is the identity's own, and a second copy could disagree
@@ -251,12 +304,27 @@ pub struct AnpioKey {
     /// The grant this identity was issued. Required for every protected operation except
     /// the development surface's HTTP signing; its presence is not proof that the grant is
     /// still valid (`GET_GRANT_STATUS` answers that).
+    ///
+    /// This is the legacy single-grant field. New records keep one grant per purpose in
+    /// [`Self::grants`]; this one is still read as the fallback for both HTTP and document
+    /// proofs, so a record written before the split keeps signing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grant: Option<String>,
+    /// The grant for each protected purpose, keyed `http` (`SIGN_HTTP`, a Hot key) and
+    /// `document_proof` (`SIGN_DOCUMENT_PROOF`, a Root key). The two operations need
+    /// different keys and therefore different grants, which is why this is a map rather
+    /// than one id.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub grants: BTreeMap<String, String>,
     /// The device name in the DID document (`{device}-sign`, `{device}-agreement`). Needed
     /// once device assertions are delegated; absent means no device key is bound.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device: Option<String>,
+    /// The named keys `anpio-key` holds for this identity's device entry, by role
+    /// (`sign`, `agreement`). Empty when the document publishes only a root key, or for
+    /// records written before these keys were minted through the daemon.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub device_keys: BTreeMap<String, String>,
     /// The daemon's last negotiated operation names, cached so an ordinary command does
     /// not spawn `anpio-key` just to be refused. Unknown names are kept verbatim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -645,7 +713,19 @@ impl AnpioKey {
     /// recovery words and reading the passphrase on the controlling terminal. This process
     /// only learns the name and the public key, which is exactly what the identity needs.
     pub fn create_named(&self) -> Result<NamedKey> {
-        let bytes = self.invoke(&["key".to_string(), "create".to_string(), "--json".to_string()])?;
+        self.create_named_on("ed25519")
+    }
+
+    /// Mint a named key on a named curve. `x25519` is a key-agreement key: it cannot sign,
+    /// so it is only ever the device's E2EE half of a DID document.
+    pub fn create_named_on(&self, algorithm: &str) -> Result<NamedKey> {
+        let bytes = self.invoke(&[
+            "key".to_string(),
+            "create".to_string(),
+            "--json".to_string(),
+            "--algorithm".to_string(),
+            algorithm.to_string(),
+        ])?;
         parse_named_key(&bytes)
     }
 
@@ -658,8 +738,8 @@ impl AnpioKey {
         Ok(self
             .named_keys()?
             .into_iter()
-            .find(|(held, _)| held == name)
-            .map(|(_, thumbprint)| thumbprint))
+            .find(|key| key.name == name)
+            .map(|key| key.thumbprint))
     }
 
     /// The name of the key whose fingerprint is the one `did` ends in, if there is one.
@@ -672,12 +752,27 @@ impl AnpioKey {
         Ok(self
             .named_keys()?
             .into_iter()
-            .find(|(_, thumbprint)| thumbprint == fingerprint)
-            .map(|(name, _)| name))
+            .find(|key| key.thumbprint == fingerprint)
+            .map(|key| key.name))
+    }
+
+    /// `(name, public key)` for every named key `anpio-key` lists, in its own order.
+    ///
+    /// `did attach` matches these against the public keys a published document names, which
+    /// is how a record rebuilt for an existing DID learns which local name holds the device
+    /// signing key and which holds the agreement key. The document is the authority on the
+    /// roles; the names are local labels. An `anpio-key` too old to report the public key
+    /// answers `None`, and nothing here invents one.
+    pub fn named_keys_with_public(&self) -> Result<Vec<(String, Option<String>)>> {
+        Ok(self
+            .named_keys()?
+            .into_iter()
+            .map(|key| (key.name, key.public_multibase))
+            .collect())
     }
 
     /// `(name, thumbprint)` for every named key `anpio-key` lists, in its own order.
-    fn named_keys(&self) -> Result<Vec<(String, String)>> {
+    fn named_keys(&self) -> Result<Vec<NamedKeyRow>> {
         let bytes = self.invoke(&[
             "key".to_string(),
             "list".to_string(),
@@ -690,7 +785,18 @@ impl AnpioKey {
             .filter_map(|row| {
                 let name = row.get("name").and_then(Value::as_str)?;
                 let thumbprint = row.get("thumbprint").and_then(Value::as_str)?;
-                (!name.is_empty()).then(|| (name.to_string(), thumbprint.to_string()))
+                if name.is_empty() {
+                    return None;
+                }
+                Some(NamedKeyRow {
+                    name: name.to_string(),
+                    thumbprint: thumbprint.to_string(),
+                    public_multibase: row
+                        .get("public_multibase")
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string),
+                })
             })
             .collect())
     }
@@ -701,7 +807,16 @@ impl AnpioKey {
     /// that the document's `id` names the same DID, then signs the document exactly as it
     /// was handed over. This is the one document-signing path a named key has: `document
     /// --did` cannot address a key that has no DID.
-    pub fn sign_document(&self, keyid: &str, document: &Value) -> Result<Value> {
+    ///
+    /// `domain` and `challenge` travel with the request rather than inside the document:
+    /// both are proof options, and the host registration requires them.
+    pub fn sign_document(
+        &self,
+        keyid: &str,
+        document: &Value,
+        domain: Option<&str>,
+        challenge: Option<&str>,
+    ) -> Result<Value> {
         let name = self.name.as_deref().ok_or_else(|| {
             anyhow!("this anpio-key custody names no key, so there is nothing to sign the document with")
         })?;
@@ -726,6 +841,13 @@ impl AnpioKey {
             "--out".to_string(),
             output.display().to_string(),
         ];
+        let mut args = args;
+        for (flag, value) in [("--domain", domain), ("--challenge", challenge)] {
+            if let Some(value) = value {
+                args.push(flag.to_string());
+                args.push(value.to_string());
+            }
+        }
         let result = self.invoke(&args);
         let _ = fs::remove_file(&input);
         result?;
@@ -855,7 +977,7 @@ impl AnpioKey {
         nonce: Option<&str>,
     ) -> Result<BTreeMap<String, String>> {
         if self.config.is_some() {
-            return self.sign_http_protected(method, url, body, nonce);
+            return self.sign_http_protected(did, method, url, body, nonce);
         }
         let body_file = match body {
             Some(bytes) => Some(write_temp_json(bytes)?),
@@ -910,12 +1032,13 @@ impl AnpioKey {
     /// body is present, and this client sends the same header on the wire.
     fn sign_http_protected(
         &self,
+        did: &str,
         method: &str,
         url: &str,
         body: Option<&[u8]>,
         nonce: Option<&str>,
     ) -> Result<BTreeMap<String, String>> {
-        let grant = self.grant_id()?.to_string();
+        let grant = self.protected_grant(did, Operation::Http)?.to_string();
         let request_id = crate::message::uuid_v4();
         let mut headers = BTreeMap::new();
         if body.is_some() {
@@ -1127,19 +1250,47 @@ impl AnpioKey {
     fn protected_grant(&self, did: &str, operation: Operation) -> Result<&str> {
         if self.config.is_none() {
             bail!(
-                "{did} reaches anpio-key over its development socket, which cannot make {}. \
+                "{did} reaches an anpio-key over its development socket, which cannot make {}. \
                  Re-run: anpio-cli did attach --config <service.json>",
                 operation.purpose()
             );
         }
-        self.grant.as_deref().ok_or_else(|| {
+        self.grant_for(operation).ok_or_else(|| {
             anyhow!(
                 "{did} has no anpio-key grant, so the daemon has no authorization for {}. Ask \
                  the anpio-key administrator for a grant that covers it, then re-run: \
-                 anpio-cli did attach --grant <grant-id>",
-                operation.daemon_name()
+                 anpio-cli key grant <grant-id> --purpose {}",
+                operation.daemon_name(),
+                operation.cli_name()
             )
         })
+    }
+
+    /// The grant that covers `operation`, from the per-purpose map first.
+    ///
+    /// The record predating that map holds a single id, and it was the HTTP grant; it stays
+    /// the fallback for every operation so those identities keep working unchanged.
+    pub fn grant_for(&self, operation: Operation) -> Option<&str> {
+        let purpose = match operation {
+            Operation::Http => "http",
+            Operation::DocumentProof => "document_proof",
+            _ => return self.grant.as_deref(),
+        };
+        self.grants
+            .get(purpose)
+            .map(String::as_str)
+            .or(self.grant.as_deref())
+    }
+
+    /// Whether a grant for `operation` is recorded. Presence is not validity.
+    ///
+    /// The development surface's HTTP signing predates grants, so it needs none; every
+    /// other operation, and every protected operation, needs the grant that reaches it.
+    pub fn has_grant_for(&self, operation: Operation) -> bool {
+        match operation {
+            Operation::Http => self.config.is_none() || self.grant_for(operation).is_some(),
+            _ => self.grant_for(operation).is_some(),
+        }
     }
 
     /// One `anpio-key data --config` call, returning the reply's `data`.
@@ -1187,12 +1338,14 @@ impl AnpioKey {
         signing_result(data, operation, request_id)
     }
 
-    /// The grant this identity signs under, by name.
-    fn grant_id(&self) -> Result<&str> {
-        self.grant.as_deref().ok_or_else(|| {
+    /// The grant this identity signs `operation` under.
+    fn grant_id(&self, operation: Operation) -> Result<&str> {
+        self.grant_for(operation).ok_or_else(|| {
             anyhow!(
-                "this anpio-key identity records no grant; ask the anpio-key administrator for \
-                 one, then re-run: anpio-cli did attach --grant <grant-id>"
+                "this anpio-key identity records no {} grant; ask the anpio-key administrator \
+                 for one, then re-run: anpio-cli key grant <grant-id> --purpose {}",
+                operation.cli_name(),
+                operation.cli_name()
             )
         })
     }
@@ -1201,8 +1354,8 @@ impl AnpioKey {
     ///
     /// Presence of a grant id is not proof it is usable: expiry, uses and renewals are the
     /// daemon's facts, and this is the one call that asks for them.
-    pub fn grant_status(&self) -> Result<GrantStatus> {
-        let grant = self.grant_id()?;
+    pub fn grant_status(&self, operation: Operation) -> Result<GrantStatus> {
+        let grant = self.grant_id(operation)?;
         let data = self.protected_request(&serde_json::json!({
             "operation": "GET_GRANT_STATUS",
             "grant_id": grant,
@@ -1217,8 +1370,8 @@ impl AnpioKey {
     /// the policy allows is answered with the largest expiry it will grant rather than
     /// refused. An exhausted grant cannot be renewed, and a `request`-kind grant cannot
     /// either; both come back as a refusal code.
-    pub fn renew_grant(&self, expiry: i64) -> Result<GrantStatus> {
-        let grant = self.grant_id()?;
+    pub fn renew_grant(&self, operation: Operation, expiry: i64) -> Result<GrantStatus> {
+        let grant = self.grant_id(operation)?;
         let data = self.protected_request(&serde_json::json!({
             "operation": "RENEW_GRANT",
             "grant_id": grant,
@@ -1234,13 +1387,13 @@ impl AnpioKey {
     /// grant now reaches — the daemon may have clamped the request to the policy's ceiling,
     /// which is shorter than the caller asked for and worth showing. `Ok(None)` means the
     /// grant was already good enough and no daemon call beyond the status read was made.
-    pub fn ensure_runway(&self) -> Result<Option<GrantStatus>> {
+    pub fn ensure_runway(&self, operation: Operation) -> Result<Option<GrantStatus>> {
         let now = unix_now()?;
-        let status = self.grant_status()?;
+        let status = self.grant_status(operation)?;
         if !runway_plan(&status, now)? {
             return Ok(None);
         }
-        let renewed = self.renew_grant(now + GRANT_RENEW_REQUEST_SECS)?;
+        let renewed = self.renew_grant(operation, now + GRANT_RENEW_REQUEST_SECS)?;
         if !renewed.usable() || renewed.expiry <= now {
             bail!(
                 "anpio-key renewed grant {} but it is still {} with {} seconds left; a listener \
@@ -1264,35 +1417,81 @@ impl AnpioKey {
         let keys = self.protected_request(&serde_json::json!({
             "operation": "LIST_AUTHORIZED_KEYS",
         }))?;
-        let entry = keys
+        let entries = keys
             .get("keys")
             .and_then(Value::as_array)
-            .and_then(|items| {
+            .map(|items| {
                 items
                     .iter()
-                    .find(|item| item.get("did").and_then(Value::as_str) == Some(did))
+                    .filter(|item| item.get("did").and_then(Value::as_str) == Some(did))
+                    .collect::<Vec<_>>()
             })
-            .ok_or_else(|| {
-                anyhow!(
-                    "anpio-key authorizes no key for {did} under this principal; ask the \
-                     administrator to register it, or check the DID"
-                )
-            })?;
+            .unwrap_or_default();
+        if entries.is_empty() {
+            bail!(
+                "anpio-key authorizes no key for {did} under this principal; ask the \
+                 administrator to register it, or check the DID"
+            );
+        }
+        // The listed `kid` is the full `{did}#{fragment}` the catalog holds; the record's
+        // `kid` (and `--kid`) is the fragment. Both sides are normalized before comparing.
+        let keyid_of = |entry: &Value| -> Option<String> {
+            let listed = entry.get("kid").and_then(Value::as_str)?;
+            Some(if listed.contains('#') {
+                listed.to_string()
+            } else {
+                format!("{did}#{listed}")
+            })
+        };
+        let entry = match &self.kid {
+            // An explicit fragment is an exact requirement: attaching under another key
+            // would sign with a key the caller did not choose.
+            Some(wanted) => entries
+                .iter()
+                .find(|entry| {
+                    keyid_of(entry)
+                        .and_then(|keyid| keyid.rsplit_once('#').map(|(_, f)| f.to_string()))
+                        .as_deref()
+                        == Some(wanted.as_str())
+                })
+                .copied()
+                .ok_or_else(|| {
+                    let offered = entries
+                        .iter()
+                        .filter_map(|entry| keyid_of(entry))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    anyhow!(
+                        "anpio-key authorizes no key {did}#{wanted} under this principal \
+                         (it offers: {offered}); check --kid or ask the administrator to \
+                         grant that key"
+                    )
+                })?,
+            // Without one, prefer a hot key over the binding key: the binding key is for
+            // publishing the document, and everyday signing should not use it.
+            None => entries
+                .iter()
+                .filter(|entry| {
+                    keyid_of(entry).is_some_and(|keyid| {
+                        !keyid.ends_with("#key-1")
+                    })
+                })
+                .min_by_key(|entry| keyid_of(entry))
+                .or_else(|| entries.first())
+                .copied()
+                .unwrap(),
+        };
         let key_id = entry
             .get("key_id")
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("anpio-key listed a key without a key_id"))?;
-        let kid = entry
-            .get("kid")
-            .and_then(Value::as_str)
+        let keyid = keyid_of(entry)
             .ok_or_else(|| anyhow!("anpio-key listed a key without a kid"))?;
-        if let Some(wanted) = &self.kid {
-            if wanted != kid {
-                bail!(
-                    "anpio-key authorizes {kid} for {did}, not {wanted}; drop --kid to use the \
-                     authorized key"
-                );
-            }
+        if keyid.rsplit_once('#').map(|(prefix, _)| prefix) != Some(did) {
+            bail!(
+                "anpio-key listed {keyid} for {did}; refusing to attach a key to an identity \
+                 it does not name"
+            );
         }
         let data = self.protected_request(&serde_json::json!({
             "operation": "GET_DOCUMENT",
@@ -1305,7 +1504,7 @@ impl AnpioKey {
                  to an identity it does not name"
             );
         }
-        Ok((document, format!("{did}#{kid}")))
+        Ok((document, keyid))
     }
 
     fn invoke(&self, args: &[String]) -> Result<Vec<u8>> {
@@ -1340,21 +1539,26 @@ impl AnpioKey {
     /// Run the protected entry.
     ///
     /// Two things are deliberately absent compared with [`Self::invoke`]: `--root` (the
-    /// protected surface refuses it) and `$ANPIOCLI_ANPIO_KEY` (an environment override of
-    /// the binary would be a way around the administrator-pinned config). The config path
-    /// itself is part of the identity record and has no command-level flag.
+    /// protected surface refuses it) and a `PATH` lookup. The installed binary's absolute
+    /// path is what runs, so a different `anpio-key` earlier on `PATH` cannot be the
+    /// process that reads the administrator's config. `$ANPIOCLI_ANPIO_KEY` remains the
+    /// explicit override a checkout needs before it is installed; it changes nothing a
+    /// caller who controls the environment could not already do. The config path itself
+    /// is part of the identity record and has no command-level flag.
     fn invoke_protected(&self, args: &[String]) -> Result<Vec<u8>> {
-        let output = Command::new(DEFAULT_BINARY).args(args).output().map_err(|err| {
+        let binary = protected_binary();
+        let output = Command::new(&binary).args(args).output().map_err(|err| {
             anyhow!(
-                "could not run {DEFAULT_BINARY}: {err}. The protected entry uses the installed \
-                 binary on PATH; install anpio-key or re-run: anpio-cli did attach"
+                "could not run {binary}: {err}. The protected entry uses the \
+                 administrator-installed binary; install anpio-key or re-run: anpio-cli did \
+                 attach"
             )
         })?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stderr = stderr.trim();
             bail!(
-                "{DEFAULT_BINARY} {} failed: {}",
+                "{binary} {} failed: {}",
                 args.join(" "),
                 if stderr.is_empty() { "no message" } else { stderr }
             );
@@ -1388,7 +1592,14 @@ fn parse_named_key(bytes: &[u8]) -> Result<NamedKey> {
 
 /// Decode the `z`-prefixed multibase key anpio-key reports into the public key an `anp`
 /// document builder takes.
-pub fn ed25519_public_key(public_multibase: &str, name: &str) -> Result<PublicKeyMaterial> {
+///
+/// The multicodec prefix decides the curve, not the role: an identity's document has one
+/// Ed25519 root, one Ed25519 device signing key and one X25519 agreement key, and the
+/// checker that holds the roles is `vnext_document`.
+pub fn public_key_from_multibase(
+    public_multibase: &str,
+    name: &str,
+) -> Result<PublicKeyMaterial> {
     let encoded = public_multibase.strip_prefix('z').ok_or_else(|| {
         anyhow!(
             "anpio-key reported key {name}'s public key as {public_multibase:?}, which is not \
@@ -1398,19 +1609,34 @@ pub fn ed25519_public_key(public_multibase: &str, name: &str) -> Result<PublicKe
     let bytes = bs58::decode(encoded)
         .into_vec()
         .with_context(|| format!("anpio-key reported key {name}'s public key in a form that is not base58btc"))?;
-    if bytes.len() != 34 || bytes[0] != 0xed || bytes[1] != 0x01 {
-        bail!(
+    match bytes.get(..2) {
+        Some([0xed, 0x01]) if bytes.len() == 34 => {
+            let mut key = [0u8; 32];
+            key.copy_from_slice(&bytes[2..]);
+            let verifying = ed25519_dalek::VerifyingKey::from_bytes(&key).map_err(|err| {
+                anyhow!("anpio-key reported key {name}'s public key, but it is not a valid Ed25519 point: {err}")
+            })?;
+            Ok(PublicKeyMaterial::Ed25519(verifying))
+        }
+        Some([0xec, 0x01]) if bytes.len() == 34 => {
+            let mut key = [0u8; 32];
+            key.copy_from_slice(&bytes[2..]);
+            Ok(PublicKeyMaterial::X25519(key))
+        }
+        _ => bail!(
             "anpio-key reported key {name}'s public key as {} bytes of multicodec {:?}, not an \
-             Ed25519 key (0xed01 + 32 bytes)",
+             Ed25519 or X25519 key (0xed01 / 0xec01 + 32 bytes)",
             bytes.len(),
             bytes.get(..2)
-        );
+        ),
     }
-    let mut key = [0u8; 32];
-    key.copy_from_slice(&bytes[2..]);
-    let verifying = ed25519_dalek::VerifyingKey::from_bytes(&key)
-        .map_err(|err| anyhow!("anpio-key reported key {name}'s public key, but it is not a valid Ed25519 point: {err}"))?;
-    Ok(PublicKeyMaterial::Ed25519(verifying))
+}
+
+pub fn ed25519_public_key(public_multibase: &str, name: &str) -> Result<PublicKeyMaterial> {
+    match public_key_from_multibase(public_multibase, name)? {
+        key @ PublicKeyMaterial::Ed25519(_) => Ok(key),
+        other => bail!("anpio-key reported key {name} as {other:?}, not an Ed25519 key"),
+    }
 }
 
 /// Whether this process has a controlling terminal to prompt on.
@@ -1520,6 +1746,58 @@ pub fn document_keyids(document: &Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The device signing and agreement public keys a document publishes, in the order
+/// `(..., -sign)` and `(..., -agreement)`.
+///
+/// A document with only `#key-1` — an identity minted before device keys existed — answers
+/// `None`: there are no device roles for a record to name.
+pub fn device_public_multibases(document: &Value) -> Option<(String, String)> {
+    let methods = document.get("verificationMethod")?.as_array()?;
+    let find = |suffix: &str| {
+        methods
+            .iter()
+            .find(|method| {
+                method
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| {
+                        id.rsplit('#')
+                            .next()
+                            .is_some_and(|fragment| fragment.ends_with(suffix))
+                    })
+            })
+            .and_then(|method| method.get("publicKeyMultibase"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    Some((find("-sign")?, find("-agreement")?))
+}
+
+/// Which local name holds each device key `document` publishes, in role order.
+///
+/// The document is the authority on which public key each role has; the `(name, public)`
+/// rows only supply the local labels. `None` for a role means this machine holds no key for
+/// it — or holds one from an `anpio-key` too old to report public keys — so `did attach`
+/// records only what it can actually use.
+pub fn device_key_names(
+    document: &Value,
+    held: &[(String, Option<String>)],
+) -> Vec<(&'static str, Option<String>)> {
+    let Some((signing, agreement)) = device_public_multibases(document) else {
+        return Vec::new();
+    };
+    [("sign", signing), ("agreement", agreement)]
+        .into_iter()
+        .map(|(role, public)| {
+            let name = held
+                .iter()
+                .find(|(_, held_public)| held_public.as_deref() == Some(public.as_str()))
+                .map(|(name, _)| name.clone());
+            (role, name)
+        })
+        .collect()
 }
 
 fn binding_keyid(document: &Value) -> Option<String> {
@@ -2332,7 +2610,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("no anpio-key grant"), "{err}");
-        assert!(err.contains("--grant"), "{err}");
+        assert!(err.contains("--purpose origin-proof"), "{err}");
     }
 
     #[test]
@@ -2431,5 +2709,63 @@ mod tests {
         assert!(capabilities.contains(Operation::Http));
         assert!(!capabilities.contains(Operation::OriginProof));
         assert_eq!(capabilities.announced_names().len(), KNOWN_V2_OPERATIONS.len());
+    }
+
+    #[test]
+    fn device_roles_are_matched_to_local_names_by_public_key() {
+        let document = json!({
+            "id": "did:wba:h:user:a:e1_x",
+            "verificationMethod": [
+                {"id": "did:wba:h:user:a:e1_x#key-1", "publicKeyMultibase": "zROOT"},
+                {"id": "did:wba:h:user:a:e1_x#a/default-agreement", "publicKeyMultibase": "zAGREE"},
+                {"id": "did:wba:h:user:a:e1_x#a/default-sign", "publicKeyMultibase": "zSIGN"}
+            ]
+        });
+        let held = vec![
+            ("agree".to_string(), Some("zAGREE".to_string())),
+            ("root".to_string(), Some("zROOT".to_string())),
+            ("sign".to_string(), Some("zSIGN".to_string())),
+        ];
+        assert_eq!(
+            device_key_names(&document, &held),
+            vec![
+                ("sign", Some("sign".to_string())),
+                ("agreement", Some("agree".to_string())),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_role_this_machine_does_not_hold_is_left_unnamed() {
+        let document = json!({
+            "verificationMethod": [
+                {"id": "d#a/default-sign", "publicKeyMultibase": "zSIGN"},
+                {"id": "d#a/default-agreement", "publicKeyMultibase": "zAGREE"}
+            ]
+        });
+        let held = vec![
+            ("sign".to_string(), Some("zSIGN".to_string())),
+            ("old".to_string(), None),
+        ];
+        assert_eq!(
+            device_key_names(&document, &held),
+            vec![
+                ("sign", Some("sign".to_string())),
+                ("agreement", None),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_document_without_device_keys_names_no_roles() {
+        let document = json!({
+            "verificationMethod": [{"id": "d#key-1", "publicKeyMultibase": "zROOT"}]
+        });
+        assert_eq!(device_public_multibases(&document), None);
+        assert!(device_key_names(
+            &document,
+            &[("root".to_string(), Some("zROOT".to_string()))]
+        )
+        .is_empty());
     }
 }

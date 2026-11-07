@@ -18,8 +18,8 @@ pub use chain::{
     ChainError, ChainResolution, Supersession,
 };
 pub use did::{
-    build_external_identity, create_identity, load_stored_key, mint_keys, rebuild_identity,
-    resign_document, retirement_document, subject_of, successor_of, without_proof,
+    build_external_identity, create_identity, fresh_challenge, load_stored_key, mint_keys,
+    rebuild_identity, resign_document, retirement_document, subject_of, successor_of, without_proof,
     CreateIdentityInput, ExternalIdentity,
 };
 pub use host::{

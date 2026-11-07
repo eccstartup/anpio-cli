@@ -410,10 +410,7 @@ impl Custody {
         match self {
             // The development surface's HTTP signing predates grants; on the protected
             // surface the grant is the whole authorization, so it is required there.
-            Custody::AnpioKey(key) => match operation {
-                Operation::Http => key.config.is_none() || key.grant.is_some(),
-                _ => key.grant.is_some(),
-            },
+            Custody::AnpioKey(key) => key.has_grant_for(operation),
         }
     }
 

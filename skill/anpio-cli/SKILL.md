@@ -63,72 +63,158 @@ pushes it over the host's authenticated control plane. It needs the bearer token
 that `did create` / `did register` / `anp login` cached, so deleting that cache is
 what "this step never happened" looks like.
 
-### Identity whose key is held by anpio-key
+### Registering on awiki.me
 
-The default line mints a key in this store. The other line asks a local
-[`anpio-key`](https://github.com/eccstartup/anpio-key) daemon to mint a named key
-and to proof the document: the store then records the key's **name**, and has no
-private bytes at all.
-
-This is an administrator action, not something an agent runs on its behalf: the
-daemon reads a passphrase (and shows recovery words) on a real terminal, and the
-document proof is the administrator's signature. Run without a controlling
-terminal, the command refuses — it never falls back to a local key, because that
-would be a different identity.
+The email round trip is **inside** `did create`, not a second command:
 
 ```bash
-# In the administrator's own terminal, as the anpio-key administrator:
-anpio-cli did create --host <did-host-url> --handle <your-handle> --key anpio-key
-#   → five stages: read the host, precheck the handle, mint in anpio-key,
-#     proof the document there, register. Prints the key name and prints the
-#     admin step that authorizes signing.
-
-# Still the administrator, and still a separate decision:
-anpio-key grant create --key <name> --did <did> --target <endpoint-url>
-#   → defaults --method POST --ttl 24h --uses 100; prints the grant id
-#     (protected named-key signing is not in place yet: this refuses a named
-#      key until it can be enrolled in the protected catalog — see anpio-key's TODO)
-
-# Hand the grant id to the CLI once; it lands in identity.json beside the name:
-anpio-cli key grant <grant-id> --agent <your-id>
+anpio-cli did create --host awiki.me --handle <handle> --email <address> --agent <id>
 ```
 
-Until the grant is recorded the identity exists and `did show` works, but a
-signature is refused by the daemon with its own code. `did show`'s first line
-says where the key lives and under which grant:
-`key: anpio-key (key k-…, grant g-…)`, or `grant none` before the handoff.
+In order: read the host's service document, precheck the handle, mint keys, build
+and sign the document, send the verification email, poll `email-status` every 5 s
+for up to 5 minutes, then `register` with the same document. When the person says
+the email arrived there is nothing left for you to run — the command is already
+polling. Do not start a second `did create` to "continue"; it would look for a new
+handle and a new key.
 
-Signing then needs only the target — `anpio sign --target <url>` — because the
-key name and the grant are already in the identity.
+**If it timed out**, the key and signed document are kept together in
+`$ANPIOCLI_HOME/pending.json`. After the address is verified, resume with the
+command the failure itself prints:
+
+```bash
+anpio-cli did register --agent <id> --email <address>
+```
+
+That publishes the stored document as it is — correct when the only thing that
+failed was the wait. It does **not** re-send the email or wait again, and it does
+not re-sign: use it only once the address is verified. `--email` is not stored
+with the identity, so a retry has to pass it again.
+
+**If the pending record was written by an older build** — or belongs to
+`--key anpio-key`, on a machine without the protected service — do not register
+it. Rebuild and re-sign with the same key instead:
+
+```bash
+anpio-cli did create --host awiki.me --handle <handle> --email <address> \
+  --agent <id> --reuse-key [--key anpio-key]
+```
+
+`did register` refuses a pending anpio-key record and names this command. Reuse
+is what makes the retry cost a name, not a key; `pending.json` keeps the key
+across every failure below.
+
+Two host errors name the **document**, not the handle or the email:
+
+- `-32004 challenge is required` — the root proof carried no `challenge`.
+- `-32004 DID document or deviceManifest is invalid` (`data: null`) — the proof
+  covered a different input than the one published.
+
+Both are fixed in this build: the root proof now carries the bare hostname as
+`domain` and a fresh 32-hex `challenge`, and the proof object **keeps** the
+document's `@context` (the host reads proof options as stored; stripping it signs
+one input and publishes another). If either error appears, the pending record is
+older than the fix — rebuild it with `--reuse-key`, or delete `pending.json` and
+run `did create` again. A hand-written client calling the RPC directly has to
+send `x-awiki-client-version: awiki-cli/0815/1.0.58` as well, or the host refuses
+the email calls.
+
+### Identity whose keys are held by anpio-key
+
+The default line mints a key in this store — a `0600` file any code running as
+your user can read. The other line puts the keys behind a **protected
+[`anpio-key`](https://github.com/eccstartup/anpio-key) service**: a system-level
+daemon under its own account, whose sign socket the operator's account cannot
+open. The store then records the key and grant ids, and holds no private bytes
+at all. Three keys sit in the service because awiki accepts only a one-device
+vNext document: an Ed25519 root (`#key-1`), an Ed25519 device signing key
+(`{agent}/{profile}-sign`) and an X25519 device agreement key
+(`{agent}/{profile}-agreement`).
+
+**The boundary is a property of the install.** A machine that has the protected
+service gets its identity provisioned when an existing identity is adopted into
+it; `did create` is not the way in (see below). Adoption is an administrator
+action in their own terminal, because the passphrases are typed there and never
+appear as an argument or an environment variable:
+
+```bash
+sudo ./install.sh --adopt --identity <identity.json> \
+  --cli-binary <anpio-cli> --cli-sha256 <sha256> \
+  --target https://awiki.me/anp-im/rpc \
+  --target https://awiki.me/user-service/v1/did-auth/rpc
+#   → the three keys move into the service vault; the DID and its published
+#     document are not changed; the roles and policies are confirmed; grants are
+#     issued to the agent account; an agent record is written under
+#     /Library/ANPIOKey/agent/home
+```
+
+A new identity's keys cannot be provisioned into the service yet, so
+`did create --key anpio-key` **refuses** on a machine that has the service
+installed, and names the adopt command. It never starts a second daemon and
+never falls back to a local key.
+
+Keys are used by the **agent account**, not the administrator: the sign socket
+is `_anpio:_anpio_sign`, the agent is in the group, and the administrator's
+account deliberately is not. Run the CLI as that account:
+
+```bash
+sudo -u _anpagent env HOME=/Library/ANPIOKey/agent/home \
+  TMPDIR=/Library/ANPIOKey/agent/home/tmp \
+  /Library/ANPIOKey/bin/anpio-cli did show --agent <your-id>
+```
 
 **Recovery, not creation.** `did attach` writes a new store record for a DID whose
-key anpio-key already holds (a new machine, a wiped profile). It is not how an
-identity is created:
+keys the service already holds (another machine, a wiped profile) — and it is how
+a freshly adopted identity appears in a different store:
 
 ```bash
-anpio-cli did attach --did <did> --name <name> --agent <your-id>
-#   → the name must be one `anpio-key key list` shows, and its fingerprint must be
-#     the one the DID ends in; otherwise it refuses before writing anything
+anpio-cli did attach --did <did> --kid <agent>/<profile>-sign \
+  --grant http=<hot-grant-id> --grant document_proof=<root-grant-id> --agent <your-id>
+#   → --config defaults to the installed service; --kid must be a fragment the
+#     service lists for this DID. The HTTP grant covers the hot key; the root key
+#     signs the document and is not used for requests.
 ```
 
-`did attach-anpio-key` still parses as the old spelling of the same command.
+`--grant` is repeatable, each as `<purpose>=<grant-id>`: `http` covers
+`SIGN_HTTP` (the Hot key) and `document_proof` covers `SIGN_DOCUMENT_PROOF` (the
+Root key). A bare `--grant <id>` still means the HTTP grant. Attach asks the
+service about every named grant and refuses one that has expired or run out of
+uses, so it never records an identity that cannot sign. To replace a grant later —
+a renewal the administrator issued while the identity already exists — record it
+without touching anything else:
+
+```bash
+anpio-cli key grant <grant-id> --purpose http --agent <your-id>
+anpio-cli key grant <grant-id> --purpose document-proof --agent <your-id>
+```
+
+`did show`'s first line says where the key lives:
+`key: anpio-key (key <kid>, grant <id>)`. Signing then needs only the target —
+`anp sign --target <url>` — or `anp login`.
+
 Records written before keys had names find theirs again by DID fingerprint, and
-say so if that lookup fails.
+say so if that lookup fails. `did attach-anpio-key` still parses as the old
+spelling of the same command.
 
 For group E2EE, add `--device <id>` naming the `{device}-sign` entry in the DID
 document. Without it those commands refuse, and they say so before touching the
 network — the local `{agent}/{profile}` is not a device name.
 
-Pass `--config <service.json>` to use the daemon's protected surface instead of
-its development socket (`--grant <grant-id>` names the grant this identity signs
-under). One identity has one surface: `--config` and `--key-root`/`--socket`
-cannot be combined.
+`--config <service.json>` names the protected surface explicitly (the ordinary
+value is found automatically). `--key-root`/`--socket` name the legacy named-key
+daemon instead, and the two cannot be combined: one identity points at one
+surface, so a command can never choose between them at signing time.
 
-What works on either surface: `anp sign`, `anp login`, `did register`,
-`did publish`, `did show`, `anp show` — they sign whole ANP-02 HTTP requests,
-which is what the development socket offers.
+`--document <file>` supplies the DID document read out of band instead of
+resolving it from the DID's host — for a machine whose DNS answers through a
+local proxy, which the fetch policy refuses. The file is held to the same checks
+as a fetched document (its `id`, and a proof bound to the key the DID spells).
+The named-key surface takes it; the protected service answers `GET_DOCUMENT`
+itself.
 
-What the protected surface adds: when the daemon announces `SIGN_ORIGIN_PROOF`,
+What the protected surface adds: `anp sign`, `anp login`, `did register`, and
+`did publish` sign whole ANP-02 HTTP requests; `did publish` proves the document
+with `SIGN_DOCUMENT_PROOF`. When the daemon announces `SIGN_ORIGIN_PROOF`,
 `msg` (except the purely local reads, which never signed), `contacts`, and
 `group` send their origin proofs to the daemon. With `--device <id>` at attach
 time and `SIGN_PURPOSE(device_assertion)` announced, `group e2ee` also works: the
@@ -138,8 +224,15 @@ the identity actually got, and a refusal always says which half is missing — t
 daemon's announcement or this build.
 
 What is refused outright: `did update`. It needs a freshly minted successor key,
-which `anpio-key` cannot supply from its administrative surface yet. The refusal
+which `anpio-key` cannot supply from its protected surface yet. The refusal
 names the commands that do work; do not try to work around it.
+
+**On a machine with no protected service installed**, `did create --key anpio-key`
+still mints the three named keys under your account so an identity can be built
+and registered first. That identity is not yet protected: adopt it into a
+protected install to move the keys out of your account. Never run
+`anpio-key serve --development --allow-named-key-signing` as the way to sign —
+a development daemon is not a boundary.
 
 ### Messaging
 

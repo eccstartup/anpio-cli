@@ -16,9 +16,10 @@
 //! re-encoding the legacy dialect's bytes would be a valid alphabet over an invalid signing
 //! input — which is what a real document with `@context` used to come back as: rejected.
 //!
-//! The artifact carries **no** proof-level `@context`: the spec wants it in the signing
-//! input, and a verifier restores it from the document. Carrying it would give one document
-//! two spellings.
+//! The artifact **keeps** the proof-level `@context`. `anp`'s verifier restores it from the
+//! document before checking, but the awiki host does not: it takes the proof options from
+//! the stored proof object as they are. Stripping the field therefore signs one input and
+//! publishes another, and the host rejects the document with `did_document_proof_invalid`.
 
 use anp::proof::{CRYPTOSUITE_EDDSA_JCS_2022, PROOF_TYPE_DATA_INTEGRITY};
 use anp::{PrivateKeyMaterial, PublicKeyMaterial};
@@ -112,7 +113,6 @@ pub(crate) fn complete(prepared: Prepared, signature: &[u8]) -> Result<Value> {
         .map_err(|_| unusable("the signature does not match the key that was asked to make it"))?;
 
     let mut proof_object = prepared.proof_object;
-    proof_object.remove("@context");
     proof_object.insert(
         "proofValue".into(),
         json!(format!("z{}", bs58::encode(signature).into_string())),
@@ -129,11 +129,15 @@ pub(crate) fn complete(prepared: Prepared, signature: &[u8]) -> Result<Value> {
 /// Sign `document` with `key` and return it carrying the canonical proof.
 ///
 /// Every document this client publishes is proved for `assertionMethod` at the moment it is
-/// published, so those are not parameters.
+/// published, so that is not a parameter. `domain` and `challenge` are: the awiki host
+/// requires the root proof to carry both, and a re-proof of a registered document must name
+/// the authority that issued it.
 pub(crate) fn sign_document(
     document: &Value,
     key: &PrivateKeyMaterial,
     verification_method: &str,
+    domain: Option<&str>,
+    challenge: Option<&str>,
 ) -> Result<Value> {
     let prepared = prepare(
         document,
@@ -142,8 +146,8 @@ pub(crate) fn sign_document(
             verification_method,
             purpose: "assertionMethod",
             created: &timestamp(),
-            domain: None,
-            challenge: None,
+            domain,
+            challenge,
         },
     )?;
     let signature = key

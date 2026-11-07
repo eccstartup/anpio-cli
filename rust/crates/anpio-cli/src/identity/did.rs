@@ -25,17 +25,17 @@
 use std::collections::BTreeMap;
 
 use anp::authentication::device_manifest::{
-    build_vnext_did_document, DeviceManifestEntry, PROFILE_CORE_BINDING_V1, PROFILE_GROUP_BASE_V2,
-    PROFILE_GROUP_E2EE_V2, PROFILE_IDENTITY_DISCOVERY_V1,
+    build_vnext_did_document, DeviceManifestEntry, PROFILE_CORE_BINDING_V1,
+    PROFILE_DIRECT_BASE_V1, PROFILE_DIRECT_E2EE_V2, PROFILE_GROUP_BASE_V2, PROFILE_GROUP_E2EE_V2,
+    PROFILE_IDENTITY_DISCOVERY_V1,
 };
 use anp::authentication::did_transition::parse_did_wba_e1;
 use anp::authentication::did_wba::{
-    build_anp_message_service, build_unsigned_e1_did_document, compute_multikey_fingerprint,
-    AnpMessageServiceOptions, DidKeyRole, DidVerificationRelationship, SuppliedDidKey,
-    SuppliedE1DidDocumentOptions, ANP_MESSAGE_SERVICE_TYPE,
+    build_anp_message_service, compute_multikey_fingerprint, AnpMessageServiceOptions,
+    ANP_MESSAGE_SERVICE_TYPE,
 };
 use anp::{PrivateKeyMaterial, PublicKeyMaterial};
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, Result};
 use chrono::Utc;
 use serde_json::{json, Value};
 
@@ -48,6 +48,9 @@ pub struct CreateIdentityInput {
     /// an identity's DID hangs under the host's, so the host decides what its authority
     /// is (its `AWIKI_SERVICE_DID`; see `awiki-open-server/app/settings.py`).
     pub authority: String,
+    /// The bare hostname the identity claims, e.g. `awiki.me`. The root proof names it as
+    /// its `domain`, and the host refuses a document whose proof omits it.
+    pub domain: String,
     pub agent: String,
     pub profile: String,
     pub handle: String,
@@ -59,20 +62,6 @@ pub struct CreateIdentityInput {
     /// rather than chosen by this client.
     pub service_endpoint: String,
     pub service_did: String,
-}
-
-/// Split a DID authority into the hostname and port `create_did_wba_document` wants,
-/// undoing ANP-03 §2.1's `%3A` encoding.
-fn split_authority(authority: &str) -> Result<(String, Option<u16>)> {
-    match authority.split_once("%3A") {
-        None => Ok((authority.to_string(), None)),
-        Some((host, port)) => {
-            let port = port
-                .parse::<u16>()
-                .with_context(|| format!("{authority} does not end in a port"))?;
-            Ok((host.to_string(), Some(port)))
-        }
-    }
 }
 
 /// Mint a fresh identity. Nothing is written; the caller saves it.
@@ -124,12 +113,6 @@ pub fn rebuild_identity(
     })?;
     let root = load_stored_key(root_pair)?;
     let root_public = root.public_key();
-    let fingerprint = compute_multikey_fingerprint(&root_public)
-        .map_err(|err| anyhow!("computing the reused key's fingerprint: {err}"))?;
-    let did = format!(
-        "did:wba:{}:user:{}:e1_{}",
-        input.authority, input.agent, fingerprint
-    );
 
     // The stored fragments carry the old device name; find the pair by role, not by the
     // exact fragment, so a retry under another agent renames rather than re-mints.
@@ -145,67 +128,22 @@ pub fn rebuild_identity(
         .ok_or_else(|| anyhow!("the pending identity has no device agreement key"))?;
     let signing_public = public_of_pem(&signing_pair.public_key_pem)?;
     let agreement_public = public_of_pem(&agreement_pair.public_key_pem)?;
-    if !matches!(signing_public, PublicKeyMaterial::Ed25519(_))
-        || !matches!(agreement_public, PublicKeyMaterial::X25519(_))
-    {
-        bail!("the pending device keys are not an Ed25519/X25519 pair");
-    }
 
-    let device_id = format!("{}/{}", input.agent, input.profile);
-    let signing_fragment = format!("{device_id}-sign");
-    let agreement_fragment = format!("{device_id}-agreement");
-    let signing_id = format!("{did}#{signing_fragment}");
-    let agreement_id = format!("{did}#{agreement_fragment}");
-    let signing_method = json!({
-        "id": signing_id,
-        "type": "Multikey",
-        "controller": did,
-        "publicKeyMultibase": multibase(0xed, &public_bytes(&signing_public)),
-    });
-    let agreement_method = json!({
-        "id": agreement_id,
-        "type": "Multikey",
-        "controller": did,
-        "publicKeyMultibase": multibase(0xec, &public_bytes(&agreement_public)),
-    });
-    let entry = DeviceManifestEntry {
-        device_id: device_id.clone(),
-        signing_key_id: signing_id,
-        e2ee_key_id: agreement_id,
-        profiles: device_profiles(),
-    };
-
+    let (did, device_id, document) =
+        vnext_document(&input, &root_public, &signing_public, &agreement_public)?;
     let root_key_id = format!("{did}#key-1");
-    let root_method = json!({
-        "id": root_key_id,
-        "type": "Multikey",
-        "controller": did,
-        "publicKeyMultibase": multibase(0xed, &public_bytes(&root_public)),
-    });
-    let base = json!({
-        "id": did,
-        "@context": [
-            "https://www.w3.org/ns/did/v1",
-            "https://w3id.org/security/data-integrity/v2",
-            "https://w3id.org/security/multikey/v1",
-        ],
-        "service": [message_service_value(&input)],
-    });
-    let document = build_vnext_did_document(
-        &base,
+    let signed_document = proof::sign_document(
+        &document,
+        &root,
         &root_key_id,
-        &root_method,
-        &entry,
-        &signing_method,
-        &agreement_method,
-    )
-    .map_err(|err| anyhow!("assembling the device DID document: {err}"))?;
-    let signed_document = proof::sign_document(&document, &root, &root_key_id)?;
+        Some(&input.domain),
+        Some(&fresh_challenge()),
+    )?;
 
     let mut stored = std::collections::BTreeMap::new();
     stored.insert("key-1".to_string(), root_pair.clone());
-    stored.insert(signing_fragment, signing_pair.clone());
-    stored.insert(agreement_fragment, agreement_pair.clone());
+    stored.insert(format!("{device_id}-sign"), signing_pair.clone());
+    stored.insert(format!("{device_id}-agreement"), agreement_pair.clone());
 
     Ok(Identity {
         did,
@@ -221,12 +159,93 @@ pub fn rebuild_identity(
     })
 }
 
-/// A document built from a public key that lives **elsewhere** — the `anpio-key` line.
+/// The document both lines agree on: an Ed25519 root, an Ed25519 device signing key and an
+/// X25519 device agreement key, assembled by `build_vnext_did_document`.
+///
+/// The private halves come from very different places — this store on one line, `anpio-key`
+/// on the other — but the public halves and the roles they claim are the same, and the host
+/// rebuilds exactly this shape before accepting it. So both lines build it here, and a
+/// difference between them is a bug rather than a variation.
+fn vnext_document(
+    input: &CreateIdentityInput,
+    root_public: &PublicKeyMaterial,
+    signing_public: &PublicKeyMaterial,
+    agreement_public: &PublicKeyMaterial,
+) -> Result<(String, String, Value)> {
+    if !matches!(root_public, PublicKeyMaterial::Ed25519(_))
+        || !matches!(signing_public, PublicKeyMaterial::Ed25519(_))
+    {
+        bail!("the DID root and device signing keys must be Ed25519");
+    }
+    if !matches!(agreement_public, PublicKeyMaterial::X25519(_)) {
+        bail!("the device agreement key must be X25519");
+    }
+    let fingerprint = compute_multikey_fingerprint(root_public)
+        .map_err(|err| anyhow!("computing the identity key's fingerprint: {err}"))?;
+    let did = format!(
+        "did:wba:{}:user:{}:e1_{}",
+        input.authority, input.agent, fingerprint
+    );
+
+    let device_id = format!("{}/{}", input.agent, input.profile);
+    let signing_fragment = format!("{device_id}-sign");
+    let agreement_fragment = format!("{device_id}-agreement");
+    let signing_id = format!("{did}#{signing_fragment}");
+    let agreement_id = format!("{did}#{agreement_fragment}");
+    let signing_method = json!({
+        "id": signing_id,
+        "type": "Multikey",
+        "controller": did,
+        "publicKeyMultibase": multibase(0xed, &public_bytes(signing_public)),
+    });
+    let agreement_method = json!({
+        "id": agreement_id,
+        "type": "Multikey",
+        "controller": did,
+        "publicKeyMultibase": multibase(0xec, &public_bytes(agreement_public)),
+    });
+    let entry = DeviceManifestEntry {
+        device_id: device_id.clone(),
+        signing_key_id: signing_id,
+        e2ee_key_id: agreement_id,
+        profiles: device_profiles(),
+    };
+
+    let root_key_id = format!("{did}#key-1");
+    let root_method = json!({
+        "id": root_key_id,
+        "type": "Multikey",
+        "controller": did,
+        "publicKeyMultibase": multibase(0xed, &public_bytes(root_public)),
+    });
+    let base = json!({
+        "id": did,
+        "@context": [
+            "https://www.w3.org/ns/did/v1",
+            "https://w3id.org/security/data-integrity/v2",
+            "https://w3id.org/security/multikey/v1",
+        ],
+        "service": [message_service_value(input)],
+    });
+    let document = build_vnext_did_document(
+        &base,
+        &root_key_id,
+        &root_method,
+        &entry,
+        &signing_method,
+        &agreement_method,
+    )
+    .map_err(|err| anyhow!("assembling the device DID document: {err}"))?;
+    Ok((did, device_id, document))
+}
+
+/// A document built from public keys that live **elsewhere** — the `anpio-key` line.
 ///
 /// This function has no private material to sign with and returns the document unsigned:
-/// only the key's holder can prove it, and that proof is a daemon call. The shape is the
-/// root-only E1 document the host accepts (no `deviceManifest`): there are no device keys
-/// in this store, so nothing may claim one.
+/// only the key's holder can prove it, and that proof is a daemon call. The daemon holds
+/// three named keys for the identity — the root, the device signing key and the X25519
+/// agreement key — so the document carries the same one-device manifest the local line does,
+/// and the store still keeps no private bytes.
 pub struct ExternalIdentity {
     pub did: String,
     pub device_id: String,
@@ -235,39 +254,16 @@ pub struct ExternalIdentity {
 
 pub fn build_external_identity(
     input: &CreateIdentityInput,
-    public_key: PublicKeyMaterial,
+    root_public: PublicKeyMaterial,
+    signing_public: PublicKeyMaterial,
+    agreement_public: PublicKeyMaterial,
 ) -> Result<ExternalIdentity> {
-    if !matches!(public_key, PublicKeyMaterial::Ed25519(_)) {
-        bail!("the identity key must be Ed25519, not {public_key:?}");
-    }
-    let (host, port) = split_authority(&input.authority)?;
-    let options = SuppliedE1DidDocumentOptions {
-        port,
-        path_segments: vec!["user".to_string(), input.agent.clone()],
-        agent_description_url: None,
-        services: vec![message_service_value(input)],
-        root_key: SuppliedDidKey {
-            fragment: "key-1".to_string(),
-            role: DidKeyRole::RootControl,
-            public_key,
-            relationships: vec![
-                DidVerificationRelationship::Authentication,
-                DidVerificationRelationship::AssertionMethod,
-            ],
-        },
-        additional_keys: Vec::new(),
-    };
-    let document = build_unsigned_e1_did_document(&host, options)
-        .map_err(|err| anyhow!("building the DID document: {err}"))?;
-    let did = document
-        .get("id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("the built document has no id"))?
-        .to_string();
+    let (did, device_id, unsigned_document) =
+        vnext_document(input, &root_public, &signing_public, &agreement_public)?;
     Ok(ExternalIdentity {
         did,
-        device_id: format!("{}/{}", input.agent, input.profile),
-        unsigned_document: document,
+        device_id,
+        unsigned_document,
     })
 }
 
@@ -286,6 +282,8 @@ fn device_profiles() -> Vec<String> {
     [
         PROFILE_CORE_BINDING_V1,
         PROFILE_IDENTITY_DISCOVERY_V1,
+        PROFILE_DIRECT_BASE_V1,
+        PROFILE_DIRECT_E2EE_V2,
         PROFILE_GROUP_BASE_V2,
         PROFILE_GROUP_E2EE_V2,
     ]
@@ -345,7 +343,8 @@ pub fn successor_of(identity: &Identity) -> Result<Identity> {
     let (service_endpoint, service_did) = message_service(&identity.did_document, &identity.did)?;
 
     let mut successor = create_identity(CreateIdentityInput {
-        authority: profile.origin,
+        authority: profile.origin.clone(),
+        domain: domain_from_did(&identity.did).unwrap_or(profile.origin),
         agent: identity.agent.clone(),
         profile: identity.profile.clone(),
         handle: identity.handle.clone(),
@@ -421,8 +420,15 @@ pub fn retirement_document(
     retired.insert("deactivated".to_string(), Value::Bool(true));
     retired.insert("successorDid".to_string(), Value::String(successor_did.to_string()));
 
-    proof::sign_document(&Value::Object(retired), key1, &format!("{did}#key-1"))
-        .map_err(|err| anyhow!("signing the retirement document: {err}"))
+    let domain = domain_from_did(did);
+    proof::sign_document(
+        &Value::Object(retired),
+        key1,
+        &format!("{did}#key-1"),
+        domain.as_deref(),
+        Some(&fresh_challenge()),
+    )
+    .map_err(|err| anyhow!("signing the retirement document: {err}"))
 }
 
 /// Load a stored key pair as signing material — `key-1`, for the two documents `did update`
@@ -445,8 +451,31 @@ pub fn load_stored_key(pair: &StoredKeyPair) -> Result<PrivateKeyMaterial> {
 /// DID. [`proof::sign_document`] drops whatever `proof` the document carried out of the
 /// signing input, so re-proving an already-proven document is what it is for.
 pub fn resign_document(document: &Value, did: &str, key1: &PrivateKeyMaterial) -> Result<Value> {
-    proof::sign_document(document, key1, &format!("{did}#key-1"))
-        .map_err(|err| anyhow!("signing the DID document: {err}"))
+    let domain = domain_from_did(did);
+    proof::sign_document(
+        document,
+        key1,
+        &format!("{did}#key-1"),
+        domain.as_deref(),
+        Some(&fresh_challenge()),
+    )
+    .map_err(|err| anyhow!("signing the DID document: {err}"))
+}
+
+/// The authority a DID hangs under, in the form a proof's `domain` takes: the first
+/// `did:wba:` segment, with a `%3Aport` suffix removed. `None` for a DID this client cannot
+/// place, and the proof then carries no domain rather than a wrong one.
+fn domain_from_did(did: &str) -> Option<String> {
+    let authority = did.strip_prefix("did:wba:")?.split(':').next()?;
+    let authority = authority.replace("%3A", ":").replace("%3a", ":");
+    let host = authority.split(':').next().filter(|host| !host.is_empty())?;
+    Some(host.to_ascii_lowercase())
+}
+
+/// A 16-byte nonce as 32 hex characters — the challenge shape awiki's registration requires.
+pub fn fresh_challenge() -> String {
+    let bytes: [u8; 16] = rand::random();
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// The document with its `proof` removed, for comparing two documents without comparing
@@ -560,7 +589,8 @@ mod tests {
     }
 
     /// The shape `awiki` and `anpio-key` verify: base58-btc `proofValue`, the document's
-    /// `@context` folded into the signing input, and no proof-level `@context` in the artifact.
+    /// `@context` folded into the signing input **and kept in the proof object**, plus the
+    /// `domain` and `challenge` the host's registration asks for.
     ///
     /// The verdict is `anp` 1.0.6's own binding check — the code path both of them run — not
     /// a string match on the prefix.
@@ -580,7 +610,13 @@ mod tests {
         assert_eq!(document_in_crate_form(document), Some(document.clone()));
 
         let proof = document["proof"].as_object().expect("the document carries a proof");
-        assert!(proof.get("@context").is_none(), "the proof must not restate @context");
+        // The host reads the proof options as stored, so dropping this field here would sign
+        // one input and publish another.
+        assert_eq!(proof.get("@context"), Some(context), "the proof must keep @context");
+        assert_eq!(proof.get("domain"), Some(&json!("did.example.com")));
+        let challenge = proof["challenge"].as_str().expect("a challenge");
+        assert_eq!(challenge.len(), 32);
+        assert!(challenge.chars().all(|c| c.is_ascii_hexdigit()));
         let proof_value = proof["proofValue"].as_str().expect("a proofValue");
         let signature = bs58::decode(proof_value.strip_prefix('z').expect("base58-btc multibase"))
             .into_vec()
@@ -671,6 +707,7 @@ pub(crate) mod test_support {
     pub(crate) fn mint(agent: &str) -> Identity {
         create_identity(CreateIdentityInput {
             authority: "did.example.com".to_string(),
+            domain: "did.example.com".to_string(),
             agent: agent.to_string(),
             profile: "default".to_string(),
             handle: agent.to_string(),
