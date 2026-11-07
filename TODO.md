@@ -48,6 +48,15 @@ Rust 客户端只有**设备半边**：MLS store、`create` / `add` / `remove` /
 开发机上的 `anp` 检出还停在 0.9.0 线，没 fetch 到最新、也没重核 1.0.5 的签名与函数面。
 只影响开发环境，动 SDK 之前要先做。
 
+### 1.8 `did create --key anpio-key` 对不带点的主机名铸完钥才失败
+
+`anpio-key key sign-document` 按上游 DID 规则拒绝没有点的域名（`did:wba:localhost%3A18765:…`
+报 `malformed domain: "localhost"`），而 `did create` 是**先**让 daemon 铸钥、**后**签文档：
+用 `localhost` 或别的单段主机名跑 `--key anpio-key`，24 词已经显示、信封已经落盘，命令才失败，
+留下一把再也不会用的命名钥匙。同一台假主机上 `--key local` 能走完，所以这个组合看起来只是
+测试用；真主机（`awiki.me` 这类）不受影响。要么在铸钥前用 daemon 的同一个域名规则预检，
+要么让 `anpio-key` 接受单段域名（上游先改才谈得上）。2026-11-07 合并后的跨仓库验收里撞到。
+
 ---
 
 ## 2. 等人裁定
