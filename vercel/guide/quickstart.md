@@ -90,6 +90,14 @@ anpio-cli did show
 
 `did create` 在本机生成密钥，**并顺手把 DID 文档注册到 `--host`**——DID 文档只有在服务够得着
 的地方才有意义。注册失败时它会明说，而不是留下一个本机有、外面查不到的身份。
+这条命令一次走完五步（读服务信息 → 预检 handle → 生成钥匙 → 签文档 → 注册），
+中途失败会保住已经生成的钥匙，重跑时复用；要等服务发验证邮件就加 `--email`。
+
+钥匙要放在 `anpio-key` 里时，由**管理员在自己的终端**加 `--key anpio-key`：钥匙由守护进程
+生成、文档 proof 也由它签，CLI 只拿到名字和公钥。之后还有独立的一步——
+`anpio-key grant create` 建 grant，`anpio-cli key grant <id> --agent <handle>` 记进 store。
+非交互终端直接拒绝，不会偷偷改用本机钥匙。这个身份**被删掉或换了机器**时，
+用 `anpio-cli did attach --did <did> --name <key>` 把它接回来。
 
 > [!NOTE]
 > `--host` 要的是一台 **DID 主机**（`awiki-open-server` 那条线），不是第 2 步那个**消息服务**

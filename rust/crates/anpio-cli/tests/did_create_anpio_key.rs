@@ -492,6 +492,12 @@ fn a_named_key_create_records_the_name_and_no_private_bytes() {
         calls[1]
     );
     assert!(!home.pending().exists(), "a registered identity leaves no pending key");
+
+    // Re-registering uses the document the daemon proofed, not a lookup by DID — a named
+    // key has none to look up.
+    let again = run(&home, &key, &["did", "register", "--agent", "mybot"]);
+    assert!(again.status.success(), "{}", text(&again.stderr));
+    assert_eq!(key.calls().len(), 2, "the daemon is not asked for a document: {:?}", key.calls());
 }
 
 /// Without a controlling terminal the command refuses before anything is touched, and it

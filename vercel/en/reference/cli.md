@@ -41,14 +41,14 @@ It keeps its own store root (`$ANPIOCLI_HOME`, default `~/.anpio-cli`). A `~/.co
 
 `--allow-private-host` appears on commands that derive a host: the target host comes from an **identifier** rather than a flag. `localhost` / `127.0.0.1` / `::1` are already treated as local and need no flag — this one is for a host that is local but spelled some other way (a LAN address, a name that resolves inward).
 
-**`did create` and `did attach-anpio-key` sit outside the identity chain**: they mint or adopt a **new** identity, and "who is currently selected" should not decide where a second identity is written, so both default to `--handle`.
+**`did create` and `did attach` sit outside the identity chain**: `create` mints a **new** identity, and "who is currently selected" should not decide where a second identity is written, so it defaults the agent to `--handle`; `attach` is the recovery entry and defaults the same way.
 
 ## `did` and `agent` — identity
 
 | Subcommand | Purpose |
 |---|---|
-| `did create --host <url> --handle <name>` | Mint an identity and publish its DID document to a DID host (`--agent` defaults to the handle) |
-| `did attach-anpio-key --did <did>` | Adopt a DID whose key the local `anpio-key` daemon holds: no private bytes in the store, signing over a Unix socket. `--config <service.json>` selects the protected surface (with `--grant`); `--device <id>` binds the device name used by group E2EE |
+| `did create --host <url> --handle <name>` | One command through five stages: read the service information, precheck the handle, mint the key, proof the document, register (`--agent` defaults to the handle). `--email` waits for the verification mail; `--key anpio-key` has the daemon mint a named key and proof the document instead (the administrator runs it at their own terminal) |
+| `did attach --did <did> --name <name>` | Recovery entry: adopt a key the local `anpio-key` daemon already holds — no private bytes in the store, signing over a Unix socket. A named key needs `--name`, and its fingerprint must be the DID's last segment. `--config <service.json>` selects the protected surface (with `--grant`); `--device <id>` binds the device name used by group E2EE. The old `attach-anpio-key` spelling still parses |
 | `did show` | Print the identity on file |
 | `did list` | Every identity this machine holds, and what each one is bound to |
 | `did register` | (Re-)publish the DID document to its host and take back a bearer token |

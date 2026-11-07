@@ -2813,11 +2813,13 @@ async fn cmd_did_register(agent: Option<&str>, profile: Option<&str>, email: Opt
             _ => return Err(err),
         },
     };
-    // Registration publishes the document. For an `anpio-key` identity that document lives in
-    // the daemon, so it is read on the way in rather than from the snapshot `did attach`
-    // wrote — a key rotated since then would otherwise be registered as somebody else's.
+    // Registration publishes the document. A named key has no DID-addressed document in
+    // the daemon — its DID *is* its public key — so the document the daemon proofed at
+    // create time is the one to register; a record that still addresses its key by DID
+    // re-reads it from the daemon, since a key rotated since then would otherwise be
+    // registered as somebody else's.
     let identity = match &identity.custody {
-        Some(Custody::AnpioKey(key)) => Identity {
+        Some(Custody::AnpioKey(key)) if key.name.is_none() => Identity {
             did_document: key.document(&identity.did)?,
             ..identity
         },
@@ -2932,10 +2934,14 @@ async fn cmd_did_publish(json: bool, own: &OwnIdentity) -> anyhow::Result<()> {
     let expected = document_hash(served)?;
 
     // Where the document to publish comes from depends on where the key is: a stored key
-    // re-proves the local copy, and an `anpio-key` identity asks the daemon for the document
-    // it publishes — that one is already proved, and it is the only copy the daemon's key
-    // belongs to.
+    // re-proves the local copy; a named `anpio-key` key has no DID-addressed document and
+    // publishes the copy the daemon proofed at create time; a record that still addresses
+    // its key by DID asks the daemon for the document it publishes — that one is already
+    // proved, and it is the only copy the daemon's key belongs to.
     let document = match &identity.custody {
+        Some(Custody::AnpioKey(key)) if key.name.is_some() && key.config.is_none() => {
+            identity.did_document.clone()
+        }
         Some(Custody::AnpioKey(key)) => key.document(&identity.did)?,
         _ => {
             let key1 = load_stored_key(identity.keys.get("key-1").ok_or_else(|| {

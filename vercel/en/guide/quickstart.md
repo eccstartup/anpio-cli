@@ -85,7 +85,9 @@ anpio-cli did create --host http://localhost:8000 --handle alice
 anpio-cli did show
 ```
 
-`did create` generates the key locally **and registers the DID document with `--host` in the same step** — a DID document is only worth anything where a service can reach it. If the registration fails it says so, rather than leaving behind an identity that exists on this machine and nowhere else.
+`did create` generates the key locally **and registers the DID document with `--host` in the same step** — a DID document is only worth anything where a service can reach it. If the registration fails it says so, rather than leaving behind an identity that exists on this machine and nowhere else. One command walks five stages (read the service information → precheck the handle → mint the key → proof the document → register); a failure keeps the key it minted, and a rerun reuses it. Add `--email` when the service sends a verification mail.
+
+When the key should live in `anpio-key`, the **administrator adds `--key anpio-key` at their own terminal**: the daemon mints the key and proofs the document, and the CLI only receives the name and the public key. One more step follows — `anpio-key grant create` creates the grant, and `anpio-cli key grant <id> --agent <handle>` records it in the store. A non-interactive terminal is refused outright, never quietly switched to a local key. If the identity is deleted or this machine changes, `anpio-cli did attach --did <did> --name <key>` brings it back.
 
 > [!NOTE]
 > `--host` wants a **DID host** (the `awiki-open-server` line), not the **message service** from step 2 — the message service does not host DID documents, it only resolves them. When the document changes, re-publish it: `anpio-cli did register` re-sends it to the known host; `anpio-cli did publish` goes through the host's authenticated control plane and sends only the changed part.

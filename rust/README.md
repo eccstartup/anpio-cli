@@ -61,9 +61,13 @@ store 根是 `ANPIOCLI_HOME`（缺省 `~/.anpio-cli`），一条身份由 `--age
   没有 `curve` 列：这边绑定钥永远是 `e1_` 的 Ed25519，每行都一样的列是噪音。
   `create` 与 `register` 都会把主机随受理一起发下来的 **bearer token** 存进 `session.json`
   （同目录，明文 `0600`）——它是唯一能喂给主机自己那几个方法的凭据，下面两条读它。
-- **`did attach-anpio-key`** —— 把私钥交给本地 `anpio-key` 守护进程：store 里
-  **没有私钥字节**，每次签名走 socket。两个入口（开发 socket / 受保护 v2）一个身份只接
-  一个；`--device` 绑定群 E2EE 的设备名。见下面「私钥放在 anpio-key 里」。
+  `create` 一条命令走完五个阶段（读服务信息、预检 handle、生成钥匙、签文档、注册）；
+  默认把私钥写进 store，`--key anpio-key` 改为让本地 `anpio-key` 生成命名钥匙并签文档
+  proof，store 里只记名字。注册失败时钥匙留在 `pending.json`（`0600`），`--reuse-key`
+  重试不会再 mint 一把。
+- **`did attach`** —— 恢复入口，把一把已由本地 `anpio-key` 持有的钥接回 store：**没有私钥字节**，
+  每次签名走 socket。命名钥用 `--name`，旧记录用 DID 反查名字。旧命令名
+  `did attach-anpio-key` 仍是别名。见下面「私钥放在 anpio-key 里」。
 - **`did publish [--agent] [--profile] [--json]`** —— 把本地的文档推给主机，走的是主机的
   `update_document` 而不是 ANP 的签名路。三件事按这个顺序：`get_me` 取回主机**正在服务**的那份
   文档、哈希它（`sha256:` + base64url sha256(JCS(doc))，正是主机算 CAS 的方式）、
@@ -266,8 +270,8 @@ tests/cli_surface.rs` 里逐字列着今天每一个页面，删一个或改一�
 
 | 命令 | 位置参数 | 旗标（默认值） |
 | --- | --- | --- |
-| `did create` | — | `--host <URL>`（必填）、`--handle <NAME>`（必填）、`--agent`（缺省=handle）、`--profile`（`default`） |
-| `did attach-anpio-key` | — | `--did <DID>`（必填）、`--config <PATH>`、`--grant <GRANT-ID>`（要 `--config`）、`--device <ID>`、`--key-root <DIR>`、`--socket <PATH>`（与 `--config` 互斥）、`--kid <FRAGMENT>`、`--host <URL>`、`--agent`（缺省=handle）、`--profile`、`--force`、`--json` |
+| `did create` | — | `--host <URL>`（必填）、`--handle <NAME>`（必填）、`--email <ADDR>`、`--key <local\|anpio-key>`（`local`）、`--agent`（缺省=handle）、`--profile`（`default`）、`--reuse-key`、`--no-wait`、`--no-email` |
+| `did attach` | — | `--did <DID>`（必填）、`--name <NAME>`（命名钥必给）、`--config <PATH>`、`--grant <GRANT-ID>`（要 `--config`）、`--device <ID>`、`--key-root <DIR>`、`--socket <PATH>`（与 `--config` 互斥）、`--kid <FRAGMENT>`、`--host <URL>`、`--agent`、`--profile`、`--force`、`--json`（旧名 `attach-anpio-key` 仍是别名） |
 | `did show` | — | `--agent`、`--profile`、`--json` |
 | `did list` | — | `--json` |
 | `did register` | — | `--agent`、`--profile` |
@@ -302,32 +306,57 @@ tests/cli_surface.rs` 里逐字列着今天每一个页面，删一个或改一�
 - **`did resolve <did>` 不带 `--chain`，而文档已被取代**：照常打印文档，然后**退出 2**，
   并提示 `--chain`。取代的文档是**证据**，不是错误。
 
-### 私钥放在 anpio-key 里：`did attach-anpio-key`
+### 私钥放在 anpio-key 里：`did create --key anpio-key`
 
-`did create` 把私钥写进 `<store>/<agent>/<profile>/identity.json`。另一条路是把钥匙交给
+`did create` 默认把私钥写进 `<store>/<agent>/<profile>/identity.json`。另一条路是把钥匙交给
 [`anpio-key`](https://github.com/open-agentx/anpio-key) 那台本地守护进程：**身份文件里一个私钥字节都没有**，
-每次要签名时由 CLI 通过 socket 请它签。
+每次要签名时由 CLI 通过 socket 请它签。这条路从创建就走：
 
 ```text
-anpio-cli did attach-anpio-key --did did:wba:example.com:user:bob:e1_…
+# 管理员自己的终端
+anpio-cli did create --host https://awiki.me --handle bob --key anpio-key
+#   [3/5] anpio-key 生成命名钥匙，打印 k-…
+#   [4/5] 用 daemon 签文档 proof
+#   [5/5] 注册；store 里只记钥匙名
+anpio-key grant create --key k-… --did did:wba:… --target https://awiki.me/anp-im/rpc
+anpio-cli key grant <grant-id> --agent bob
 ```
 
-前提是守护进程在跑、那把钥已 `unlock`。命令先向守护进程要文档（`anpio-key document --did`），
-文档里必须真有这把钥，然后才写身份——要么守护进程确实持有这把钥，要么 store 一点没动。
-`--kid` 收的是 fragment（`key-1`），给整条 `did:wba:…#key-1` 也认（`anpio-key list` 打出来
-的就是整条）。`--agent` 缺省是 handle，`--host` 缺省由 DID 的 authority 推出来
-（`localhost` / `127.0.0.1` 用 `http://`，其余 `https://`）——host 只服务 `register` /
-`publish` / `me` 这类控制面，签名不用它。
+`--key anpio-key` 是管理员动作：`key create` 读口令、显示一次恢复词，文档 proof 是根钥的
+签名。没有控制终端时命令直接拒绝，**不会**偷偷改用本机钥匙——那是另一条身份。
 
-**两个入口，一个身份只接一个。** 上面这条走的是**开发 socket**。给 `--config <service.json>`
-则走**受保护 v2 入口**（`anpio-key data --config`：grant、`request_id`、审计）；两者同时给由
-parser 拒掉，`--grant` 不带 `--config` 也拒。受保护入口下文档走
-`LIST_AUTHORIZED_KEYS` → `GET_DOCUMENT`，attach 还会检查 grant 现在可用（过期、用完的
-grant 会在 attach 时就拒，而不是等到第一次发送），并缓存协商到的操作集。
+**grant 是另一次决定。** 建 grant 走 `anpio-key grant create`（缺省 `--method POST
+--ttl 24h --uses 100`，打印 grant id）；`anpio-cli key grant <id>` 只把 id 和受保护入口的
+配置路径写进 `identity.json`，不扩大任何权限。没有 grant 时身份在、`did show` 在，签名会被
+daemon 以它自己的码拒绝。`did show` 第一行就是归属：
+`key: anpio-key (key k-…, grant g-…)`，grant 之前写 `grant none`。
+
+**恢复，而不是创建：`did attach`。** 换机器、清空 profile 后，store 里没有记录但守护进程
+还持有钥匙时，把名字接回来：
+
+```text
+anpio-cli did attach --did did:wba:example.com:user:bob:e1_… --name k-…
+```
+
+命名钥匙在 anpio-key 里没有 DID（`key list` 的 `did`/`kid` 为空），所以 `--name` 是唯一的
+寻址方式；attach 先按名字查指纹，必须等于 DID 的最后一段，然后从 DID 主机取公开文档再写
+身份——要么对得上，要么 store 一点没动。早于命名钥匙的记录没有名字：签名时先按 DID 问
+daemon，问不到就按指纹反查 `key list`，仍找不到才提示用 `did attach --name` 修复。
+`--kid` 收的是 fragment（`key-1`），给整条 `did:wba:…#key-1` 也认。`--agent` 缺省是
+handle，`--host` 缺省由 DID 的 authority 推出来（`localhost` / `127.0.0.1` 用 `http://`，
+其余 `https://`）——host 只服务 `register` / `publish` / `me` 这类控制面，签名不用它。
+
+**两个入口，一个身份只接一个。** 不带 `--config` 走**开发 socket**；给
+`--config <service.json>` 走**受保护 v2 入口**（`anpio-key data --config`：grant、
+`request_id`、审计）；两者同时给由 parser 拒掉，`--grant` 不带 `--config` 也拒。受保护
+入口下文档走 `LIST_AUTHORIZED_KEYS` → `GET_DOCUMENT`，attach 还会检查 grant 现在可用
+（过期、用完的 grant 会在 attach 时就拒，而不是等到第一次发送），并缓存协商到的操作集。
 
 **能的**（开发 socket）：`anp sign` / `anp login` / `anp show`、`did show` / `did register` /
-`did publish`。签名时文档是从守护进程现取的，不是身份文件里那份快照——密钥轮换过也不会
-拿着旧文档去签。`did register` / `did publish` 同样先取当前文档。
+`did publish`。文档从哪来分两种：命名钥匙（`did create --key anpio-key` 或 `did attach
+--name`）把 daemon 签过的那份存在身份里，签名用它——命名钥匙在 daemon 里没有按 DID 寻址的
+文档，而且换钥就是换 DID，快照不会过期；早于命名钥匙的记录仍按 DID 向 daemon 现取，
+轮换过也不会拿着旧文档去签。`did register` / `did publish` 同样先取当前文档。
 
 **受保护入口还能多做一件事**：守护进程宣告 `SIGN_ORIGIN_PROOF` 时，`msg`（`send` /
 `listen` / `fetch` / 本地读）与 `contacts`、`group`（不含 E2EE）的 origin proof 交给守护进程签。

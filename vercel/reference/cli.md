@@ -53,15 +53,16 @@ cargo build --release --manifest-path rust/Cargo.toml
 `localhost` / `127.0.0.1` / `::1` 已经算本机、不需要它，它管的是"是本机但没这么拼"（LAN 地址、
 往里解析的名字）。
 
-**`did create` 与 `did attach-anpio-key` 不走身份选择链**：它们建的是**新的**身份，"谁当前被选中"
-不该决定第二份身份写在哪，所以缺省都用 `--handle`。
+**`did create` 与 `did attach` 不走身份选择链**：`create` 建的是**新的**身份，"谁当前被选中"
+不该决定第二份身份写在哪，所以缺省用 `--handle`；`attach` 是恢复入口，`--agent` 缺省用
+`--handle`。
 
 ## `did` 与 `agent` —— 身份
 
 | 子命令 | 作用 |
 |---|---|
-| `did create --host <url> --handle <name>` | 生成一份身份，并把 DID 文档发布到 DID 主机（`--agent` 缺省=handle） |
-| `did attach-anpio-key --did <did>` | 接管一把由本地 `anpio-key` 守护进程持有的钥：store 里没有私钥字节，签名走 socket。`--config <service.json>` 选受保护入口（配 `--grant`），`--device <id>` 绑定群 E2EE 的设备名 |
+| `did create --host <url> --handle <name>` | 一条命令走完五个阶段：读服务信息、预检 handle、生成钥匙、签文档、注册（`--agent` 缺省=handle）。`--email` 等验证邮件，`--key anpio-key` 改由守护进程生成命名钥匙并签文档 proof（管理员在自己的终端跑） |
+| `did attach --did <did> --name <name>` | 恢复入口：把一把已由本地 `anpio-key` 持有的钥接回 store，没有私钥字节，签名走 socket。命名钥必须给 `--name`，指纹要与 DID 的最后一段一致。`--config <service.json>` 选受保护入口（配 `--grant`），`--device <id>` 绑定群 E2EE 的设备名。旧名 `attach-anpio-key` 仍是别名 |
 | `did show` | 打印本机存着的这份身份 |
 | `did list` | 这台机器持有的全部身份，以及各自绑到了什么 |
 | `did register` | 把 DID 文档（重新）发布给它自己的主机，取回 bearer token |

@@ -65,14 +65,53 @@ what "this step never happened" looks like.
 
 ### Identity whose key is held by anpio-key
 
-When the private key lives in the local `anpio-key` daemon instead of this store,
-adopt the DID rather than creating one:
+The default line mints a key in this store. The other line asks a local
+[`anpio-key`](https://github.com/eccstartup/anpio-key) daemon to mint a named key
+and to proof the document: the store then records the key's **name**, and has no
+private bytes at all.
+
+This is an administrator action, not something an agent runs on its behalf: the
+daemon reads a passphrase (and shows recovery words) on a real terminal, and the
+document proof is the administrator's signature. Run without a controlling
+terminal, the command refuses — it never falls back to a local key, because that
+would be a different identity.
 
 ```bash
-anpio-cli did attach-anpio-key --did <did> --agent <your-id>
-#   → the identity is written only after the daemon answers with a document that
-#     names this DID and carries the key; there are no private bytes in the store
+# In the administrator's own terminal, as the anpio-key administrator:
+anpio-cli did create --host <did-host-url> --handle <your-handle> --key anpio-key
+#   → five stages: read the host, precheck the handle, mint in anpio-key,
+#     proof the document there, register. Prints the key name and prints the
+#     admin step that authorizes signing.
+
+# Still the administrator, and still a separate decision:
+anpio-key grant create --key <name> --did <did> --target <endpoint-url>
+#   → defaults --method POST --ttl 24h --uses 100; prints the grant id
+
+# Hand the grant id to the CLI once; it lands in identity.json beside the name:
+anpio-cli key grant <grant-id> --agent <your-id>
 ```
+
+Until the grant is recorded the identity exists and `did show` works, but a
+signature is refused by the daemon with its own code. `did show`'s first line
+says where the key lives and under which grant:
+`key: anpio-key (key k-…, grant g-…)`, or `grant none` before the handoff.
+
+Signing then needs only the target — `anpio sign --target <url>` — because the
+key name and the grant are already in the identity.
+
+**Recovery, not creation.** `did attach` writes a new store record for a DID whose
+key anpio-key already holds (a new machine, a wiped profile). It is not how an
+identity is created:
+
+```bash
+anpio-cli did attach --did <did> --name <name> --agent <your-id>
+#   → the name must be one `anpio-key key list` shows, and its fingerprint must be
+#     the one the DID ends in; otherwise it refuses before writing anything
+```
+
+`did attach-anpio-key` still parses as the old spelling of the same command.
+Records written before keys had names find theirs again by DID fingerprint, and
+say so if that lookup fails.
 
 For group E2EE, add `--device <id>` naming the `{device}-sign` entry in the DID
 document. Without it those commands refuse, and they say so before touching the

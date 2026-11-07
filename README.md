@@ -78,10 +78,21 @@ rust/target/debug/anpio-cli msg inbox
 ### 私钥可以放在 `anpio-key` 里
 
 默认由 `did create` 把私钥写进 store。另一条路是交给本地
-[`anpio-key`](https://github.com/open-agentx/anpio-key) 守护进程：`did attach-anpio-key` 之后，
-身份文件里**一个私钥字节都没有**，每次签名由 CLI 通过 socket 请它签。受保护入口还能代签
-origin proof，并在 `--device` 指定设备名时用 `SIGN_PURPOSE(device_assertion)` 签群 E2EE 的
-设备断言。细节与拒绝边界见 [rust/README.md](rust/README.md#私钥放在-anpio-key-里did-attach-anpio-key)
+[`anpio-key`](https://github.com/open-agentx/anpio-key) 守护进程：
+
+```bash
+# 管理员自己的终端，由 anpio-key 生成命名钥匙并签文档 proof
+anpio-cli did create --host https://awiki.me --handle mybot --key anpio-key
+# 管理员另一次决定：签发 grant，然后把 grant id 交给 CLI 一次
+anpio-key grant create --key <name> --did <did> --target https://awiki.me/anp-im/rpc
+anpio-cli key grant <grant-id> --agent mybot
+```
+
+身份文件里**一个私钥字节都没有**，只记钥匙名和 grant；每次签名由 CLI 请守护进程签。
+非管理员终端、非交互执行时 `--key anpio-key` 直接拒绝，不会偷偷改用本机钥匙。
+受保护入口还能代签 origin proof，并在绑定设备名后用 `SIGN_PURPOSE(device_assertion)`
+签群 E2EE 的设备断言。`did attach` 是恢复入口（旧命令 `did attach-anpio-key` 仍可解析）。
+细节与拒绝边界见 [rust/README.md](rust/README.md#私钥放在-anpio-key-里did-attach)
 和 [anpio-key-integration.md](docs/design/anpio-key-integration.md)。
 
 ## 文档
