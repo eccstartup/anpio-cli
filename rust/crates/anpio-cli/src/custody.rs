@@ -1693,6 +1693,27 @@ pub fn admin_catalog(config: &Path) -> Result<Value> {
     admin_reply(config, &["catalog"])
 }
 
+/// Re-issue the grants a restart, expiry or used-up quota took away.
+///
+/// `anpio-key grant refresh` prepares the replacements, prints them, confirms once on the
+/// terminal and commits them. Its prompt goes straight to `/dev/tty`, so capturing stdout
+/// here does not hide it; stdout carries the one-line JSON with the new grant ids.
+pub fn refresh_grants(config: &Path, uid: u32, did: &str) -> Result<Value> {
+    let bytes = run_protected(&[
+        "grant".to_string(),
+        "refresh".to_string(),
+        "--config".to_string(),
+        config.display().to_string(),
+        "--principal".to_string(),
+        uid.to_string(),
+        "--did".to_string(),
+        did.to_string(),
+        "--json".to_string(),
+    ])?;
+    serde_json::from_slice(&bytes)
+        .context("anpio-key grant refresh answered with something that is not JSON")
+}
+
 /// Proof the first document of an identity the service just provisioned.
 ///
 /// The administrator's account deliberately cannot open the sign socket, so this one

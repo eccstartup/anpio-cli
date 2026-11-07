@@ -30,7 +30,8 @@ use anpio_cli::custody::{
     controlling_terminal,
     device_key_names,
     device_public_multibases, document_has_key, document_keyids, ed25519_public_key,
-    installed_config, public_key_from_multibase, split_did, AnpioKey, Operation,
+    installed_config, public_key_from_multibase, refresh_grants as admin_refresh_grants, split_did,
+    AnpioKey, Operation,
     DEFAULT_PROTECTED_CONFIG, INSTALLED_PROTECTED_CONFIG,
 };
 use anpio_cli::identity::{
@@ -489,6 +490,44 @@ enum DidCommand {
         /// Replace an identity already stored under this agent/profile.
         #[arg(long)]
         force: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Retire the keys of an identity whose provisioning never finished.
+    ///
+    /// The protected service marks every key of the DID `retired` and revokes its
+    /// grants, freeing the same host/port/handle for a fresh `did create`. Only an
+    /// identity with no installed document qualifies: a published DID is retired
+    /// through `did update`, never by dropping its keys.
+    Discard {
+        /// The DID to retire (`did:wba:…:e1_…`), as `did create` printed it.
+        #[arg(long)]
+        did: String,
+        /// The installed protected service's config, when it is not the default.
+        #[arg(long, value_name = "PATH")]
+        config: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Re-issue the grants a restart, expiry or used-up quota took away.
+    ///
+    /// The protected service revokes every grant when it stops, so an agent signs nothing
+    /// until the grant is issued again. This asks `anpio-key` to re-issue each grant the
+    /// identity's principal held for the DID — same key, policy, lifetime and use limit —
+    /// prints them once for confirmation, then writes the new ids into `identity.json`
+    /// under the same purpose names. A deliberately revoked grant is never revived.
+    Refresh {
+        /// The agent account's uid (`id -u _anpagent`), not a principal id.
+        #[arg(long, value_name = "UID")]
+        uid: u32,
+        /// `--agent` > `$ANPIOCLI_AGENT` > the current agent > `default`.
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
+        profile: Option<String>,
+        /// The protected service's config, when the identity does not name one.
+        #[arg(long, value_name = "PATH")]
+        config: Option<PathBuf>,
         #[arg(long)]
         json: bool,
     },
@@ -1342,6 +1381,16 @@ async fn main() -> anyhow::Result<()> {
                 }, &allow_private)
                 .await
             }
+            DidCommand::Discard { did, config, json } => {
+                cmd_did_discard(&did, config, json)
+            }
+            DidCommand::Refresh {
+                uid,
+                agent,
+                profile,
+                config,
+                json,
+            } => cmd_did_refresh(uid, agent.as_deref(), profile.as_deref(), config, json),
             DidCommand::Show {
                 agent,
                 profile,
@@ -2585,7 +2634,10 @@ fn identity_policies(
             "http",
             "http_authentication",
             json!({
-                "origin": format!("https://{domain}"),
+                // The origin the agent will sign against. anpio-key canonicalises it as
+                // `https://host[:port]`, dropping the default port, so a policy naming
+                // only `https://host` refuses every request to a non-default port.
+                "origin": http_policy_origin(service_endpoint, domain),
                 "methods": methods,
                 "paths": paths,
                 "query": {"mode": "none"},
@@ -2641,6 +2693,26 @@ fn identity_policies(
         ));
     }
     Ok(policies)
+}
+
+/// The `http-authentication` policy origin, spelled as anpio-key canonicalises a
+/// request URL: `https://host[:port]` with the default port dropped.
+///
+/// The service endpoint is what the agent signs against, so it is the authority
+/// here rather than the DID host. Only `https` is signable — the daemon refuses
+/// anything else — so a non-https endpoint falls back to the DID host's https
+/// origin instead of publishing an origin the signer can never match.
+fn http_policy_origin(service_endpoint: &str, domain: &str) -> String {
+    let Ok(url) = Url::parse(service_endpoint) else {
+        return format!("https://{domain}");
+    };
+    let Some(host) = url.host_str().filter(|_| url.scheme() == "https") else {
+        return format!("https://{domain}");
+    };
+    match url.port() {
+        Some(port) if port != 443 => format!("https://{host}:{port}"),
+        _ => format!("https://{host}"),
+    }
 }
 
 /// The identity record for a key anpio-key holds: the daemon's proof over the document the
@@ -2902,6 +2974,218 @@ fn read_did_document(path: &Path, did: &str) -> anyhow::Result<serde_json::Value
         );
     }
     Ok(document)
+}
+
+/// Retire a DID whose provisioning never produced a document.
+///
+/// The confirmation is read from `/dev/tty` and must spell out the DID: this is
+/// the one command that makes an identity's keys unusable, so inherited stdin is
+/// not enough. The service refuses a DID that already has an installed document.
+fn cmd_did_discard(did: &str, config: Option<PathBuf>, json: bool) -> anyhow::Result<()> {
+    let did = did.trim();
+    if did.is_empty() {
+        anyhow::bail!("--did must name the identity to retire");
+    }
+    let config = config.or_else(installed_config).ok_or_else(|| {
+        anyhow::anyhow!(
+            "no installed protected service; `did discard` retires keys anpio-key holds. \
+             Pass --config <service.json>"
+        )
+    })?;
+    let catalog = admin_catalog(&config)?;
+    let listed: Vec<Value> = catalog
+        .get("catalog")
+        .and_then(|catalog| catalog.get("keys"))
+        .and_then(Value::as_array)
+        .map(|keys| {
+            keys.iter()
+                .filter(|key| key.get("did").and_then(Value::as_str) == Some(did))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    if listed.is_empty() {
+        anyhow::bail!("anpio-key's catalog has no keys for {did}");
+    }
+    let live: Vec<&Value> = listed
+        .iter()
+        .filter(|key| key.get("state").and_then(Value::as_str) != Some("retired"))
+        .collect();
+    if live.is_empty() {
+        anyhow::bail!("every key of {did} is already retired; nothing to discard");
+    }
+
+    let say = |line: &str| {
+        if json {
+            eprintln!("{line}");
+        } else {
+            println!("{line}");
+        }
+    };
+    say(&format!("anpio-key will retire these keys of {did}:"));
+    for key in &live {
+        say(&format!(
+            "  {}  {}  {}",
+            key.get("kid").and_then(Value::as_str).unwrap_or("?"),
+            key.get("role").and_then(Value::as_str).unwrap_or("?"),
+            key.get("state").and_then(Value::as_str).unwrap_or("?"),
+        ));
+    }
+    say("every active grant on these keys is revoked; policies are kept");
+
+    let expected = format!("discard {did}");
+    if read_terminal_line(&format!("Type `{expected}` to confirm: "))?.trim() != expected {
+        anyhow::bail!("not confirmed; nothing was changed");
+    }
+
+    let prepared = admin_prepare(&config, &json!({"kind": "RetireIdentity", "did": did}))?;
+    admin_commit(&config, &prepared.operation_id, &prepared.digest)?;
+
+    let after = admin_catalog(&config)?;
+    let retired = after
+        .get("catalog")
+        .and_then(|catalog| catalog.get("keys"))
+        .and_then(Value::as_array)
+        .map(|keys| {
+            keys.iter()
+                .filter(|key| {
+                    key.get("did").and_then(Value::as_str) == Some(did)
+                        && key.get("state").and_then(Value::as_str) == Some("retired")
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "did": did,
+                "vault_id": prepared.effect.get("vault_id"),
+                "retired_keys": retired,
+            }))?
+        );
+    } else {
+        println!("discarded {did}: {retired} keys retired, their grants revoked");
+    }
+    Ok(())
+}
+
+/// `did refresh` — re-issue the grants a restart or expiry took away.
+///
+/// The identity's record is fine; its grants are dead. `anpio-key grant refresh` prepares
+/// the replacements, prints them once on the terminal and commits them. This command only
+/// carries the result back into `identity.json`, under the same purpose names provisioning
+/// used, so signing needs no new flags.
+///
+/// A grant whose purpose this client has no name for is reported rather than dropped
+/// silently: the grant exists in the service, and hiding it would leave the agent unable
+/// to use an authorization it paid for.
+fn cmd_did_refresh(
+    uid: u32,
+    agent: Option<&str>,
+    profile: Option<&str>,
+    config: Option<PathBuf>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let location = IdentityLocation::resolve(agent, profile)?;
+    let mut identity = Identity::load(&location)?;
+    let did = identity.did.clone();
+    let key = match identity.custody.as_mut() {
+        Some(Custody::AnpioKey(key)) => key,
+        None => anyhow::bail!(
+            "{}/{} signs with a local key, so there are no grants to refresh",
+            location.agent,
+            location.profile
+        ),
+    };
+    let config = config
+        .or_else(|| key.config.clone())
+        .or_else(installed_config)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_PROTECTED_CONFIG));
+    let reply = admin_refresh_grants(&config, uid, &did)?;
+    let returned = reply
+        .get("grants")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("anpio-key refreshed no grants for {did}"))?;
+    if returned.is_empty() {
+        anyhow::bail!("anpio-key refreshed no grants for {did}");
+    }
+
+    let mut written: Vec<Value> = Vec::new();
+    let mut unmapped: Vec<String> = Vec::new();
+    for grant in returned {
+        let id = grant
+            .get("grant_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("anpio-key returned a grant with no grant_id"))?;
+        let Some(name) = grant.get("name").and_then(Value::as_str) else {
+            unmapped.push(
+                grant
+                    .get("purpose")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown purpose")
+                    .to_string(),
+            );
+            continue;
+        };
+        key.grants.insert(name.to_string(), id.to_string());
+        if name == "http" {
+            // The legacy single-grant field is the HTTP grant.
+            key.grant = Some(id.to_string());
+        }
+        written.push(json!({"purpose": name, "grant": id}));
+    }
+    key.config = Some(config.clone());
+    let key_name = key.name.clone();
+    identity.save(&location)?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "did": did,
+                "key": key_name,
+                "config": config.display().to_string(),
+                "grants": written,
+                "unmapped": unmapped,
+            }))?
+        );
+        return Ok(());
+    }
+    println!(
+        "refreshed {did}: {} grant(s) written to {}",
+        written.len(),
+        location.identity_path().display()
+    );
+    for grant in &written {
+        println!(
+            "  {} -> {}",
+            grant.get("purpose").and_then(Value::as_str).unwrap_or("?"),
+            grant.get("grant").and_then(Value::as_str).unwrap_or("?")
+        );
+    }
+    for purpose in &unmapped {
+        eprintln!(
+            "warning: a refreshed {purpose} grant has no name this client can record; \
+             it exists in anpio-key but not in identity.json"
+        );
+    }
+    Ok(())
+}
+
+/// Read one line from the person at the terminal, never from piped stdin.
+fn read_terminal_line(prompt: &str) -> anyhow::Result<String> {
+    use std::io::{BufRead, BufReader, Write};
+    let mut tty = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .context("no controlling terminal to confirm on")?;
+    write!(tty, "{prompt}")?;
+    tty.flush()?;
+    let mut line = String::new();
+    BufReader::new(tty).read_line(&mut line)?;
+    Ok(line)
 }
 
 async fn cmd_did_attach(args: AttachArgs, allow_private: &[String]) -> anyhow::Result<()> {
