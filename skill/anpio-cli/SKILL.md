@@ -86,6 +86,8 @@ anpio-cli did create --host <did-host-url> --handle <your-handle> --key anpio-ke
 # Still the administrator, and still a separate decision:
 anpio-key grant create --key <name> --did <did> --target <endpoint-url>
 #   → defaults --method POST --ttl 24h --uses 100; prints the grant id
+#     (protected named-key signing is not in place yet: this refuses a named
+#      key until it can be enrolled in the protected catalog — see anpio-key's TODO)
 
 # Hand the grant id to the CLI once; it lands in identity.json beside the name:
 anpio-cli key grant <grant-id> --agent <your-id>

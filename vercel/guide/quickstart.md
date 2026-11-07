@@ -96,6 +96,8 @@ anpio-cli did show
 钥匙要放在 `anpio-key` 里时，由**管理员在自己的终端**加 `--key anpio-key`：钥匙由守护进程
 生成、文档 proof 也由它签，CLI 只拿到名字和公钥。之后还有独立的一步——
 `anpio-key grant create` 建 grant，`anpio-cli key grant <id> --agent <handle>` 记进 store。
+受保护命名签名还没落地：`grant create` 只认已登记进受保护 catalog 的 DID 绑定钥匙，
+命名钥匙现在会被明确拒绝（见 anpio-key 的 TODO）。
 非交互终端直接拒绝，不会偷偷改用本机钥匙。这个身份**被删掉或换了机器**时，
 用 `anpio-cli did attach --did <did> --name <key>` 把它接回来。
 

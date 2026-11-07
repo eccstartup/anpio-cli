@@ -88,6 +88,8 @@ anpio-key grant create --key <name> --did <did> --target https://awiki.me/anp-im
 anpio-cli key grant <grant-id> --agent mybot
 ```
 
+受保护命名签名还没落地：`grant create` 只认已登记进受保护 catalog 的 DID 绑定钥匙，
+命名钥匙现在会被明确拒绝（见 anpio-key 的 TODO）。
 身份文件里**一个私钥字节都没有**，只记钥匙名和 grant；每次签名由 CLI 请守护进程签。
 非管理员终端、非交互执行时 `--key anpio-key` 直接拒绝，不会偷偷改用本机钥匙。
 受保护入口还能代签 origin proof，并在绑定设备名后用 `SIGN_PURPOSE(device_assertion)`
