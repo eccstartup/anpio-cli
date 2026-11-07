@@ -1135,7 +1135,10 @@ mod tests {
     fn a_granted_anpio_key_identity_needs_a_protected_config_to_sign() {
         let sender = Sender::from_identity(&anpio_key_identity(AnpioKey {
             operations: Some(vec!["SIGN_ORIGIN_PROOF".to_string()]),
-            grant: Some("grant-1".to_string()),
+            grants: std::collections::BTreeMap::from([(
+                "origin_proof_agent".to_string(),
+                "grant-1".to_string(),
+            )]),
             ..AnpioKey::default()
         }))
         .expect("a granted daemon that announces the operation is allowed to try");
@@ -1161,7 +1164,10 @@ mod tests {
                 "SIGN_ORIGIN_PROOF".to_string(),
                 "SIGN_PURPOSE".to_string(),
             ]),
-            grant: Some("grant-1".to_string()),
+            grants: std::collections::BTreeMap::from([
+                ("origin_proof_agent".to_string(), "grant-1".to_string()),
+                ("purpose".to_string(), "grant-2".to_string()),
+            ]),
             ..AnpioKey::default()
         }))
         .expect("a granted daemon that announces the operations is allowed to try");

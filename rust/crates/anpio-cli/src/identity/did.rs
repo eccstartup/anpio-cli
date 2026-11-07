@@ -53,6 +53,9 @@ pub struct CreateIdentityInput {
     pub domain: String,
     pub agent: String,
     pub profile: String,
+    /// The device name the document publishes (`{device}-sign`, `{device}-agreement`).
+    /// Absent means `{agent}/{profile}`; a protected identity can name its own device.
+    pub device: Option<String>,
     pub handle: String,
     /// The user's spelling of the host, kept for display and for `did register`.
     pub did_host_url: String,
@@ -187,7 +190,10 @@ fn vnext_document(
         input.authority, input.agent, fingerprint
     );
 
-    let device_id = format!("{}/{}", input.agent, input.profile);
+    let device_id = input
+        .device
+        .clone()
+        .unwrap_or_else(|| format!("{}/{}", input.agent, input.profile));
     let signing_fragment = format!("{device_id}-sign");
     let agreement_fragment = format!("{device_id}-agreement");
     let signing_id = format!("{did}#{signing_fragment}");
@@ -347,6 +353,7 @@ pub fn successor_of(identity: &Identity) -> Result<Identity> {
         domain: domain_from_did(&identity.did).unwrap_or(profile.origin),
         agent: identity.agent.clone(),
         profile: identity.profile.clone(),
+        device: Some(identity.device_id.clone()),
         handle: identity.handle.clone(),
         did_host_url: identity.did_host.clone(),
         service_endpoint,
@@ -710,6 +717,7 @@ pub(crate) mod test_support {
             domain: "did.example.com".to_string(),
             agent: agent.to_string(),
             profile: "default".to_string(),
+            device: None,
             handle: agent.to_string(),
             did_host_url: "https://did.example.com".to_string(),
             service_endpoint: "https://svc.example.com/anp".to_string(),

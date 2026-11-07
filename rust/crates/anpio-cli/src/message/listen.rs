@@ -1055,6 +1055,7 @@ mod tests {
             domain: "localhost".to_string(),
             agent: "carol".to_string(),
             profile: "default".to_string(),
+            device: None,
             handle: "carol".to_string(),
             did_host_url: "http://localhost:8765".to_string(),
             service_endpoint: "http://localhost:8765/anp-im/rpc".to_string(),

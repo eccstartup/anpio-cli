@@ -23,7 +23,7 @@ use super::store::Identity;
 /// The awiki JSON-RPC paths. The first is what its own client uses; the second is an
 /// alias the server keeps. The profile surface is a separate path with its own method set
 /// (`get_me` / `update_me`), which is why the nickname lives there and not under `did-auth`.
-const DID_AUTH_PATH: &str = "/user-service/v1/did-auth/rpc";
+pub const DID_AUTH_PATH: &str = "/user-service/v1/did-auth/rpc";
 
 /// The client version every user-service call carries. awiki.ai answers
 /// `-32004 client.upgrade_required` when the header is missing, and its grammar only

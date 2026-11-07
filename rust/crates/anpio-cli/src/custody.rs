@@ -1094,6 +1094,9 @@ impl AnpioKey {
     /// This is the protected surface only. The development socket signs whole HTTP requests
     /// and has neither grants nor audit; when the identity names no config there is nothing
     /// here to fall back to, so the refusal says which attach flag fixes it.
+    ///
+    /// The grant is picked by `meta.target.kind`: the daemon checks the policy's origin
+    /// (`anp://agent`, `anp://group`, `anp://service`), so each kind is a separate grant.
     pub fn sign_origin_proof(
         &self,
         did: &str,
@@ -1102,7 +1105,21 @@ impl AnpioKey {
         meta: &Value,
         body: &Value,
     ) -> Result<OriginProofSigning> {
-        let grant = self.protected_grant(did, Operation::OriginProof)?;
+        if self.config.is_none() {
+            bail!(
+                "{did} reaches an anpio-key over its development socket, which cannot make {}. \
+                 Re-run: anpio-cli did attach --config <service.json>",
+                Operation::OriginProof.purpose()
+            );
+        }
+        let kind = origin_target_kind(meta)?;
+        let grant = self.origin_grant_for(kind).ok_or_else(|| {
+            anyhow!(
+                "{did} has no origin_proof_{kind} grant, so the daemon has no authorization for \
+                 an origin proof addressed to a {kind}. Ask the anpio-key administrator for one, \
+                 then re-run: anpio-cli key grant <grant-id> --purpose origin-proof-{kind}"
+            )
+        })?;
         let request = Self::origin_proof_request(grant, request_id, method, meta, body);
         origin_proof_from_data(self.protected_signing_request(&request, request_id)?)
     }
@@ -1269,17 +1286,41 @@ impl AnpioKey {
     /// The grant that covers `operation`, from the per-purpose map first.
     ///
     /// The record predating that map holds a single id, and it was the HTTP grant; it stays
-    /// the fallback for every operation so those identities keep working unchanged.
+    /// the fallback for HTTP and document proofs so those identities keep working unchanged.
+    /// Every other purpose needs its own named grant: an HTTP grant does not authorize it.
+    ///
+    /// Origin proofs are addressed by target kind, so this answer is "any origin-proof
+    /// grant" only for presence checks; signing goes through [`Self::origin_grant_for`].
     pub fn grant_for(&self, operation: Operation) -> Option<&str> {
         let purpose = match operation {
             Operation::Http => "http",
             Operation::DocumentProof => "document_proof",
-            _ => return self.grant.as_deref(),
+            Operation::Purpose => "purpose",
+            Operation::Ecdh => "ecdh",
+            Operation::ObjectProof => "object_proof",
+            Operation::OriginProof => {
+                return self
+                    .grants
+                    .iter()
+                    .find(|(key, _)| key.starts_with("origin_proof_"))
+                    .map(|(_, id)| id.as_str())
+            }
         };
         self.grants
             .get(purpose)
             .map(String::as_str)
             .or(self.grant.as_deref())
+    }
+
+    /// The grant named for one origin-proof target kind (`agent`, `group`, `service`).
+    ///
+    /// There is deliberately no fallback to `http`: the daemon checks the policy's origin,
+    /// so an HTTP grant cannot sign an origin proof, and pretending otherwise here would
+    /// only move the refusal one subprocess later.
+    pub fn origin_grant_for(&self, kind: &str) -> Option<&str> {
+        self.grants
+            .get(&format!("origin_proof_{kind}"))
+            .map(String::as_str)
     }
 
     /// Whether a grant for `operation` is recorded. Presence is not validity.
@@ -1356,9 +1397,18 @@ impl AnpioKey {
     /// daemon's facts, and this is the one call that asks for them.
     pub fn grant_status(&self, operation: Operation) -> Result<GrantStatus> {
         let grant = self.grant_id(operation)?;
+        self.grant_status_by_id(grant)
+    }
+
+    /// What the daemon says about one grant id, whatever purpose it was issued for.
+    ///
+    /// [`Self::grant_status`] resolves an operation to a single grant; an identity that
+    /// holds several grants for the same operation (the three origin-proof kinds) has to
+    /// check each one, so this is the call that names a grant directly.
+    pub fn grant_status_by_id(&self, grant_id: &str) -> Result<GrantStatus> {
         let data = self.protected_request(&serde_json::json!({
             "operation": "GET_GRANT_STATUS",
-            "grant_id": grant,
+            "grant_id": grant_id,
         }))?;
         serde_json::from_value(data)
             .context("anpio-key returned a grant status this client cannot read")
@@ -1546,25 +1596,159 @@ impl AnpioKey {
     /// caller who controls the environment could not already do. The config path itself
     /// is part of the identity record and has no command-level flag.
     fn invoke_protected(&self, args: &[String]) -> Result<Vec<u8>> {
-        let binary = protected_binary();
-        let output = Command::new(&binary).args(args).output().map_err(|err| {
-            anyhow!(
-                "could not run {binary}: {err}. The protected entry uses the \
-                 administrator-installed binary; install anpio-key or re-run: anpio-cli did \
-                 attach"
-            )
-        })?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stderr = stderr.trim();
-            bail!(
-                "{binary} {} failed: {}",
-                args.join(" "),
-                if stderr.is_empty() { "no message" } else { stderr }
-            );
-        }
-        Ok(output.stdout)
+        run_protected(args)
     }
+}
+
+/// Run the installed protected binary with `args`, returning its stdout.
+///
+/// The child inherits the process's controlling terminal, which is what the completion
+/// prompts and the passphrase `anpio-key` reads from `/dev/tty` need; its stdin is not used.
+fn run_protected(args: &[String]) -> Result<Vec<u8>> {
+    let binary = protected_binary();
+    let output = Command::new(&binary).args(args).output().map_err(|err| {
+        anyhow!(
+            "could not run {binary}: {err}. The protected entry uses the \
+             administrator-installed binary; install anpio-key or re-run: anpio-cli did \
+             attach"
+        )
+    })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+        bail!(
+            "{binary} {} failed: {}",
+            args.join(" "),
+            if stderr.is_empty() { "no message" } else { stderr }
+        );
+    }
+    Ok(output.stdout)
+}
+
+/// A management change the daemon has validated and is waiting to complete.
+///
+/// Nothing has been minted at this point: `digest` is what a completion must present, and
+/// `effect` is the public, human-readable shape the completion will apply.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct PreparedChange {
+    pub operation_id: String,
+    pub digest: String,
+    pub effect: Value,
+    pub expires_at: i64,
+}
+
+/// Run one `admin` subcommand against the protected config and decode its reply.
+fn admin_reply(config: &Path, args: &[&str]) -> Result<Value> {
+    let mut full = vec![
+        "admin".to_string(),
+        "--config".to_string(),
+        config.display().to_string(),
+    ];
+    full.extend(args.iter().map(|arg| arg.to_string()));
+    let bytes = run_protected(&full)?;
+    let reply: Value = serde_json::from_slice(&bytes)
+        .context("anpio-key admin answered with something that is not JSON")?;
+    if reply.get("code").and_then(Value::as_str) != Some("OK") {
+        bail!(
+            "anpio-key refused `admin {}`: {}",
+            args.join(" "),
+            reply
+                .get("code")
+                .and_then(Value::as_str)
+                .unwrap_or("no code")
+        );
+    }
+    Ok(reply)
+}
+
+/// Prepare a management change from a public JSON document.
+///
+/// `anpio-key admin prepare` validates the change and answers with the digest an
+/// approval must carry; it does not touch the vault, the catalog, or any key.
+pub fn admin_prepare(config: &Path, change: &Value) -> Result<PreparedChange> {
+    let path = write_temp_json(&serde_json::to_vec(change)?)?;
+    let result = admin_reply(
+        config,
+        &["prepare", "--file", &path.display().to_string()],
+    );
+    let _ = fs::remove_file(&path);
+    let reply = result?;
+    let prepared = reply
+        .get("prepared")
+        .cloned()
+        .ok_or_else(|| anyhow!("anpio-key prepared nothing; the reply carried no `prepared`"))?;
+    serde_json::from_value(prepared).context("anpio-key prepared a change this client cannot read")
+}
+
+/// Apply a prepared change that needs no secret.
+pub fn admin_commit(config: &Path, operation_id: &str, digest: &str) -> Result<Value> {
+    admin_reply(
+        config,
+        &["commit", "--operation-id", operation_id, "--digest", digest],
+    )
+}
+
+/// Read the protected catalog: the vaults, keys and policies the service knows.
+pub fn admin_catalog(config: &Path) -> Result<Value> {
+    admin_reply(config, &["catalog"])
+}
+
+/// Proof the first document of an identity the service just provisioned.
+///
+/// The administrator's account deliberately cannot open the sign socket, so this one
+/// signature goes through the management plane: `anpio-key` signs only while every key of
+/// the DID is still unpublished and only a document that names exactly those keys. Every
+/// later proof goes through the agent's `SIGN_DOCUMENT_PROOF` grant.
+pub fn admin_sign_first_document(
+    config: &Path,
+    vault_id: &str,
+    did: &str,
+    unsigned: &Value,
+    domain: &str,
+    challenge: &str,
+) -> Result<Value> {
+    let path = write_temp_json(&serde_json::to_vec(unsigned)?)?;
+    let result = admin_reply(
+        config,
+        &[
+            "sign-first-document",
+            "--vault-id",
+            vault_id,
+            "--did",
+            did,
+            "--document",
+            &path.display().to_string(),
+            "--domain",
+            domain,
+            "--challenge",
+            challenge,
+        ],
+    );
+    let _ = fs::remove_file(&path);
+    result?
+        .get("data")
+        .and_then(|data| data.get("document"))
+        .cloned()
+        .ok_or_else(|| anyhow!("anpio-key signed nothing; the reply carried no document"))
+}
+
+/// Complete a prepared change that mints keys, with a **new** passphrase.
+///
+/// The prompt, the two readings, and the sealing all happen inside `anpio-key`; the
+/// passphrase never passes through this process, its argv, or its environment.
+pub fn admin_complete_secret(config: &Path, operation_id: &str, digest: &str) -> Result<Value> {
+    admin_reply(
+        config,
+        &[
+            "complete-secret-operation",
+            "--operation-id",
+            operation_id,
+            "--digest",
+            digest,
+            "--new-secret",
+            "--json",
+        ],
+    )
 }
 
 /// What `anpio-key key create --json` answers with.
@@ -1806,6 +1990,26 @@ fn binding_keyid(document: &Value) -> Option<String> {
         Value::String(id) => Some(id.clone()),
         Value::Object(map) => map.get("id").and_then(Value::as_str).map(str::to_string),
         _ => None,
+    }
+}
+
+/// The target kind an origin proof is addressed to, from `meta.target.kind`.
+///
+/// These are the three kinds the daemon issues grants for; anything else names a policy it
+/// cannot hold, so the refusal happens here rather than as an opaque denial from the daemon.
+fn origin_target_kind(meta: &Value) -> Result<&'static str> {
+    match meta
+        .get("target")
+        .and_then(|target| target.get("kind"))
+        .and_then(Value::as_str)
+    {
+        Some("agent") => Ok("agent"),
+        Some("group") => Ok("group"),
+        Some("service") => Ok("service"),
+        Some(other) => bail!(
+            "origin proof target kind `{other}` has no grant; expected agent, group or service"
+        ),
+        None => bail!("an origin proof needs meta.target.kind (agent, group or service)"),
     }
 }
 
@@ -2604,13 +2808,45 @@ mod tests {
                 "did:wba:x:user:alice:e1_x",
                 "8b3f4f0e-7a5b-4c47-9c2f-2b6a1d9e0c11",
                 "direct.send",
-                &json!({}),
+                &json!({"target": {"kind": "group", "did": "did:wba:x:user:bob"}}),
                 &json!({}),
             )
             .unwrap_err()
             .to_string();
-        assert!(err.contains("no anpio-key grant"), "{err}");
-        assert!(err.contains("--purpose origin-proof"), "{err}");
+        assert!(err.contains("no origin_proof_group grant"), "{err}");
+        assert!(err.contains("--purpose origin-proof-group"), "{err}");
+
+        // An HTTP grant is not an origin-proof grant: the daemon checks the policy's
+        // origin, so the client must not send a request it knows will be denied.
+        let http_only = AnpioKey {
+            config: Some(PathBuf::from("/etc/anpio-key/service.json")),
+            grant: Some("11111111-1111-4111-8111-111111111111".to_string()),
+            grants: BTreeMap::from([(
+                "http".to_string(),
+                "11111111-1111-4111-8111-111111111111".to_string(),
+            )]),
+            ..AnpioKey::default()
+        };
+        let err = http_only
+            .sign_origin_proof(
+                "did:wba:x:user:alice:e1_x",
+                "8b3f4f0e-7a5b-4c47-9c2f-2b6a1d9e0c11",
+                "direct.send",
+                &json!({"target": {"kind": "agent", "did": "did:wba:x:user:bob"}}),
+                &json!({}),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no origin_proof_agent grant"), "{err}");
+
+        let unknown_kind = ungranted.sign_origin_proof(
+            "did:wba:x:user:alice:e1_x",
+            "8b3f4f0e-7a5b-4c47-9c2f-2b6a1d9e0c11",
+            "direct.send",
+            &json!({"target": {"kind": "robot", "did": "did:wba:x:user:bob"}}),
+            &json!({}),
+        );
+        assert!(unknown_kind.is_err());
     }
 
     #[test]

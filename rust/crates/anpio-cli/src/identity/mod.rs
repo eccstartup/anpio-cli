@@ -26,6 +26,7 @@ pub use host::{
     check_handle, document_hash, email_verified, fetch_host_service, fetch_profile,
     fetch_public_profile, register_identity, send_verification_email, update_document,
     update_profile, wait_for_email, HandleCheck, HandleDecision, HostService, Issued,
+    DID_AUTH_PATH,
 };
 pub use session::{
     load_session, parse_ttl_seconds, save_session, session_host, SessionEntry, SessionFile, SessionWrite,

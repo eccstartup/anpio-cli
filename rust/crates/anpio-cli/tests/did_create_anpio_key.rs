@@ -20,6 +20,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use anpio_cli::custody::{ed25519_public_key, public_key_from_multibase};
+use anpio_cli::identity::{build_external_identity, CreateIdentityInput};
 use serde_json::{json, Value};
 
 /// The RFC 8032 test vector's public key, as `ed25519_public_key` reads it.
@@ -301,6 +303,79 @@ fi
 exit 64
 "#;
 
+/// The provisioning fake: the protected service's three admin calls and the document proof
+/// a new identity needs.
+///
+/// The DID and the signed document are woven in at construction time; the completion reply
+/// carries the keys and grants that document already publishes, so the CLI's own check that
+/// the daemon minted the identity it built is exercised rather than bypassed.
+const FAKE_PROTECTED_CREATE: &str = r#"#!/bin/sh
+log="$ANPIOCLI_TEST_ANPIO_KEY_LOG"
+printf '%s\n' "$*" >> "$log"
+if [ "$1" = "admin" ]; then
+  shift 1
+  command=""; file=""; document=""; domain=""; challenge=""; operation=""; digest=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      prepare|commit|complete-secret-operation|sign-first-document|catalog) command="$1"; shift ;;
+      --file) file="$2"; shift 2 ;;
+      --document) document="$2"; shift 2 ;;
+      --domain) domain="$2"; shift 2 ;;
+      --challenge) challenge="$2"; shift 2 ;;
+      --operation-id) operation="$2"; shift 2 ;;
+      --digest) digest="$2"; shift 2 ;;
+      --vault-id|--did|--config) shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  case "$command" in
+    sign-first-document)
+      printf 'PROOF {"document":%s,"domain":"%s","challenge":"%s"}\n' "$(cat "$document")" "$domain" "$challenge" >> "$log"
+      printf '%s\n' '{"code":"OK","data":{"document":__VALUE__,"kid":"__DID__#key-1"}}'
+      ;;
+    prepare)
+      printf 'CHANGE %s\n' "$(cat "$file")" >> "$log"
+      n=$(cat "$log.count" 2>/dev/null || printf '0')
+      n=$((n + 1))
+      printf '%s' "$n" > "$log.count"
+      case "$n" in
+        1) printf '%s\n' '{"code":"OK","prepared":{"operation_id":"op-provision","digest":"digest-provision","effect":{"kind":"ProvisionIdentity","vault_id":"vault-main","did":"__DID__","device_id":"mybot/default"},"expires_at":4102444800}}' ;;
+        *) printf '%s\n' '{"code":"OK","prepared":{"operation_id":"op-install","digest":"digest-install","effect":{"kind":"InstallDocument","vault_id":"vault-main"},"expires_at":4102444800}}' ;;
+      esac
+      ;;
+    commit)
+      printf 'COMMIT %s %s\n' "$operation" "$digest" >> "$log"
+      printf '%s\n' '{"code":"OK"}'
+      ;;
+    complete-secret-operation)
+      printf 'COMPLETE %s %s\n' "$operation" "$digest" >> "$log"
+      printf '%s\n' '{"code":"OK","data":__DATA__}'
+      ;;
+    *) exit 64 ;;
+  esac
+  exit 0
+fi
+if [ "$1" = "data" ]; then
+  shift 1
+  file=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --file) file="$2"; shift 2 ;;
+      --config) shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  request=$(cat "$file")
+  printf 'REQ %s\n' "$request" >> "$log"
+  request_id=$(printf '%s' "$request" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+  prefix='{"code":"OK","data":{"request_id":"'
+  suffix='","state":"completed","result":{"value":__VALUE__,"proof":__PROOF__}}}'
+  printf '%s%s%s\n' "$prefix" "$request_id" "$suffix"
+  exit 0
+fi
+exit 64
+"#;
+
 /// The DID the protected fake holds, in the E1 shape `did attach` accepts.
 const PROTECTED_DID: &str = "did:wba:example.com:user:alice:e1_abc";
 /// The hot fragment the HTTP grant covers; the binding key is `key-1`.
@@ -361,6 +436,62 @@ impl FakeKey {
         Self::protected_with(dir, name, "active", 0)
     }
 
+    /// The protected service a `did create` talks to: it prepares and completes the
+    /// provisioning change, proofs the first document on the management plane, and accepts
+    /// the first-install commit. `did` and `signed` are the ones the client builds from the
+    /// keys it returns.
+    fn provisioning(dir: &Path, name: &str, did: &str, signed: &Value) -> Self {
+        let path = dir.join(format!("anpio-key-{name}"));
+        let log = dir.join(format!("anpio-key-{name}.log"));
+        let data = json!({
+            "vault_id": "vault-main",
+            "did": did,
+            "device_id": "mybot/default",
+            "keys": [
+                {
+                    "key_id": "key-root",
+                    "role": "root",
+                    "kid": format!("{did}#key-1"),
+                    "public_multibase": PUBLIC_MULTIBASE,
+                },
+                {
+                    "key_id": "key-sign",
+                    "role": "device_signing",
+                    "kid": format!("{did}#mybot/default-sign"),
+                    "public_multibase": SIGNING_MULTIBASE,
+                },
+                {
+                    "key_id": "key-agree",
+                    "role": "key_agreement",
+                    "kid": format!("{did}#mybot/default-agreement"),
+                    "public_multibase": AGREEMENT_MULTIBASE,
+                },
+            ],
+            "grants": {
+                "http": {"grant_id": "g-http", "key_id": "key-sign"},
+                "document_proof": {"grant_id": "g-doc", "key_id": "key-root"},
+                "purpose": {"grant_id": "g-purpose", "key_id": "key-sign"},
+                "origin_proof_agent": {"grant_id": "g-agent", "key_id": "key-sign"},
+                "origin_proof_group": {"grant_id": "g-group", "key_id": "key-sign"},
+                "origin_proof_service": {"grant_id": "g-service", "key_id": "key-sign"},
+            },
+            "unlocked": ["key-root", "key-sign", "key-agree"],
+        });
+        let proof = json!({
+            "type": "DataIntegrityProof",
+            "cryptosuite": "eddsa-jcs-2022",
+            "verificationMethod": format!("{did}#key-1"),
+            "proofPurpose": "assertionMethod",
+            "proofValue": "zFakeProof",
+        });
+        let script = FAKE_PROTECTED_CREATE
+            .replace("__DID__", did)
+            .replace("__DATA__", &data.to_string())
+            .replace("__VALUE__", &signed.to_string())
+            .replace("__PROOF__", &proof.to_string());
+        Self::write(path, log, script)
+    }
+
     fn write(path: PathBuf, log: PathBuf, script: String) -> Self {
         fs::write(&path, script).expect("write the fake anpio-key");
         let mut permissions = fs::metadata(&path).expect("stat the fake anpio-key").permissions();
@@ -402,15 +533,48 @@ impl FakeKey {
             .collect()
     }
 
-    /// Every command line, without the request/document payload lines.
+    /// The first-document proofs the management plane was asked for, in order.
+    fn proofs(&self) -> Vec<Value> {
+        fs::read_to_string(&self.log)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| line.strip_prefix("PROOF "))
+            .map(|line| serde_json::from_str(line).expect("a proof request is JSON"))
+            .collect()
+    }
+
+    /// Every command line, without the request/document/change payload lines.
     fn invocations(&self) -> Vec<String> {
         fs::read_to_string(&self.log)
             .unwrap_or_default()
             .lines()
             .filter(|line| !line.is_empty())
             .filter(|line| {
-                !line.starts_with("DATA ") && !line.starts_with("REQ ") && !line.starts_with("DOC ")
+                !["DATA ", "REQ ", "DOC ", "PROOF ", "CHANGE ", "COMMIT ", "COMPLETE "]
+                    .iter()
+                    .any(|prefix| line.starts_with(prefix))
             })
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The change documents an `admin prepare` was given, in order.
+    fn changes(&self) -> Vec<Value> {
+        fs::read_to_string(&self.log)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| line.strip_prefix("CHANGE "))
+            .map(|line| serde_json::from_str(line).expect("a prepared change is JSON"))
+            .collect()
+    }
+
+    /// The `COMMIT`/`COMPLETE` records, as `<operation> <digest>`.
+    fn records(&self, kind: &str) -> Vec<String> {
+        let prefix = format!("{kind} ");
+        fs::read_to_string(&self.log)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| line.strip_prefix(&prefix))
             .map(str::to_string)
             .collect()
     }
@@ -714,36 +878,258 @@ fn a_named_key_create_refuses_without_a_terminal() {
     assert!(!home.identity("mybot").exists());
 }
 
-/// A machine with the protected service installed has no way to put a new identity's keys
-/// into it, so the command refuses before the host or the daemon is asked — and names the
-/// one path that works, adopting an identity that already exists. It never offers a second,
-/// unprotected daemon on the same machine.
+/// The protected arm: on a machine with the installed service, `--key anpio-key` provisions
+/// the identity *into* that service.
+///
+/// The conversation is judged on what it asks the daemon for: a `ProvisionIdentity` change
+/// whose policies are the client's fixed capabilities and whose grants name the role that
+/// may hold each one; one completion carrying `--new-secret` (the passphrase stays inside
+/// the daemon); a first-document proof on the management plane, because the administrator
+/// account cannot open the sign socket; and an `InstallDocument` commit in the vault the
+/// provisioning named. The output then has to hand the agent administrator the exact attach
+/// command — and no passphrase and no second, development daemon.
 #[test]
-fn a_named_key_create_refuses_when_the_protected_service_is_installed() {
+fn a_protected_create_provisions_the_identity_with_one_confirmation() {
     let host = FakeHost::start();
-    let home = Home::new("named-protected-refusal");
-    let key = FakeKey::new(&home.0, "keys");
+    let home = Home::new("protected-create");
     let config = home.0.join("service.json");
     fs::write(&config, "{}").expect("a service configuration");
+    let config_text = config.display().to_string();
 
-    let Some(out) =
-        run_with_a_terminal_seeing(&home, &key, &create_args(&host.base), &config)
+    let port = host
+        .base
+        .rsplit(':')
+        .next()
+        .and_then(|port| port.parse::<u16>().ok())
+        .expect("the fake host's port");
+    let input = CreateIdentityInput {
+        authority: format!("localhost%3A{port}"),
+        domain: "localhost".into(),
+        agent: "mybot".into(),
+        profile: "default".into(),
+        device: Some("mybot/default".into()),
+        handle: "mybot".into(),
+        did_host_url: host.base.clone(),
+        service_endpoint: format!("{}/anp-im/rpc", host.base),
+        service_did: format!("did:wba:localhost%3A{port}"),
+    };
+    // The document and DID the client will build from the keys the fake returns. They are
+    // the ones its own check accepts, which is the property under test.
+    let external = build_external_identity(
+        &input,
+        ed25519_public_key(PUBLIC_MULTIBASE, "root").expect("the root key"),
+        ed25519_public_key(SIGNING_MULTIBASE, "device signing").expect("the signing key"),
+        public_key_from_multibase(AGREEMENT_MULTIBASE, "agreement").expect("the agreement key"),
+    )
+    .expect("the client's document");
+    let did = external.did.clone();
+    let mut signed = external.unsigned_document.clone();
+    signed["proof"] = json!({
+        "type": "DataIntegrityProof",
+        "cryptosuite": "eddsa-jcs-2022",
+        "verificationMethod": format!("{did}#key-1"),
+        "proofPurpose": "assertionMethod",
+        "proofValue": "zFakeProof",
+    });
+    let key = FakeKey::provisioning(&home.0, "protected", &did, &signed);
+
+    let Some(out) = run_with_a_terminal_seeing(&home, &key, &create_args(&host.base), &config)
     else {
         return;
     };
-    assert!(!out.status.success(), "{}", text(&out.stdout));
     let printed = text(&out.stdout) + &text(&out.stderr);
-    assert!(printed.contains("cannot yet provision"), "{printed}");
-    assert!(printed.contains("install.sh --adopt"), "{printed}");
+    assert!(out.status.success(), "{printed}");
+
+    // The provisioning change: the identity's coordinates, its six capabilities, and the
+    // role that holds each grant.
+    let changes = key.changes();
+    assert_eq!(changes.len(), 2, "{changes:#?}");
+    let provision = &changes[0];
+    assert_eq!(provision["kind"], "ProvisionIdentity");
+    assert_eq!(provision["host"], "localhost");
+    assert_eq!(provision["port"], port);
+    assert_eq!(provision["path_segments"], json!(["user", "mybot"]));
+    assert_eq!(provision["device_id"], "mybot/default");
+    assert!(
+        provision["vault_id"].is_null(),
+        "the daemon picks its one active vault: {provision}"
+    );
+    let policies = provision["policies"].as_array().expect("the policies");
+    assert_eq!(policies.len(), 6, "{policies:#?}");
+    let policy = |name: &str| {
+        policies
+            .iter()
+            .find(|policy| policy["name"] == name)
+            .unwrap_or_else(|| panic!("no {name} policy in {policies:#?}"))
+    };
+    let http = policy("http");
+    assert_eq!(http["purpose"], "http_authentication");
+    assert_eq!(http["content"]["origin"], "https://localhost");
+    assert_eq!(http["content"]["signature_profile"], "anp-http-v2");
+    assert_eq!(http["content"]["body"]["max_bytes"], 1_048_576);
+    let paths = http["content"]["paths"].as_array().expect("the HTTP paths");
+    for path in ["/anp-im/rpc", "/user-service/v1/did-auth/rpc"] {
+        assert!(
+            paths.iter().any(|candidate| candidate == path),
+            "{path} missing from {paths:?}"
+        );
+    }
+    assert_eq!(policy("document-proof")["content"]["proof_purposes"], json!(["assertionMethod"]));
+    assert_eq!(policy("device-assertions")["content"]["purposes"], json!(["device_assertion"]));
+    for kind in ["agent", "group", "service"] {
+        assert_eq!(policy(&format!("origin-{kind}"))["content"]["origin"], format!("anp://{kind}"));
+    }
+    let mut policy_ids = policies
+        .iter()
+        .map(|policy| policy["policy_id"].as_str().expect("a policy id").to_string())
+        .collect::<Vec<_>>();
+    policy_ids.sort();
+    policy_ids.dedup();
+    assert_eq!(policy_ids.len(), 6, "every policy has its own id");
+
+    let grants = provision["grants"].as_array().expect("the grants");
+    assert_eq!(grants.len(), 6, "{grants:#?}");
+    let granted = |name: &str| {
+        let id = policy(name)["policy_id"].as_str().expect("a policy id");
+        grants
+            .iter()
+            .find(|grant| grant["policy_id"] == id)
+            .unwrap_or_else(|| panic!("no grant for {name} in {grants:#?}"))
+    };
+    assert_eq!(granted("document-proof")["key"], "root");
+    assert_eq!(granted("device-assertions")["key"], "device_signing");
+    for name in ["http", "origin-agent", "origin-group", "origin-service"] {
+        assert_eq!(granted(name)["key"], "device_signing", "{name}");
+    }
+
+    // The daemon is asked to mint and seal once, on this terminal, and the flag that makes
+    // it read a *new* passphrase is the only thing that reaches the process about it.
+    let invocations = key.invocations();
+    assert_eq!(invocations.len(), 5, "{invocations:#?}");
+    assert!(
+        invocations[0].starts_with(&format!("admin --config {config_text} prepare --file ")),
+        "{}",
+        invocations[0]
+    );
+    assert_eq!(
+        invocations[1],
+        format!(
+            "admin --config {config_text} complete-secret-operation --operation-id \
+             op-provision --digest digest-provision --new-secret --json"
+        ),
+        "one completion, carrying --new-secret"
+    );
+    assert!(
+        invocations[2].starts_with(&format!(
+            "admin --config {config_text} sign-first-document --vault-id vault-main --did {did} \
+             --document "
+        )),
+        "the administrator account proofs the first document: {}",
+        invocations[2]
+    );
+    assert!(
+        !invocations.iter().any(|line| line.contains(" data ")),
+        "the admin account never opens the sign socket: {invocations:#?}"
+    );
+    assert!(
+        invocations[3].starts_with(&format!("admin --config {config_text} prepare --file ")),
+        "{}",
+        invocations[3]
+    );
+    assert_eq!(
+        invocations[4],
+        format!(
+            "admin --config {config_text} commit --operation-id op-install --digest digest-install"
+        )
+    );
+    assert_eq!(key.records("COMPLETE"), vec!["op-provision digest-provision"]);
+    assert_eq!(key.records("COMMIT"), vec!["op-install digest-install"]);
+
+    // The first-document proof names the document the client built, on the same host.
+    let proofs = key.proofs();
+    assert_eq!(proofs.len(), 1, "{proofs:#?}");
+    assert_eq!(proofs[0]["document"], external.unsigned_document);
+    assert_eq!(proofs[0]["domain"], "localhost");
+    let challenge = proofs[0]["challenge"].as_str().expect("a challenge");
+    assert_eq!(challenge.len(), 32, "{challenge}");
+    assert!(challenge.chars().all(|c| c.is_ascii_hexdigit()), "{challenge}");
+
+    // The proofed document is installed into the vault the provisioning reply names.
+    let install = &changes[1];
+    assert_eq!(install["kind"], "Catalog");
+    assert_eq!(install["change"]["action"], "InstallDocument");
+    assert_eq!(install["change"]["vault_id"], "vault-main");
+    assert_eq!(install["change"]["document"], signed);
+
+    // The store keeps the name and the grants, never a private byte.
+    let identity = read_json(&home.identity("mybot"));
+    assert_eq!(identity["did"], did);
+    assert_eq!(identity["device_id"], "mybot/default");
+    assert_eq!(identity["did_document"], signed);
+    let custody = &identity["custody"];
+    assert_eq!(custody["kind"], "anpio-key");
+    assert_eq!(custody["config"].as_str(), Some(config_text.as_str()));
+    assert_eq!(custody["kid"], "mybot/default-sign");
+    assert_eq!(custody["device"], "mybot/default");
+    assert!(custody["grant"].is_null(), "the per-purpose map replaces it: {custody}");
+    let stored = custody["grants"].as_object().expect("the per-purpose grants");
+    assert_eq!(stored.len(), 6, "{stored:?}");
+    for (purpose, grant) in [
+        ("http", "g-http"),
+        ("document_proof", "g-doc"),
+        ("purpose", "g-purpose"),
+        ("origin_proof_agent", "g-agent"),
+        ("origin_proof_group", "g-group"),
+        ("origin_proof_service", "g-service"),
+    ] {
+        assert_eq!(stored[purpose], grant, "{purpose}");
+    }
+    for entry in store_files(&home.0) {
+        let bytes = fs::read(&entry).expect("read a store file");
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(
+            !text.contains("PRIVATE KEY") && !text.contains("private_key_pem"),
+            "{} holds private key material",
+            entry.display()
+        );
+    }
+    assert!(!home.pending().exists());
+
+    // The five stages, the minted counts, and the exact attach command for the agent
+    // administrator. The grants printed are the ids just issued.
+    for stage in ["[1/5]", "[2/5]", "[3/5]", "[4/5]", "[5/5]"] {
+        assert!(printed.contains(stage), "no {stage} line:\n{printed}");
+    }
+    assert!(printed.contains("vault vault-main"), "{printed}");
+    assert!(printed.contains("6 policies · 6 grants"), "{printed}");
+    assert!(printed.contains("keys minted and sealed; 3 of 3 unlocked for signing"), "{printed}");
+    assert!(printed.contains("installed the first document in the vault"), "{printed}");
+    assert!(printed.contains(&format!("--config {config_text}")), "{printed}");
+    assert!(printed.contains(&format!("--did {did}")), "{printed}");
+    assert!(printed.contains("--kid mybot/default-sign"), "{printed}");
+    assert!(printed.contains("--agent mybot --device mybot/default"), "{printed}");
+    for (purpose, grant) in [
+        ("http", "g-http"),
+        ("document_proof", "g-doc"),
+        ("purpose", "g-purpose"),
+        ("origin_proof_agent", "g-agent"),
+        ("origin_proof_group", "g-group"),
+        ("origin_proof_service", "g-service"),
+    ] {
+        assert!(
+            printed.contains(&format!("--grant {purpose}={grant}")),
+            "no {purpose} grant in:\n{printed}"
+        );
+    }
+    assert!(printed.contains("did show --agent mybot"), "{printed}");
     assert!(
         !printed.contains("serve --development") && !printed.contains("allow-named-key-signing"),
         "no development daemon is suggested:\n{printed}"
     );
-
-    assert!(key.calls().is_empty(), "the daemon is never asked: {:?}", key.calls());
-    assert!(host.requests().is_empty(), "the host is never asked");
-    assert!(!home.pending().exists());
-    assert!(!home.identity("mybot").exists());
+    assert!(
+        !printed.contains("--new-secret") && !printed.contains("passphrase"),
+        "the passphrase never reaches this process or its output:\n{printed}"
+    );
 }
 
 /// `key grant <id>` is the one-time handoff: the grant lands beside the key name, and
@@ -995,8 +1381,13 @@ fn attaching_through_the_protected_service_records_the_hot_key_and_both_grants()
         requests[1]["key_id"], "key-sign",
         "the document is read for the key the identity will sign with: {requests:?}"
     );
-    assert_eq!(requests[2]["grant_id"], "g-http");
-    assert_eq!(requests[3]["grant_id"], "g-doc");
+    // Every recorded grant is checked; the map orders the purposes, so the document proof
+    // is asked about before the HTTP grant.
+    let checked: Vec<&str> = requests[2..4]
+        .iter()
+        .map(|request| request["grant_id"].as_str().expect("a grant id"))
+        .collect();
+    assert_eq!(checked, vec!["g-doc", "g-http"], "{requests:?}");
 }
 
 /// A protected identity must name its key: without a fragment the service could pick the

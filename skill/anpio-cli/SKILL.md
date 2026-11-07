@@ -131,11 +131,47 @@ vNext document: an Ed25519 root (`#key-1`), an Ed25519 device signing key
 (`{agent}/{profile}-sign`) and an X25519 device agreement key
 (`{agent}/{profile}-agreement`).
 
-**The boundary is a property of the install.** A machine that has the protected
-service gets its identity provisioned when an existing identity is adopted into
-it; `did create` is not the way in (see below). Adoption is an administrator
-action in their own terminal, because the passphrases are typed there and never
-appear as an argument or an environment variable:
+**The boundary is a property of the install, not of the command.** The service
+is installed as a system service and holds no identity of its own: no keys are
+minted, no passphrase is collected, no grant is issued at install time. An
+identity is created into it on demand, by the person running the CLI in their
+own terminal:
+
+```bash
+anpio-cli did create --host awiki.me --handle <handle> --email <you@example.com> \
+  --agent <agent> --key anpio-key
+[3/5] Preparing a new identity in anpio-key    ok   <operation-id>
+      vault <vault> · did:wba:awiki.me:user:<agent> · device <agent>/<profile>
+      6 policies · 6 grants · approve within 120 s
+New identity passphrase: ******
+Repeat passphrase: ******
+      keys minted and sealed; 3 of 3 unlocked for signing
+[4/5] Building and signing the DID document    ok
+      installed the first document in the vault
+[5/5] Registering                              ok
+```
+
+This is the one human confirmation: the CLI prepares the change, `anpio-key`
+shows what it will do, and then reads a **new** passphrase twice from the
+terminal. The passphrase never passes through the CLI process, its argv, its
+environment, or MCP — and nothing about it is printed. That operation mints the
+root (`#key-1`) and both device keys, seals and unlocks them, publishes the
+identity's policies and issues its grants; the CLI then proofs the document with
+the root key and installs it as the vault's first document. From then on the
+agent signs by itself; nobody is asked again.
+
+The identity starts with the capabilities this client actually sends and nothing
+more: an HTTP grant for the service endpoint and any `--target` paths (POST, or
+`--method`, body up to 1 MiB), a document-proof grant on the root key, a
+device-assertion grant, and origin-proof grants for `origin-agent`,
+`origin-group` and `origin-service`. Add `--ecdh-peer <hex>` to get an ECDH
+grant on the agreement key. `--device <agent>/<profile>` names the device in the
+document (default: the local `{agent}/{profile}`). All of these only take effect
+with `--key anpio-key` on a machine that has the service installed.
+
+Adoption is the other entry, and only for an **existing** identity whose keys
+are still local. It is an administrator action in their own terminal, because
+the passphrases are typed there:
 
 ```bash
 sudo ./install.sh --adopt --identity <identity.json> \
@@ -148,10 +184,10 @@ sudo ./install.sh --adopt --identity <identity.json> \
 #     /Library/ANPIOKey/agent/home
 ```
 
-A new identity's keys cannot be provisioned into the service yet, so
-`did create --key anpio-key` **refuses** on a machine that has the service
-installed, and names the adopt command. It never starts a second daemon and
-never falls back to a local key.
+Iterating on a taken handle does not ask for the passphrase again: `--reuse-key`
+repeats the registration of the pending identity with the keys already minted.
+The DID embeds the handle, so a different handle needs a different identity and
+a fresh `did create`.
 
 Keys are used by the **agent account**, not the administrator: the sign socket
 is `_anpio:_anpio_sign`, the agent is in the group, and the administrator's
@@ -169,27 +205,36 @@ a freshly adopted identity appears in a different store:
 
 ```bash
 anpio-cli did attach --did <did> --kid <agent>/<profile>-sign \
-  --grant http=<hot-grant-id> --grant document_proof=<root-grant-id> --agent <your-id>
+  --grant http=<id> --grant document_proof=<id> --grant purpose=<id> \
+  --grant origin_proof_agent=<id> --grant origin_proof_group=<id> \
+  --grant origin_proof_service=<id> --agent <your-id> --device <agent>/<profile>
 #   → --config defaults to the installed service; --kid must be a fragment the
-#     service lists for this DID. The HTTP grant covers the hot key; the root key
-#     signs the document and is not used for requests.
+#     service lists for this DID. `did create --key anpio-key` prints this exact
+#     command with this identity's grant ids; copy it rather than assembling it.
 ```
 
-`--grant` is repeatable, each as `<purpose>=<grant-id>`: `http` covers
-`SIGN_HTTP` (the Hot key) and `document_proof` covers `SIGN_DOCUMENT_PROOF` (the
-Root key). A bare `--grant <id>` still means the HTTP grant. Attach asks the
-service about every named grant and refuses one that has expired or run out of
-uses, so it never records an identity that cannot sign. To replace a grant later —
-a renewal the administrator issued while the identity already exists — record it
-without touching anything else:
+`--grant` is repeatable, each as `<purpose>=<grant-id>`, and every purpose this
+build can request has a name: `http` (`SIGN_HTTP`), `document_proof`
+(`SIGN_DOCUMENT_PROOF`, on the root key), `purpose` (device assertions),
+`origin_proof_agent`, `origin_proof_group`, `origin_proof_service`,
+`object_proof`, and `ecdh` (on the agreement key). A bare `--grant <id>` still
+means the HTTP grant, and giving the same purpose twice is refused. Attach asks
+the service about every named grant and refuses one that has expired or run out
+of uses, so it never records an identity that cannot sign. To replace a grant
+later — a renewal the administrator issued while the identity already exists —
+record it without touching anything else:
 
 ```bash
 anpio-cli key grant <grant-id> --purpose http --agent <your-id>
 anpio-cli key grant <grant-id> --purpose document-proof --agent <your-id>
+anpio-cli key grant <grant-id> --purpose origin-proof-agent --agent <your-id>
 ```
 
 `did show`'s first line says where the key lives:
-`key: anpio-key (key <kid>, grant <id>)`. Signing then needs only the target —
+`key: anpio-key (key <kid>, grant <id>)`. On the protected surface the same
+output carries `signs:` with the purposes this identity actually holds a grant
+for, and `missing:` with the ones it does not — a command that needs a missing
+purpose refuses by name. Signing then needs only the target —
 `anp sign --target <url>` — or `anp login`.
 
 Records written before keys had names find theirs again by DID fingerprint, and
@@ -229,10 +274,11 @@ names the commands that do work; do not try to work around it.
 
 **On a machine with no protected service installed**, `did create --key anpio-key`
 still mints the three named keys under your account so an identity can be built
-and registered first. That identity is not yet protected: adopt it into a
-protected install to move the keys out of your account. Never run
-`anpio-key serve --development --allow-named-key-signing` as the way to sign —
-a development daemon is not a boundary.
+and registered first. That identity is not protected: its keys are readable by
+your account, and it holds no grants, so nothing can sign through the service
+until an administrator adopts it into a protected install (`install.sh --adopt`).
+Create identities into the service with `--key anpio-key` only where it is
+installed; do not run a second, development daemon as a signing surface.
 
 ### Messaging
 
