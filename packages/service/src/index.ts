@@ -42,6 +42,15 @@ export type { Acceptance, AcceptInput } from './rpc/accept'
 export { createDispatch } from './rpc/dispatch'
 export type { DispatchDeps } from './rpc/dispatch'
 
+export { createRelay } from './federation/forward'
+export type { Relay, RelayOptions, ForwardOutcome } from './federation/forward'
+
+export { createEgress } from './federation/egress'
+export type { Egress, EgressOptions, EgressAnswer } from './federation/egress'
+
+export { loadHttpSigner } from './federation/signing'
+export type { HttpSigner, OutboundRequest } from './federation/signing'
+
 export { checkMethod, lookupMethod, targetBindingHolds, DIRECT_SEND, GET_CAPABILITIES } from './rpc/methods'
 export type { MetaField, MethodSpec, TargetMode } from './rpc/methods'
 

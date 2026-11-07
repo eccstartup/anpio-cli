@@ -236,6 +236,17 @@ agent；附件的 `target.kind = "service"`，`target.did` 是那个对象服务
   与上一档不同的是，这里的理由**不是**"我们自己的文档解析不出来"——群文档正是本服务发布
   的（[groups.md](groups.md) §2.2）——而是那趟解析**过不了白名单**（见 §3.2）。
 
+**嵌入方怎么接这条规则。**`packages/service` 的库入口导出了
+`createRelay` / `createEgress` / `loadHttpSigner`，嵌入方按
+`createDispatch({ relay: createRelay({ config, egress }) })` 接跨域；这与 `main.ts`
+走的是同一个 `createRelay`，不另开一条实现。
+
+但**服务无法知道哪些 agent DID 住在本机**：DID 文档里没有"这颗 DID 归哪台服务"的条目，
+`serviceDid` 也回答不了。所以"本机目标不做出站解析"的短路由要由嵌入方用 `Relay` 包装
+完成——命中本机 DID 时直接返回 `{ kind: 'local' }`。`createRelay` 自己返回的 `local`
+只覆盖"目标文档指向的入口就是本服务"这一种情形。嵌入方若不做这层短路由，本机消息就会先
+依赖一次本机 DID 文档的可达解析，那是一个原本不需要的失败点，而且失败的样子是 1012。
+
 ### 3.4 outbox 换了住户
 
 `outbox.payloadJson` 装的是序列化好的通知。C11 之后它**只装通知**，而且只剩群那条路在写
