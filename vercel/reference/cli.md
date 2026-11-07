@@ -1,6 +1,6 @@
 ---
 title: anpio-cli 命令
-description: 命令行客户端 anpio-cli 的完整命令面：discover / did / agent / msg / group / anp / contacts / me / version，附退出码与输出约定。
+description: 命令行客户端 anpio-cli 的完整命令面：discover / did / agent / key / msg / group / anp / contacts / me / version，附退出码与输出约定。
 ---
 
 # anpio-cli 命令
@@ -61,8 +61,8 @@ cargo build --release --manifest-path rust/Cargo.toml
 
 | 子命令 | 作用 |
 |---|---|
-| `did create --host <url> --handle <name>` | 一条命令走完五个阶段：读服务信息、预检 handle、生成钥匙、签文档、注册（`--agent` 缺省=handle）。`--email` 等验证邮件，`--key anpio-key` 改由守护进程生成命名钥匙并签文档 proof（管理员在自己的终端跑） |
-| `did attach --did <did> --name <name>` | 恢复入口：把一把已由本地 `anpio-key` 持有的钥接回 store，没有私钥字节，签名走 socket。命名钥必须给 `--name`，指纹要与 DID 的最后一段一致。`--config <service.json>` 选受保护入口（配 `--grant`），`--device <id>` 绑定群 E2EE 的设备名。旧名 `attach-anpio-key` 仍是别名 |
+| `did create --host <url> --handle <name>` | 一条命令走完五个阶段：读服务信息、预检 handle、生成钥匙、签文档、注册（`--agent` 缺省=handle）。`--email` 等验证邮件。`--key anpio-key` 由**管理员在自己的终端**跑，走哪条路取决于机器上有没有受保护服务：装了服务就准备 `ProvisionIdentity`（读两遍新口令，铸根钥匙、设备签名钥匙、X25519 协商钥匙，发布策略与 grant，全程只确认一次）；没装服务就铸三把命名钥匙（不构成边界）。`--target` / `--method` / `--ecdh-peer` / `--device` 只在装了服务时有效，否则拒绝 |
+| `did attach --did <did>` | 恢复入口：把 `anpio-key` 已持有的钥接回 store，没有私钥字节，签名走 socket。`--config <service.json>` 选受保护入口（不给 `--key-root` / `--socket` 时缺省就是装好的受保护服务），此时要 `--kid`，并按用途重复给 `--grant <[purpose=]id>`；命名钥匙入口用 `--name`，指纹要与 DID 的最后一段一致。`--device <id>` 绑定群 E2EE 的设备名。过期或用尽的 grant 在 attach 时就被拒。旧名 `attach-anpio-key` 仍是别名 |
 | `did show` | 打印本机存着的这份身份 |
 | `did list` | 这台机器持有的全部身份，以及各自绑到了什么 |
 | `did register` | 把 DID 文档（重新）发布给它自己的主机，取回 bearer token |
@@ -79,8 +79,15 @@ cargo build --release --manifest-path rust/Cargo.toml
 之前，那个文件是 DID 已经搬过去的钥的**唯一**副本。所以投递结果不确定时它**留着**暂存钥并提示
 `--resume`，而不是丢掉。
 
+`did create --key anpio-key` 在装了受保护服务的机器上就是把身份**放进**那个边界：服务发布策略、
+按用途发出 grant，CLI 再把 grant id 记进新身份，最后打印一条可以直接粘给 agent 的 `did attach`
+命令。grant 到期或用尽后，用 `anpio-cli key grant <id> --purpose <http|document-proof|purpose|object-proof|ecdh|origin-proof-agent|-group|-service>` 重新记一条；它只处理已绑定 DID 的受保护钥匙。
+
 **`anpio-key` 托管的那类身份有两个入口，一个身份只接一个**：`--config <service.json>` 走受保护
 入口（grant、`request_id`、审计），`--key-root` / `--socket` 走开发 socket，两者同时给会被拒。
+不给 `--key-root` / `--socket` 时 `--config` 缺省就是装好的受保护服务，接它要 `--kid` 和按用途的
+`--grant`。命名钥匙（daemon `key create` 铸的那种）**进不了**受保护 catalog，只能用 `--name` 走
+命名钥匙入口。
 开发 socket 只覆盖"签整条 HTTP 请求"：`anp sign` / `anp login` / `did register` / `did publish`
 可用，`msg` / `contacts` / `group` 在动手之前就拒。受保护入口下，守护进程宣告
 `SIGN_ORIGIN_PROOF` 时 `msg`（本地读除外）/ `contacts` / `group`（不含 E2EE）的 origin proof

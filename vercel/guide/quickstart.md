@@ -93,13 +93,23 @@ anpio-cli did show
 这条命令一次走完五步（读服务信息 → 预检 handle → 生成钥匙 → 签文档 → 注册），
 中途失败会保住已经生成的钥匙，重跑时复用；要等服务发验证邮件就加 `--email`。
 
-钥匙要放在 `anpio-key` 里时，由**管理员在自己的终端**加 `--key anpio-key`：钥匙由守护进程
-生成、文档 proof 也由它签，CLI 只拿到名字和公钥。之后还有独立的一步——
-`anpio-key grant create` 建 grant，`anpio-cli key grant <id> --agent <handle>` 记进 store。
-受保护命名签名还没落地：`grant create` 只认已登记进受保护 catalog 的 DID 绑定钥匙，
-命名钥匙现在会被明确拒绝（见 anpio-key 的 TODO）。
-非交互终端直接拒绝，不会偷偷改用本机钥匙。这个身份**被删掉或换了机器**时，
-用 `anpio-cli did attach --did <did> --name <key>` 把它接回来。
+钥匙要放在 `anpio-key` 里时，由**管理员在自己的终端**加 `--key anpio-key`，落法取决于
+机器上有没有受保护服务：
+
+- **装了服务**（Linux `/etc/anpio-key/service.json`，macOS `/Library/ANPIOKey/service.json`）：
+  CLI 准备一个 `ProvisionIdentity`，服务在终端读两遍**新口令**，铸造根钥匙、设备签名钥匙和
+  X25519 协商钥匙，用同一口令封存并解锁，再发布策略、发出 grant；CLI 拿根钥匙签第一份文档、
+  装进 vault 并注册 handle。**全程只确认这一次**，之后 agent 自己签名。`--target` / `--method`
+  描述 HTTP 策略，`--ecdh-peer` 才发 ECDH grant，`--device` 决定文档里的设备名；这些旗标在
+  没装服务时会被拒绝。
+- **没装服务**：CLI 通过 daemon 铸三把命名钥匙，身份文件只记名字和公钥，没有私钥字节；但这三把
+  仍在你自己的账号下，**不构成边界**，要等管理员用 `install.sh --adopt`（目前仅 macOS）
+  迁进受保护安装。
+
+非交互终端直接拒绝，不会偷偷改用本机钥匙。身份记录**被删掉或换了机器**时，用 `did attach`
+接回来：受保护入口要 `--kid` 和每个用途的 `--grant`（`did create --key anpio-key` 会把这条
+命令连同 grant id 原样打印），命名钥匙入口用 `--name`。命名钥匙进不了受保护 catalog，
+受保护签名走 grant。
 
 > [!NOTE]
 > `--host` 要的是一台 **DID 主机**（`awiki-open-server` 那条线），不是第 2 步那个**消息服务**
