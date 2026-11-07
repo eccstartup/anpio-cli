@@ -27,13 +27,18 @@ use anpio_cli::anp::login::login;
 use anpio_cli::anp::{LoginError, Superseded};
 use anpio_cli::custody::{document_has_key, document_keyids, split_did, AnpioKey, Operation};
 use anpio_cli::identity::{
-    create_identity, current_agent_path, deliver, describe_status, document_hash, document_is_superseded,
-    fetch_host_service, fetch_profile, fetch_public_profile, list_identities, load_session, load_stored_key,
-    parse_ttl_seconds,
-    read_current_agent, register_identity, resign_document, resolve_agent_id, resolve_agent_id_with_source,
-    resolve_chain, retirement_document, save_session, select_current_agent, session_host, snake_case_name, subject_of,
-    successor_of, superseded_refusal_text, update_document, update_profile, without_proof, Accepted, ChainError,
-    ChainResolution, Custody, Supersession,
+    check_handle, clear_pending, create_identity, current_agent_path, deliver, describe_status,
+    document_hash, document_is_superseded,
+    email_verified, fetch_host_service, fetch_profile, fetch_public_profile, list_identities,
+    load_pending, load_session, load_stored_key,
+    parse_ttl_seconds, pending_path,
+    read_current_agent, rebuild_identity, register_identity, resign_document,
+    resolve_agent_id, resolve_agent_id_with_source,
+    resolve_chain, retirement_document, save_pending, save_session, select_current_agent,
+    send_verification_email, session_host, snake_case_name, store_root, subject_of,
+    successor_of, superseded_refusal_text, update_document, update_profile, wait_for_email,
+    without_proof, Accepted, ChainError,
+    ChainResolution, Custody, HandleDecision, Supersession,
     CreateIdentityInput, Hop, Identity, IdentityLocation, Issued, SessionWrite, UpdateError,
     DEFAULT_SESSION_TTL_SECONDS,
 };
@@ -243,21 +248,19 @@ enum DidCommand {
     /// Mint an identity and publish its DID document to a DID host.
     ///
     /// A DID document is only worth anything where the service can reach it, so this
-    /// registers with the host as well — and says so if the registration fails after the
-    /// keys were already written.
+    /// registers with the host as well. A handle is only a candidate until the host
+    /// accepts it: the one pending key is kept if registration does not go through, so a
+    /// retry costs a name, not a key.
     Create {
-        /// The DID host, e.g. `http://localhost:8000` (TODO5 §8-J: a local
-        /// `awiki-open-server`).
+        /// The DID host — a bare domain like `awiki.me`, or a URL like
+        /// `http://localhost:8000`. A value without a scheme is read as `https://`.
         #[arg(long)]
         host: String,
         /// The handle to register under on that host.
         #[arg(long)]
         handle: String,
-        /// The address the handle is registered under. awiki.ai's production
-        /// registration carries one (`anpio-extension` sends `handle`, `email`,
-        /// `did_document`), and a host that requires it refuses a registration
-        /// without it. This sends the address; it does not prove it — that is the
-        /// host's email round trip, which this client does not run.
+        /// The address to register the handle under. The host emails it, and this command
+        /// waits for the verification unless `--no-wait` or `--no-email` is given.
         #[arg(long, value_name = "EMAIL")]
         email: Option<String>,
         /// The local agent name — the DID path segment and the store directory.
@@ -270,6 +273,18 @@ enum DidCommand {
         agent: Option<String>,
         #[arg(long)]
         profile: Option<String>,
+        /// Reuse the one pending key from an earlier attempt instead of minting a new one.
+        ///
+        /// Use this after a taken handle, a host refusal, a lost response, or an email
+        /// that was verified late: the key is the identity's, the handle is only its path.
+        #[arg(long)]
+        reuse_key: bool,
+        /// Send the verification email but do not wait for it.
+        #[arg(long)]
+        no_wait: bool,
+        /// Skip the email round trip entirely, for a host that does not require it.
+        #[arg(long)]
+        no_email: bool,
     },
     /// Attach an identity whose key is held by an `anpio-key` daemon.
     ///
@@ -1111,7 +1126,22 @@ async fn main() -> anyhow::Result<()> {
                 email,
                 agent,
                 profile,
-            } => cmd_did_create(&host, &handle, email.as_deref(), agent, profile.as_deref()).await,
+                reuse_key,
+                no_wait,
+                no_email,
+            } => {
+                cmd_did_create(
+                    &host,
+                    &handle,
+                    email.as_deref(),
+                    agent,
+                    profile.as_deref(),
+                    reuse_key,
+                    no_wait,
+                    no_email,
+                )
+                .await
+            }
             DidCommand::AttachAnpioKey {
                 did,
                 key_root,
@@ -1579,12 +1609,21 @@ async fn cmd_discover(endpoint: &str, allow_private: &[String]) -> anyhow::Resul
     }
 }
 
+/// `did create` — a whole identity from one command.
+///
+/// The steps are the plan's: read the host, check the handle, mint or reuse a key, build
+/// and sign the document, then register with the email round trip. A handle is a candidate
+/// until registration succeeds, so nothing lands in `identity.json` before then: the key
+/// waits in `pending.json` at the store root, and `--reuse-key` picks it up again.
 async fn cmd_did_create(
     host: &str,
     handle: &str,
     email: Option<&str>,
     agent: Option<String>,
     profile: Option<&str>,
+    reuse_key: bool,
+    no_wait: bool,
+    no_email: bool,
 ) -> anyhow::Result<()> {
     // The agent is NOT run through `resolve_agent_id`: `create` names a new identity, and
     // the current selection must not decide where a second one lands. No `--agent` means
@@ -1592,51 +1631,204 @@ async fn cmd_did_create(
     // through `$ANPIOCLI_PROFILE`, because a profile is not part of the address.
     let agent = agent.unwrap_or_else(|| handle.to_string());
     let location = IdentityLocation::resolve(Some(&agent), profile)?;
-    let base = Url::parse(host).map_err(|err| anyhow::anyhow!("--host must be a URL: {err}"))?;
+    let host_url = if host.contains("://") {
+        host.to_string()
+    } else {
+        format!("https://{host}")
+    };
+    let base = Url::parse(&host_url)
+        .map_err(|err| anyhow::anyhow!("--host must be a domain or URL: {err}"))?;
+    let domain = base
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("--host names no domain: {host}"))?
+        .to_string();
+    let email = email.map(|email| email.trim().to_ascii_lowercase());
     let client = http_client()?;
 
     let service = fetch_host_service(&client, &base).await?;
-    let identity = create_identity(CreateIdentityInput {
+    create_stage(1, &format!("Reading the service information of {host}"), "ok");
+
+    // The handle is checked before a key exists, so a taken name costs nothing. A host
+    // that predates the precheck says so instead of pretending the name was checked;
+    // `existing` proceeds because it may be this very DID, registered by a request whose
+    // reply was lost — the registration itself is the authority on that.
+    let check = check_handle(&client, &base, handle, &domain).await?;
+    let full_handle = match &check {
+        None => {
+            create_stage(2, &format!("Checking the handle {handle}"), "skipped (no precheck)");
+            fallback_full_handle(handle, &domain)
+        }
+        Some(check) => {
+            let full_handle = check
+                .full_handle
+                .clone()
+                .unwrap_or_else(|| fallback_full_handle(handle, &domain));
+            match check.decision {
+                HandleDecision::Register => {
+                    create_stage(2, &format!("Checking the handle {handle}"), "available");
+                }
+                HandleDecision::Existing => {
+                    create_stage(
+                        2,
+                        &format!("Checking the handle {handle}"),
+                        "already registered; registering will confirm it is this key",
+                    );
+                }
+                HandleDecision::Unavailable => {
+                    create_stage(2, &format!("Checking the handle {handle}"), "unavailable");
+                    let pending = load_pending()?.is_some();
+                    print_unavailable_handle(handle, host, email.as_deref(), pending);
+                    anyhow::bail!("the handle {handle} is not available on {host}");
+                }
+            }
+            full_handle
+        }
+    };
+
+    let input = CreateIdentityInput {
         authority: service.authority,
         agent: location.agent.clone(),
         profile: location.profile.clone(),
         handle: handle.to_string(),
-        did_host_url: host.to_string(),
+        did_host_url: host_url,
         service_endpoint: service.service_endpoint,
         service_did: service.service_did,
-    })?;
-    identity.save(&location)?;
-    println!("did:     {}", identity.did);
-    println!("device:  {}", identity.device_id);
-    println!("stored:  {}", location.identity_path().display());
+    };
 
-    match register_identity(&client, &base, &identity, email).await {
+    let identity = if reuse_key {
+        let pending = load_pending()?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "--reuse-key was given, but there is no pending key at {}. Run without \
+                 --reuse-key to mint one.",
+                pending_path().display()
+            )
+        })?;
+        if pending.custody.is_some() {
+            anyhow::bail!(
+                "the pending identity is held by anpio-key, not locally; retry with \
+                 --key anpio-key"
+            );
+        }
+        let identity = rebuild_identity(input, &pending.keys)?;
+        create_stage(3, "Reusing the pending key", "ok");
+        identity
+    } else {
+        let identity = create_identity(input)?;
+        create_stage(3, "Generating keys", "ok");
+        identity
+    };
+    // Said once, at the only moment the boundary can still change the decision.
+    println!(
+        "      note: the private key is a 0600 file under {}; any code running as your user can read it.",
+        store_root().display()
+    );
+    create_stage(4, "Building and signing the DID document", "ok");
+
+    // The key is durable from here on, and stays durable if anything below fails.
+    let pending_path = save_pending(&identity)?;
+    println!("      pending key: {}", pending_path.display());
+
+    create_stage(5, "Registering", "");
+
+    if let Some(email) = email.as_deref().filter(|_| !no_email) {
+        if email_verified(&client, &base, email, &full_handle).await? {
+            println!("      email already verified");
+        } else {
+            send_verification_email(&client, &base, email, &full_handle).await?;
+            println!("      verification email sent to {email}");
+            if no_wait {
+                println!(
+                    "      not waiting: verify the email, then run `anpio-cli did register \
+                     --agent {} --email {email}`",
+                    location.agent
+                );
+                return Ok(());
+            }
+            println!("      waiting for verification (every 5 s, up to 5 minutes)");
+            let verified = wait_for_email(
+                &client,
+                &base,
+                email,
+                &full_handle,
+                std::time::Duration::from_secs(300),
+                std::time::Duration::from_secs(5),
+            )
+            .await?;
+            if !verified {
+                println!("      email not verified yet");
+                anyhow::bail!(
+                    "the identity was not registered and the key is kept at {}. Verify the \
+                     email, then run `anpio-cli did register --agent {} --email {email}`",
+                    pending_path.display(),
+                    location.agent
+                );
+            }
+            println!("      email verified");
+        }
+    }
+
+    match register_identity(&client, &base, &identity, email.as_deref()).await {
         Ok(issued) => {
-            // The host hands back a bearer token with the acceptance, and that is the only
-            // credential its own control plane (`update_document`, `me`) accepts — the ANP
-            // request path signs instead. The reply that carries it is this one, so it is
-            // cached here, next to where `anp login` caches the one it gets.
+            identity.save(&location)?;
+            clear_pending()?;
             match cache_issued_token(&location, &identity, &issued) {
-                Ok(true) => println!("token:   cached in {}", location.session_path().display()),
+                Ok(true) => println!("      token: cached in {}", location.session_path().display()),
                 Ok(false) => {}
                 Err(err) => eprintln!("warning: could not cache the access token: {err:#}"),
             }
-            println!("registered with {host} as {handle}");
+            create_stage(5, "Registering", "ok");
+            println!("      registered  {}", identity.did);
+            println!(
+                "      signer: local key ({})",
+                location.identity_path().display()
+            );
+            Ok(())
         }
         Err(err) => {
-            // The keys are already on disk; a failed publish is retryable and must not
-            // look like a failed create.
-            eprintln!("the identity was saved, but publishing it failed: {err:#}");
+            eprintln!("      registration failed: {err:#}");
             eprintln!(
-                "retry with: anpio-cli did register --agent {}{}",
-                location.agent,
-                email.map(|email| format!(" --email {email}")).unwrap_or_default()
+                "      the key is kept at {}; retry the same handle, or another one with \
+                 --reuse-key, before minting a new key",
+                pending_path.display()
             );
-            return Err(err);
+            Err(err)
         }
     }
-    println!("next:    anpio-cli did show --agent {}", location.agent);
-    Ok(())
+}
+
+/// One `[n/5]` stage line, with its outcome in a column.
+fn create_stage(index: u8, what: &str, status: &str) {
+    if status.is_empty() {
+        println!("[{index}/5] {what}");
+    } else {
+        println!("[{index}/5] {what:<52}{status}");
+    }
+}
+
+/// The handle the email surface wants when the host did not spell one out: `local.domain`.
+fn fallback_full_handle(handle: &str, domain: &str) -> String {
+    if handle.contains('.') {
+        handle.to_string()
+    } else {
+        format!("{handle}.{domain}")
+    }
+}
+
+fn print_unavailable_handle(handle: &str, host: &str, email: Option<&str>, pending: bool) {
+    eprintln!("the handle {handle} is not available on {host}.");
+    if pending {
+        eprintln!("the key is kept; no new key will be minted. retry with another name:");
+    } else {
+        eprintln!("no key was minted. retry with another name:");
+    }
+    eprintln!();
+    let email = email.map(|email| format!(" --email {email}")).unwrap_or_default();
+    eprintln!(
+        "  anpio-cli did create --host {host} --handle <another-name>{}{email}",
+        if pending { " --reuse-key" } else { "" }
+    );
+    eprintln!();
+    eprintln!("if this is the name you want, release or recover it on {host} first.");
 }
 
 /// Everything `did attach-anpio-key` was given, in one value.
@@ -2254,7 +2446,25 @@ fn cmd_did_list(json: bool) -> anyhow::Result<()> {
 
 async fn cmd_did_register(agent: Option<&str>, profile: Option<&str>, email: Option<&str>) -> anyhow::Result<()> {
     let location = IdentityLocation::resolve(agent, profile)?;
-    let identity = Identity::load(&location)?;
+    // A `did create` paused on the email round trip has no identity yet, only the pending
+    // key. Registering it here completes that create instead of demanding it be re-run.
+    let (identity, from_pending) = match Identity::load(&location) {
+        Ok(identity) => (identity, false),
+        Err(err) => match load_pending()? {
+            Some(pending)
+                if pending.agent == location.agent && pending.profile == location.profile =>
+            {
+                if pending.custody.is_some() {
+                    anyhow::bail!(
+                        "the pending identity is held by anpio-key; finish it with \
+                         `anpio-cli did create --reuse-key --key anpio-key`"
+                    );
+                }
+                (pending, true)
+            }
+            _ => return Err(err),
+        },
+    };
     // Registration publishes the document. For an `anpio-key` identity that document lives in
     // the daemon, so it is read on the way in rather than from the snapshot `did attach-anpio-key`
     // wrote — a key rotated since then would otherwise be registered as somebody else's.
@@ -2269,6 +2479,10 @@ async fn cmd_did_register(agent: Option<&str>, profile: Option<&str>, email: Opt
         .map_err(|err| anyhow::anyhow!("the stored host is not a URL: {err}"))?;
     let client = http_client()?;
     let issued = register_identity(&client, &base, &identity, email).await?;
+    if from_pending {
+        identity.save(&location)?;
+        clear_pending()?;
+    }
     // Same credential, same place as `did create`: a re-register is one of the two ways the
     // token ever gets into the cache in the first place.
     match cache_issued_token(&location, &identity, &issued) {

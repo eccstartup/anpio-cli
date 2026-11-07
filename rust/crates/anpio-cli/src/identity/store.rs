@@ -631,6 +631,51 @@ impl Identity {
     }
 }
 
+/// `<store root>/pending.json` — the one identity `did create` has minted but not registered.
+///
+/// It sits at the root, not under `<agent>/<profile>`, because until the host accepts the
+/// handle neither name is settled: a taken handle is retried under a new one, and the key
+/// must survive that. One at a time, on purpose — a second record would be a second key
+/// nobody knows to reuse.
+pub fn pending_path() -> PathBuf {
+    store_root().join("pending.json")
+}
+
+/// The in-flight identity, or `None` when no create is pending.
+///
+/// A file that will not parse *is* an error: it holds a key that exists nowhere else.
+pub fn load_pending() -> Result<Option<Identity>> {
+    let path = pending_path();
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err).with_context(|| format!("reading {}", path.display())),
+    };
+    serde_json::from_str(&text)
+        .map(Some)
+        .with_context(|| format!("{} is not a readable pending identity", path.display()))
+}
+
+/// Write the in-flight identity `0600`, atomically.
+pub fn save_pending(identity: &Identity) -> Result<PathBuf> {
+    let path = pending_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    }
+    write_private(&path, identity)?;
+    Ok(path)
+}
+
+/// Drop the in-flight identity — after it registered, or when it is explicitly abandoned.
+pub fn clear_pending() -> Result<()> {
+    let path = pending_path();
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| format!("removing {}", path.display())),
+    }
+}
+
 /// Write one identity-shaped file atomically and `0600`.
 ///
 /// Shared by `identity.json` and the staged successor because they carry the same thing —

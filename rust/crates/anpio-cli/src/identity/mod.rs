@@ -18,21 +18,24 @@ pub use chain::{
     ChainError, ChainResolution, Supersession,
 };
 pub use did::{
-    create_identity, load_stored_key, resign_document, retirement_document, subject_of, successor_of,
-    without_proof, CreateIdentityInput,
+    build_external_identity, create_identity, load_stored_key, mint_keys, rebuild_identity,
+    resign_document, retirement_document, subject_of, successor_of, without_proof,
+    CreateIdentityInput, ExternalIdentity,
 };
 pub use host::{
-    document_hash, fetch_host_service, fetch_profile, fetch_public_profile, register_identity,
-    update_document, update_profile, HostService, Issued,
+    check_handle, document_hash, email_verified, fetch_host_service, fetch_profile,
+    fetch_public_profile, register_identity, send_verification_email, update_document,
+    update_profile, wait_for_email, HandleCheck, HandleDecision, HostService, Issued,
 };
 pub use session::{
     load_session, parse_ttl_seconds, save_session, session_host, SessionEntry, SessionFile, SessionWrite,
     DEFAULT_SESSION_TTL_SECONDS, SESSION_FILE,
 };
 pub use store::{
-    assert_segment, current_agent_path, list_identities, read_current_agent, resolve_agent_id,
-    resolve_agent_id_with_source, resolve_profile_name, select_current_agent, store_root, AgentSource,
-    Custody, Identity, IdentityLocation, Signing, StoredIdentitySummary, StoredKeyPair, AGENT_ENV, HOME_ENV,
+    assert_segment, clear_pending, current_agent_path, list_identities, load_pending,
+    pending_path, read_current_agent, resolve_agent_id, resolve_agent_id_with_source,
+    resolve_profile_name, save_pending, select_current_agent, store_root, AgentSource, Custody,
+    Identity, IdentityLocation, Signing, StoredIdentitySummary, StoredKeyPair, AGENT_ENV, HOME_ENV,
     PROFILE_ENV, SUCCESSOR_FILE,
 };
 pub use update::{deliver, Accepted, Hop, UpdateError};

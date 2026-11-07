@@ -30,13 +30,14 @@ use anp::authentication::device_manifest::{
 };
 use anp::authentication::did_transition::parse_did_wba_e1;
 use anp::authentication::did_wba::{
-    build_anp_message_service, create_did_wba_document, AnpMessageServiceOptions, DidDocumentOptions,
-    DidProfile, ANP_MESSAGE_SERVICE_TYPE,
+    build_anp_message_service, build_unsigned_e1_did_document, compute_multikey_fingerprint,
+    AnpMessageServiceOptions, DidKeyRole, DidVerificationRelationship, SuppliedDidKey,
+    SuppliedE1DidDocumentOptions, ANP_MESSAGE_SERVICE_TYPE,
 };
-use anp::PrivateKeyMaterial;
+use anp::{PrivateKeyMaterial, PublicKeyMaterial};
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::Utc;
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 
 use super::proof;
 use super::store::{Identity, StoredKeyPair};
@@ -76,79 +77,135 @@ fn split_authority(authority: &str) -> Result<(String, Option<u16>)> {
 
 /// Mint a fresh identity. Nothing is written; the caller saves it.
 pub fn create_identity(input: CreateIdentityInput) -> Result<Identity> {
-    let device_id = format!("{}/{}", input.agent, input.profile);
+    let keys = mint_keys(&input.agent, &input.profile);
+    rebuild_identity(input, &keys)
+}
 
-    let service = build_anp_message_service(
-        "#anp-message",
-        input.service_endpoint.clone(),
-        AnpMessageServiceOptions::default()
-            .with_service_did(input.service_did.clone())
-            .with_profiles(["anp.direct.base.v1"])
-            .with_security_profiles(["transport-protected"]),
+/// The private material a new identity starts with: the root and the device pair.
+///
+/// Separate from the document because the document embeds the handle (through the DID) and
+/// a handle is a candidate until the host accepts it. A retry changes the path, not these.
+pub fn mint_keys(agent: &str, profile: &str) -> BTreeMap<String, StoredKeyPair> {
+    let device_id = format!("{agent}/{profile}");
+    let root = PrivateKeyMaterial::Ed25519(ed25519_dalek::SigningKey::generate(
+        &mut rand::rngs::OsRng,
+    ));
+    // A fresh device key, not the root: a device that reuses the root makes the host refuse
+    // the document (the root would authorize itself as a token holder).
+    let signing = PrivateKeyMaterial::Ed25519(ed25519_dalek::SigningKey::generate(
+        &mut rand::rngs::OsRng,
+    ));
+    // Same construction the crate uses for its own X25519 agreement key.
+    let agreement = PrivateKeyMaterial::X25519(x25519_dalek::StaticSecret::from(
+        rand::random::<[u8; 32]>(),
+    ));
+    let mut keys = BTreeMap::new();
+    keys.insert("key-1".to_string(), pair(&root));
+    keys.insert(format!("{device_id}-sign"), pair(&signing));
+    keys.insert(format!("{device_id}-agreement"), pair(&agreement));
+    keys
+}
+
+/// Rebuild an identity for a **new handle** from key material that already exists.
+///
+/// A taken handle costs a name, not a key: the fingerprint is the key's, and the handle is
+/// only the path above it. Everything the document says about the DID embeds that path —
+/// the id, every verification-method id, every relationship entry — so the document is
+/// rebuilt from the stored public keys and re-proven with key-1 rather than patched.
+///
+/// The device fragments are the one thing that may change: they carry the agent/profile
+/// name, and a retry can name a different agent.
+pub fn rebuild_identity(
+    input: CreateIdentityInput,
+    keys: &std::collections::BTreeMap<String, StoredKeyPair>,
+) -> Result<Identity> {
+    let root_pair = keys.get("key-1").ok_or_else(|| {
+        anyhow!("the pending identity has no key-1; there is no key to reuse")
+    })?;
+    let root = load_stored_key(root_pair)?;
+    let root_public = root.public_key();
+    let fingerprint = compute_multikey_fingerprint(&root_public)
+        .map_err(|err| anyhow!("computing the reused key's fingerprint: {err}"))?;
+    let did = format!(
+        "did:wba:{}:user:{}:e1_{}",
+        input.authority, input.agent, fingerprint
     );
 
-    let (host, port) = split_authority(&input.authority)?;
+    // The stored fragments carry the old device name; find the pair by role, not by the
+    // exact fragment, so a retry under another agent renames rather than re-mints.
+    let signing_pair = keys
+        .iter()
+        .find(|(fragment, _)| fragment.ends_with("-sign"))
+        .map(|(_, pair)| pair)
+        .ok_or_else(|| anyhow!("the pending identity has no device signing key"))?;
+    let agreement_pair = keys
+        .iter()
+        .find(|(fragment, _)| fragment.ends_with("-agreement"))
+        .map(|(_, pair)| pair)
+        .ok_or_else(|| anyhow!("the pending identity has no device agreement key"))?;
+    let signing_public = public_of_pem(&signing_pair.public_key_pem)?;
+    let agreement_public = public_of_pem(&agreement_pair.public_key_pem)?;
+    if !matches!(signing_public, PublicKeyMaterial::Ed25519(_))
+        || !matches!(agreement_public, PublicKeyMaterial::X25519(_))
+    {
+        bail!("the pending device keys are not an Ed25519/X25519 pair");
+    }
 
-    let options = DidDocumentOptions {
-        port,
-        path_segments: vec!["user".to_string(), input.agent.clone()],
-        services: vec![service],
-        // P6's device pair is minted below; the crate's `#key-2`/`#key-3` pair is the
-        // older single-device layout and does not survive `build_vnext_did_document`.
-        enable_e2ee: false,
-        did_profile: DidProfile::E1,
-        ..Default::default()
+    let device_id = format!("{}/{}", input.agent, input.profile);
+    let signing_fragment = format!("{device_id}-sign");
+    let agreement_fragment = format!("{device_id}-agreement");
+    let signing_id = format!("{did}#{signing_fragment}");
+    let agreement_id = format!("{did}#{agreement_fragment}");
+    let signing_method = json!({
+        "id": signing_id,
+        "type": "Multikey",
+        "controller": did,
+        "publicKeyMultibase": multibase(0xed, &public_bytes(&signing_public)),
+    });
+    let agreement_method = json!({
+        "id": agreement_id,
+        "type": "Multikey",
+        "controller": did,
+        "publicKeyMultibase": multibase(0xec, &public_bytes(&agreement_public)),
+    });
+    let entry = DeviceManifestEntry {
+        device_id: device_id.clone(),
+        signing_key_id: signing_id,
+        e2ee_key_id: agreement_id,
+        profiles: device_profiles(),
     };
-    let bundle = create_did_wba_document(&host, options)
-        .map_err(|err| anyhow!("building the DID document: {err}"))?;
-    let did = bundle
-        .did()
-        .ok_or_else(|| anyhow!("the created document has no id"))?
-        .to_string();
 
     let root_key_id = format!("{did}#key-1");
-    let root_method = bundle
-        .did_document
-        .get("verificationMethod")
-        .and_then(Value::as_array)
-        .and_then(|methods| {
-            methods
-                .iter()
-                .find(|method| method.get("id").and_then(Value::as_str) == Some(&root_key_id))
-        })
-        .ok_or_else(|| anyhow!("the created document has no {root_key_id}"))?;
-
-    let device = DeviceKeys::generate(&did, &device_id);
+    let root_method = json!({
+        "id": root_key_id,
+        "type": "Multikey",
+        "controller": did,
+        "publicKeyMultibase": multibase(0xed, &public_bytes(&root_public)),
+    });
+    let base = json!({
+        "id": did,
+        "@context": [
+            "https://www.w3.org/ns/did/v1",
+            "https://w3id.org/security/data-integrity/v2",
+            "https://w3id.org/security/multikey/v1",
+        ],
+        "service": [message_service_value(&input)],
+    });
     let document = build_vnext_did_document(
-        &base_document(&did, &bundle.did_document),
+        &base,
         &root_key_id,
-        root_method,
-        &device.entry,
-        &device.signing_method,
-        &device.agreement_method,
+        &root_method,
+        &entry,
+        &signing_method,
+        &agreement_method,
     )
     .map_err(|err| anyhow!("assembling the device DID document: {err}"))?;
+    let signed_document = proof::sign_document(&document, &root, &root_key_id)?;
 
-    let key1 = bundle
-        .load_private_key("key-1")
-        .map_err(|err| anyhow!("loading #key-1: {err}"))?;
-    let signed_document = proof::sign_document(&document, &key1, &root_key_id)?;
-
-    let mut keys = bundle
-        .keys
-        .iter()
-        .map(|(fragment, pair)| {
-            (
-                fragment.clone(),
-                StoredKeyPair {
-                    private_key_pem: pair.private_key_pem.clone(),
-                    public_key_pem: pair.public_key_pem.clone(),
-                },
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    keys.insert(device.signing_fragment.clone(), device.signing_pair());
-    keys.insert(device.agreement_fragment.clone(), device.agreement_pair());
+    let mut stored = std::collections::BTreeMap::new();
+    stored.insert("key-1".to_string(), root_pair.clone());
+    stored.insert(signing_fragment, signing_pair.clone());
+    stored.insert(agreement_fragment, agreement_pair.clone());
 
     Ok(Identity {
         did,
@@ -158,23 +215,89 @@ pub fn create_identity(input: CreateIdentityInput) -> Result<Identity> {
         handle: input.handle,
         did_host: input.did_host_url,
         created_at: Utc::now().to_rfc3339(),
-        keys,
+        keys: stored,
         did_document: signed_document,
         custody: None,
     })
 }
 
-/// The fields `build_vnext_did_document` does not manage: the id, the JSON-LD contexts of
-/// the profile, and the service entries the host made the document advertise.
-fn base_document(did: &str, built: &Value) -> Value {
-    let mut base = Map::new();
-    base.insert("id".to_string(), Value::String(did.to_string()));
-    for field in ["@context", "service"] {
-        if let Some(value) = built.get(field) {
-            base.insert(field.to_string(), value.clone());
-        }
+/// A document built from a public key that lives **elsewhere** — the `anpio-key` line.
+///
+/// This function has no private material to sign with and returns the document unsigned:
+/// only the key's holder can prove it, and that proof is a daemon call. The shape is the
+/// root-only E1 document the host accepts (no `deviceManifest`): there are no device keys
+/// in this store, so nothing may claim one.
+pub struct ExternalIdentity {
+    pub did: String,
+    pub device_id: String,
+    pub unsigned_document: Value,
+}
+
+pub fn build_external_identity(
+    input: &CreateIdentityInput,
+    public_key: PublicKeyMaterial,
+) -> Result<ExternalIdentity> {
+    if !matches!(public_key, PublicKeyMaterial::Ed25519(_)) {
+        bail!("the identity key must be Ed25519, not {public_key:?}");
     }
-    Value::Object(base)
+    let (host, port) = split_authority(&input.authority)?;
+    let options = SuppliedE1DidDocumentOptions {
+        port,
+        path_segments: vec!["user".to_string(), input.agent.clone()],
+        agent_description_url: None,
+        services: vec![message_service_value(input)],
+        root_key: SuppliedDidKey {
+            fragment: "key-1".to_string(),
+            role: DidKeyRole::RootControl,
+            public_key,
+            relationships: vec![
+                DidVerificationRelationship::Authentication,
+                DidVerificationRelationship::AssertionMethod,
+            ],
+        },
+        additional_keys: Vec::new(),
+    };
+    let document = build_unsigned_e1_did_document(&host, options)
+        .map_err(|err| anyhow!("building the DID document: {err}"))?;
+    let did = document
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("the built document has no id"))?
+        .to_string();
+    Ok(ExternalIdentity {
+        did,
+        device_id: format!("{}/{}", input.agent, input.profile),
+        unsigned_document: document,
+    })
+}
+
+fn message_service_value(input: &CreateIdentityInput) -> Value {
+    build_anp_message_service(
+        "#anp-message",
+        input.service_endpoint.clone(),
+        AnpMessageServiceOptions::default()
+            .with_service_did(input.service_did.clone())
+            .with_profiles(["anp.direct.base.v1"])
+            .with_security_profiles(["transport-protected"]),
+    )
+}
+
+fn device_profiles() -> Vec<String> {
+    [
+        PROFILE_CORE_BINDING_V1,
+        PROFILE_IDENTITY_DISCOVERY_V1,
+        PROFILE_GROUP_BASE_V2,
+        PROFILE_GROUP_E2EE_V2,
+    ]
+    .iter()
+    .map(|profile| profile.to_string())
+    .collect()
+}
+
+/// The public half of a stored pair, read from the PEM the store keeps beside the private key.
+fn public_of_pem(pem: &str) -> Result<PublicKeyMaterial> {
+    PublicKeyMaterial::from_pem(pem)
+        .map_err(|err| anyhow!("the stored public key is not readable: {err}"))
 }
 
 /// The **stable subject** of a DID: the identity that survives a key update.
@@ -341,90 +464,6 @@ pub fn without_proof(document: &Value) -> Value {
     bare
 }
 
-/// The device's own key pair, and the two verification methods P6 binds it through.
-///
-/// Distinct from the DID root by construction, which is the whole point: a device that
-/// reuses the root makes the DID host refuse the document, because then the root would be
-/// authorizing itself as a token holder.
-struct DeviceKeys {
-    signing: PrivateKeyMaterial,
-    agreement: PrivateKeyMaterial,
-    signing_fragment: String,
-    agreement_fragment: String,
-    signing_method: Value,
-    agreement_method: Value,
-    entry: DeviceManifestEntry,
-}
-
-impl DeviceKeys {
-    fn generate(did: &str, device_id: &str) -> Self {
-        let signing = PrivateKeyMaterial::Ed25519(ed25519_dalek::SigningKey::generate(
-            &mut rand::rngs::OsRng,
-        ));
-        // Same construction the crate uses for its own X25519 agreement key.
-        let agreement = PrivateKeyMaterial::X25519(x25519_dalek::StaticSecret::from(
-            rand::random::<[u8; 32]>(),
-        ));
-
-        let signing_fragment = format!("{device_id}-sign");
-        let agreement_fragment = format!("{device_id}-agreement");
-        let signing_id = format!("{did}#{signing_fragment}");
-        let agreement_id = format!("{did}#{agreement_fragment}");
-
-        // Both validators (`anp`'s and the host's) read the algorithm off the multicodec
-        // prefix — `0xed01` Ed25519, `0xec01` X25519 — so the `Multikey` type says
-        // nothing on its own and is right for both.
-        let signing_method = json!({
-            "id": signing_id,
-            "type": "Multikey",
-            "controller": did,
-            "publicKeyMultibase": multibase(0xed, &public_bytes(&signing)),
-        });
-        let agreement_method = json!({
-            "id": agreement_id,
-            "type": "Multikey",
-            "controller": did,
-            "publicKeyMultibase": multibase(0xec, &public_bytes(&agreement)),
-        });
-
-        let entry = DeviceManifestEntry {
-            device_id: device_id.to_string(),
-            signing_key_id: signing_id,
-            e2ee_key_id: agreement_id,
-            // The **whole** dependency closure: P6's `require_dependencies` rejects a bare
-            // `anp.group.e2ee.v2`, because a device claiming group E2EE claims everything
-            // it builds on (TODO5 §6, Phase 0 result 3a).
-            profiles: [
-                PROFILE_CORE_BINDING_V1,
-                PROFILE_IDENTITY_DISCOVERY_V1,
-                PROFILE_GROUP_BASE_V2,
-                PROFILE_GROUP_E2EE_V2,
-            ]
-            .iter()
-            .map(|profile| profile.to_string())
-            .collect(),
-        };
-
-        Self {
-            signing,
-            agreement,
-            signing_fragment,
-            agreement_fragment,
-            signing_method,
-            agreement_method,
-            entry,
-        }
-    }
-
-    fn signing_pair(&self) -> StoredKeyPair {
-        pair(&self.signing)
-    }
-
-    fn agreement_pair(&self) -> StoredKeyPair {
-        pair(&self.agreement)
-    }
-}
-
 fn pair(key: &PrivateKeyMaterial) -> StoredKeyPair {
     StoredKeyPair {
         private_key_pem: key.to_pem(),
@@ -432,8 +471,8 @@ fn pair(key: &PrivateKeyMaterial) -> StoredKeyPair {
     }
 }
 
-fn public_bytes(key: &PrivateKeyMaterial) -> Vec<u8> {
-    match key.public_key() {
+fn public_bytes(key: &PublicKeyMaterial) -> Vec<u8> {
+    match key {
         anp::PublicKeyMaterial::Ed25519(verifying) => verifying.to_bytes().to_vec(),
         anp::PublicKeyMaterial::X25519(bytes) => bytes.to_vec(),
         other => unreachable!("a device key is Ed25519 or X25519, got {other:?}"),

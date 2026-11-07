@@ -35,6 +35,202 @@ const CLIENT_VERSION: &str = "awiki-cli/0815/1.0.58";
 const PROFILE_PATH: &str = "/user-service/v1/did/profile/rpc";
 /// The credential-free view of a profile, by DID. See [`fetch_public_profile`].
 const PUBLIC_PROFILE_PATH: &str = "/user-service/v1/users";
+/// The handle precheck: JSON-RPC `registration_check`, which says whether a handle is free
+/// before a key is minted for it.
+const HANDLE_RPC_PATH: &str = "/user-service/v1/handle/rpc";
+/// The registration email round trip. Both are unauthenticated: the address is the
+/// evidence, and no DID exists yet.
+const EMAIL_STATUS_PATH: &str = "/user-service/v1/auth/email-status";
+const EMAIL_SEND_PATH: &str = "/user-service/v1/auth/email-send";
+
+/// What the host's precheck said about a candidate handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandleDecision {
+    /// Free: register it.
+    Register,
+    /// Already registered to someone (possibly to the caller, which the host cannot see).
+    Existing,
+    /// Reserved or otherwise not registrable.
+    Unavailable,
+}
+
+/// A precheck answer, plus the host's own spelling of the full handle.
+#[derive(Debug, Clone)]
+pub struct HandleCheck {
+    pub decision: HandleDecision,
+    /// The handle as the host spells it (`mybot.awiki.me`) — what the email calls use.
+    pub full_handle: Option<String>,
+    /// Whatever the host said about why, when it said anything.
+    pub reason: Option<String>,
+}
+
+/// Ask the host whether a handle can be registered.
+///
+/// `Ok(None)` means the host has no `registration_check` endpoint — it predates the
+/// precheck, and the caller says so and goes on to register rather than pretending the
+/// name was checked. Anything else that is not a well-formed answer is an error: a
+/// precheck whose reply cannot be understood must not silently pass.
+pub async fn check_handle(
+    client: &reqwest::Client,
+    base: &Url,
+    handle: &str,
+    domain: &str,
+) -> Result<Option<HandleCheck>> {
+    let url = base
+        .join(HANDLE_RPC_PATH)
+        .with_context(|| format!("{base} cannot serve {HANDLE_RPC_PATH}"))?;
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": "registration-check",
+        "method": "registration_check",
+        "params": {"handle": handle, "domain": domain, "check_invite": false},
+    });
+    let response = client
+        .post(url.clone())
+        .header("x-awiki-client-version", CLIENT_VERSION)
+        .json(&body)
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+    let status = response.status();
+    let text = response.text().await.with_context(|| format!("reading {url}"))?;
+
+    // 404/405 is the whole story for a host that never had this route.
+    if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::METHOD_NOT_ALLOWED
+    {
+        return Ok(None);
+    }
+    let envelope: Value = match serde_json::from_str(&text) {
+        Ok(envelope) => envelope,
+        Err(_) => {
+            bail!("POST {url} failed: HTTP {status}: {}", snippet(&text));
+        }
+    };
+    if let Some(error) = envelope.get("error") {
+        let code = error.get("code").and_then(Value::as_i64).unwrap_or(0);
+        let named = error
+            .get("data")
+            .and_then(|data| data.get("type").or_else(|| data.get("code")))
+            .and_then(Value::as_str);
+        // -32601 is JSON-RPC's "method not found"; a host that kept the route but not the
+        // method is in the same place as one that never had it.
+        if code == -32601 || named == Some("method_not_found") {
+            return Ok(None);
+        }
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("the host refused the precheck");
+        bail!("registration_check refused: {code}: {message}");
+    }
+    let result = envelope.get("result").ok_or_else(|| {
+        anyhow!(
+            "POST {url} answered neither result nor error: {}",
+            snippet(&text)
+        )
+    })?;
+    let decision = match result.get("decision").and_then(Value::as_str) {
+        Some("register") => HandleDecision::Register,
+        Some("existing") => HandleDecision::Existing,
+        Some("unavailable") => HandleDecision::Unavailable,
+        other => bail!(
+            "registration_check answered with an unknown decision {:?}: {}",
+            other,
+            snippet(&text)
+        ),
+    };
+    Ok(Some(HandleCheck {
+        decision,
+        full_handle: result
+            .get("full_handle")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        reason: result
+            .get("reason")
+            .or_else(|| result.get("message"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    }))
+}
+
+/// Whether the address is already verified for this handle.
+pub async fn email_verified(
+    client: &reqwest::Client,
+    base: &Url,
+    email: &str,
+    handle: &str,
+) -> Result<bool> {
+    let url = base
+        .join(EMAIL_STATUS_PATH)
+        .with_context(|| format!("{base} cannot serve {EMAIL_STATUS_PATH}"))?;
+    let response = client
+        .get(url.clone())
+        .query(&[("email", normalize_email(email)), ("handle", handle.to_string())])
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    let status = response.status();
+    let text = response.text().await.with_context(|| format!("reading {url}"))?;
+    if !status.is_success() {
+        bail!("GET {url} failed: HTTP {status}: {}", snippet(&text));
+    }
+    let value: Value =
+        serde_json::from_str(&text).with_context(|| format!("{url} did not return JSON"))?;
+    Ok(value.get("verified").and_then(Value::as_bool).unwrap_or(false))
+}
+
+/// Ask the host to send the verification email.
+pub async fn send_verification_email(
+    client: &reqwest::Client,
+    base: &Url,
+    email: &str,
+    handle: &str,
+) -> Result<()> {
+    let url = base
+        .join(EMAIL_SEND_PATH)
+        .with_context(|| format!("{base} cannot serve {EMAIL_SEND_PATH}"))?;
+    let response = client
+        .post(url.clone())
+        .json(&json!({"email": normalize_email(email), "handle": handle}))
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+    let status = response.status();
+    let text = response.text().await.with_context(|| format!("reading {url}"))?;
+    if !status.is_success() {
+        bail!("POST {url} failed: HTTP {status}: {}", snippet(&text));
+    }
+    Ok(())
+}
+
+/// Poll the verification status until it flips or the deadline passes.
+///
+/// `Ok(false)` is a timeout, not an error: the address may be verified after this command
+/// has returned, and the caller says how to resume.
+pub async fn wait_for_email(
+    client: &reqwest::Client,
+    base: &Url,
+    email: &str,
+    handle: &str,
+    timeout: std::time::Duration,
+    interval: std::time::Duration,
+) -> Result<bool> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if email_verified(client, base, email, handle).await? {
+            return Ok(true);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(false);
+        }
+        tokio::time::sleep(interval).await;
+    }
+}
+
+fn normalize_email(email: &str) -> String {
+    email.trim().to_ascii_lowercase()
+}
+
 
 /// What the host says about itself, read from its `/.well-known/did.json`.
 pub struct HostService {
