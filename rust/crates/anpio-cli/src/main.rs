@@ -457,6 +457,16 @@ enum DidCommand {
         /// surface, so a command can never choose between them at signing time.
         #[arg(long, value_name = "PATH", conflicts_with_all = ["key_root", "socket"])]
         config: Option<PathBuf>,
+        /// The capability token minted for this identity (`anpio-key admin capability mint
+        /// --out PATH`).
+        ///
+        /// The token file is copied into the identity directory as `capability` and recorded
+        /// in `identity.json`. Protected calls then reach the daemon's capability endpoint
+        /// with it, which pins this identity to the one principal and DID the token names.
+        /// Left out, the identity signs as the principal its operating-system account is
+        /// enrolled as, on the shared sign socket.
+        #[arg(long, value_name = "PATH", requires = "config")]
+        capability_file: Option<PathBuf>,
         /// The grant(s) this identity signs under, issued by the anpio-key administrator.
         ///
         /// Repeatable, each as `<purpose>=<grant-id>`: `http` covers `SIGN_HTTP` (a Hot
@@ -1354,6 +1364,7 @@ async fn main() -> anyhow::Result<()> {
                 socket,
                 kid,
                 config,
+                capability_file,
                 grant,
                 device,
                 document,
@@ -1370,6 +1381,7 @@ async fn main() -> anyhow::Result<()> {
                     socket,
                     kid,
                     config,
+                    capability_file,
                     grant,
                     device,
                     document,
@@ -2874,6 +2886,7 @@ struct AttachArgs {
     socket: Option<PathBuf>,
     kid: Option<String>,
     config: Option<PathBuf>,
+    capability_file: Option<PathBuf>,
     grant: Vec<String>,
     device: Option<String>,
     document: Option<PathBuf>,
@@ -3188,6 +3201,80 @@ fn read_terminal_line(prompt: &str) -> anyhow::Result<String> {
     Ok(line)
 }
 
+/// The capability token file the administrator minted, validated before it is recorded.
+///
+/// The daemon enforces the same rules when it reads a token (ordinary file, `0600`, a
+/// bounded size, `anp1_` plus 43 base64url characters); checking them here reports a wrong
+/// file while the administrator is still at the terminal, and keeps `identity.json` from
+/// pointing at something the daemon would refuse on the first signature.
+fn read_capability_token(path: &Path) -> anyhow::Result<String> {
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("reading capability token {}", path.display()))?;
+    if !metadata.is_file() {
+        anyhow::bail!(
+            "{} is not an ordinary file; pass the file `anpio-key admin capability mint --out` \
+             wrote",
+            path.display()
+        );
+    }
+    if metadata.len() > 4096 {
+        anyhow::bail!("{} is larger than a capability token", path.display());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = metadata.permissions().mode() & 0o777;
+        if mode != 0o600 {
+            anyhow::bail!(
+                "{} is mode {mode:03o}; a capability token must be 0600 so no other account \
+                 can read it",
+                path.display()
+            );
+        }
+    }
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading capability token {}", path.display()))?;
+    let token = text.trim();
+    let payload = token.strip_prefix("anp1_").unwrap_or_default();
+    if payload.len() != 43
+        || !token.starts_with("anp1_")
+        || !payload
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        anyhow::bail!(
+            "{} does not hold a capability token; expected `anp1_` followed by 43 base64url \
+             characters, as `anpio-key admin capability mint --out` writes it",
+            path.display()
+        );
+    }
+    Ok(token.to_string())
+}
+
+/// Copy the token beside `identity.json` as `capability`, `0600`.
+///
+/// The record names this copy rather than the path the administrator chose, because that
+/// path is a minting detail rather than part of the identity. Temp-then-rename keeps a
+/// crash from leaving a half-written token the daemon would try to read.
+fn install_capability_token(token: &str, location: &IdentityLocation) -> anyhow::Result<PathBuf> {
+    let directory = location.dir();
+    std::fs::create_dir_all(&directory)
+        .with_context(|| format!("creating {}", directory.display()))?;
+    let target = directory.join("capability");
+    let temporary = directory.join("capability.tmp");
+    std::fs::write(&temporary, token.as_bytes())
+        .with_context(|| format!("writing {}", temporary.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("restricting {}", temporary.display()))?;
+    }
+    std::fs::rename(&temporary, &target)
+        .with_context(|| format!("replacing {}", target.display()))?;
+    Ok(target)
+}
+
 async fn cmd_did_attach(args: AttachArgs, allow_private: &[String]) -> anyhow::Result<()> {
     let AttachArgs {
         did,
@@ -3196,6 +3283,7 @@ async fn cmd_did_attach(args: AttachArgs, allow_private: &[String]) -> anyhow::R
         socket,
         kid,
         config,
+        capability_file,
         grant,
         device,
         document,
@@ -3251,6 +3339,17 @@ async fn cmd_did_attach(args: AttachArgs, allow_private: &[String]) -> anyhow::R
              GET_DOCUMENT itself, so there is no file to supply"
         );
     }
+    // The administrator's token is checked before anything is recorded: a stale path or a
+    // file another account can read must fail here, not on the first signature. The daemon
+    // calls this command makes already use that file; the copy beside `identity.json` is
+    // written only once every check has passed.
+    let capability_source = match capability_file {
+        Some(path) => Some((path.clone(), read_capability_token(&path)?)),
+        None => None,
+    };
+    if let Some((path, _)) = &capability_source {
+        key.capability_file = Some(path.clone());
+    }
 
     // Fetching the document is the check that the key is reachable and accounted for. No key
     // bytes are fetched, because there are none to fetch. Which surface answers depends on
@@ -3301,6 +3400,15 @@ async fn cmd_did_attach(args: AttachArgs, allow_private: &[String]) -> anyhow::R
         // (`device_assertion`); an absent list stays absent, so the daemon's own refusal
         // decides rather than this client assuming the switch is off.
         let capabilities = key.capabilities()?;
+        if let Some(bound) = capabilities.capability_did() {
+            if bound != did {
+                anyhow::bail!(
+                    "the capability token is bound to {bound}, but this identity is {did}; a \
+                     token signs for one DID only. Ask the administrator for a token minted \
+                     for {did}"
+                );
+            }
+        }
         key.operations = Some(capabilities.announced_names());
         key.signing_purposes = capabilities
             .signing_purposes()
@@ -3406,6 +3514,13 @@ async fn cmd_did_attach(args: AttachArgs, allow_private: &[String]) -> anyhow::R
         );
     }
 
+    // The token belongs with the identity: the administrator minted it to a path of their
+    // choosing, and recording that path would break the identity as soon as the file moved.
+    if let Some((_, token)) = &capability_source {
+        key.capability_file = Some(install_capability_token(token, &location)?);
+    }
+    let capability_path = key.capability_file.clone();
+
     let identity = Identity {
         did: did.to_string(),
         // The document device `--device` selected, not the local `agent/profile` slot: P6
@@ -3447,6 +3562,7 @@ async fn cmd_did_attach(args: AttachArgs, allow_private: &[String]) -> anyhow::R
                 "didHost": identity.did_host,
                 "custody": identity.custody,
                 "identityFile": location.identity_path(),
+                "capabilityFile": capability_path,
                 "document": document,
             }))?
         );
@@ -3457,6 +3573,9 @@ async fn cmd_did_attach(args: AttachArgs, allow_private: &[String]) -> anyhow::R
     println!("key:     held by anpio-key ({keyid})");
     println!("document: from anpio-key");
     println!("stored:  {}", location.identity_path().display());
+    if let Some(path) = &capability_path {
+        println!("capability: {}", path.display());
+    }
     println!();
     println!("signs with: anpio-cli anp sign --nonce <nonce> --target <url>");
     println!("logs in as: anpio-cli anp login --target <url> --nonce <nonce>");

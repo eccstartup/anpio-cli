@@ -292,7 +292,11 @@ if [ "$1" = "data" ]; then
       printf '{"code":"OK","data":{"grant_id":"%s","key_id":"key-sign","state":"__STATE__","expiry":4102444800,"kind":"request","max_uses":100,"used_uses":__USED__,"max_renewals":0,"renewals":0}}\n' "$grant"
       ;;
     GET_CAPABILITIES)
-      printf '%s\n' '{"code":"OK","data":{"operations":["SIGN_HTTP","SIGN_DOCUMENT_PROOF"],"signing_purposes":["device_assertion"]}}'
+      extra=""
+      if [ -n "$ANPIOCLI_TEST_CAPABILITY_DID" ]; then
+        extra=$(printf ',"capability_auth":true,"capability_did":"%s"' "$ANPIOCLI_TEST_CAPABILITY_DID")
+      fi
+      printf '{"code":"OK","data":{"operations":["SIGN_HTTP","SIGN_DOCUMENT_PROOF"],"signing_purposes":["device_assertion"]%s}}\n' "$extra"
       ;;
     *)
       exit 64
@@ -1296,6 +1300,185 @@ fn a_document_file_must_name_the_did_it_is_attached_to() {
     assert!(!out.status.success(), "{}", text(&out.stdout));
     let printed = text(&out.stderr);
     assert!(printed.contains("is not the document for"), "{printed}");
+    assert!(!home.identity("alice").exists());
+}
+
+/// A capability token is copied beside the identity and named by the record; the attach
+/// conversation already carries it, and the clear text appears in no output. The copy is
+/// what later commands use, so the administrator's minting path can move afterwards.
+#[test]
+fn attaching_with_a_capability_token_records_a_private_copy() {
+    let home = Home::new("protected-capability");
+    let key = FakeKey::protected(&home.0, "protected");
+    let config = home.0.join("service.json");
+    fs::write(&config, "{}").expect("a service configuration");
+    let config_text = config.display().to_string();
+    let token_text = format!("anp1_{}", "A".repeat(43));
+    let minted = home.0.join("minted-token");
+    fs::write(&minted, format!("{token_text}\n")).expect("a minted token");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&minted, fs::Permissions::from_mode(0o600)).expect("0600");
+    }
+    let minted_text = minted.display().to_string();
+
+    let out = run(
+        &home,
+        &key,
+        &[
+            "did",
+            "attach",
+            "--did",
+            PROTECTED_DID,
+            "--config",
+            &config_text,
+            "--kid",
+            PROTECTED_SIGN_KID,
+            "--grant",
+            "http=g-http",
+            "--capability-file",
+            &minted_text,
+            "--agent",
+            "alice",
+        ],
+    );
+    assert!(out.status.success(), "{}", text(&out.stderr));
+
+    let copy = home.0.join("alice").join("default").join("capability");
+    let copy_text = copy.display().to_string();
+    let identity = read_json(&home.identity("alice"));
+    assert_eq!(
+        identity["custody"]["capability_file"].as_str(),
+        Some(copy_text.as_str())
+    );
+    assert_eq!(fs::read_to_string(&copy).expect("the recorded token"), token_text);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&copy).expect("the copy").permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    // The attach conversation already goes through the capability endpoint: a token is not
+    // recorded and then ignored until the next command.
+    let invocations = key.invocations();
+    assert_eq!(invocations.len(), 4, "{invocations:?}");
+    for call in &invocations {
+        assert!(
+            call.contains(&format!("--capability-file {minted_text}")),
+            "{call}"
+        );
+    }
+    let printed = format!("{}{}", text(&out.stdout), text(&out.stderr));
+    assert!(
+        !printed.contains(&token_text),
+        "the clear-text token must not be printed: {printed}"
+    );
+}
+
+/// A token file another account can read is refused before any daemon call, and nothing is
+/// written: an identity that records it would hand out those permissions with the identity.
+#[test]
+fn a_world_readable_capability_token_is_refused_before_anything_is_written() {
+    let home = Home::new("protected-capability-mode");
+    let key = FakeKey::protected(&home.0, "protected");
+    let config = home.0.join("service.json");
+    fs::write(&config, "{}").expect("a service configuration");
+    let config_text = config.display().to_string();
+    let minted = home.0.join("minted-token");
+    fs::write(&minted, format!("anp1_{}\n", "A".repeat(43))).expect("a minted token");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&minted, fs::Permissions::from_mode(0o644)).expect("0644");
+    }
+    let minted_text = minted.display().to_string();
+
+    let out = run(
+        &home,
+        &key,
+        &[
+            "did",
+            "attach",
+            "--did",
+            PROTECTED_DID,
+            "--config",
+            &config_text,
+            "--kid",
+            PROTECTED_SIGN_KID,
+            "--grant",
+            "http=g-http",
+            "--capability-file",
+            &minted_text,
+            "--agent",
+            "alice",
+        ],
+    );
+    assert!(!out.status.success(), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("must be 0600"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(!home.identity("alice").exists());
+    assert!(
+        key.invocations().is_empty(),
+        "an unusable token must fail before any daemon call: {:?}",
+        key.invocations()
+    );
+}
+
+/// A token minted for another DID is refused while the identity is still only a plan:
+/// `GET_CAPABILITIES` through the token names the DID it is pinned to.
+#[test]
+fn a_capability_token_bound_to_another_did_is_refused_at_attach() {
+    let home = Home::new("protected-capability-did");
+    let key = FakeKey::protected(&home.0, "protected");
+    let config = home.0.join("service.json");
+    fs::write(&config, "{}").expect("a service configuration");
+    let config_text = config.display().to_string();
+    let token = home.0.join("minted-token");
+    fs::write(&token, format!("anp1_{}\n", "A".repeat(43))).expect("a minted token");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&token, fs::Permissions::from_mode(0o600)).expect("0600");
+    }
+    let token_text = token.display().to_string();
+
+    let out = base_command(&home, &key)
+        .env(
+            "ANPIOCLI_TEST_CAPABILITY_DID",
+            "did:wba:example.com:user:alice:e1_other",
+        )
+        .args([
+            "did",
+            "attach",
+            "--did",
+            PROTECTED_DID,
+            "--config",
+            &config_text,
+            "--kid",
+            PROTECTED_SIGN_KID,
+            "--grant",
+            "http=g-http",
+            "--capability-file",
+            &token_text,
+            "--agent",
+            "alice",
+        ])
+        .output()
+        .expect("the binary under test runs");
+    assert!(!out.status.success(), "{}", text(&out.stderr));
+    let printed = text(&out.stderr);
+    assert!(
+        printed.contains("bound to did:wba:example.com:user:alice:e1_other")
+            && printed.contains("but this identity is"),
+        "{printed}"
+    );
     assert!(!home.identity("alice").exists());
 }
 

@@ -117,6 +117,9 @@ pub enum RefusalShape {
     Stopped,
     /// The administrator's policy (role, principal, key) refuses it.
     Policy,
+    /// The capability token was not accepted: missing, unknown, revoked, expired, or bound
+    /// to another DID.
+    Capability,
     /// A code this build does not classify; `Refusal::code` keeps it verbatim.
     Other,
 }
@@ -134,6 +137,7 @@ impl RefusalShape {
             RefusalShape::Busy => "busy",
             RefusalShape::Stopped => "stopped",
             RefusalShape::Policy => "policy",
+            RefusalShape::Capability => "capability",
             RefusalShape::Other => "other",
         }
     }
@@ -176,6 +180,11 @@ impl RefusalShape {
             RefusalShape::Policy => {
                 "the administrator's policy refuses this operation for this principal or key"
             }
+            RefusalShape::Capability => {
+                "the capability token was not accepted: it may be missing, revoked, expired, \
+                 or bound to another DID; ask the anpio-key administrator to mint a fresh \
+                 token, then re-attach with --capability-file"
+            }
             RefusalShape::Other => "see the code above; this build does not classify it",
         }
     }
@@ -194,6 +203,8 @@ impl RefusalShape {
             "RESOURCE_BUSY" => RefusalShape::Busy,
             "AUDIT_UNAVAILABLE" | "PERSISTENCE_UNAVAILABLE" => RefusalShape::Stopped,
             "POLICY_DENIED" | "KEY_ROLE_FORBIDDEN" | "PRINCIPAL_DISABLED" => RefusalShape::Policy,
+            "CAPABILITY_REQUIRED" | "CAPABILITY_INVALID" | "CAPABILITY_EXPIRED"
+            | "CAPABILITY_SCOPE_DENIED" => RefusalShape::Capability,
             _ => RefusalShape::Other,
         }
     }
@@ -301,6 +312,15 @@ pub struct AnpioKey {
     /// development socket named by `root` / `socket`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<PathBuf>,
+    /// The capability token that narrows this identity to one principal and one DID.
+    ///
+    /// `anpio-key admin capability mint --out PATH` writes it `0600`; `did attach
+    /// --capability-file` copies it beside `identity.json` and records that path here. When
+    /// set, every protected call goes to the daemon's capability endpoint with this token,
+    /// instead of the shared sign socket. Absent means the identity uses the sign socket's
+    /// principal — which is also what a record written before tokens existed gets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_file: Option<PathBuf>,
     /// The grant this identity was issued. Required for every protected operation except
     /// the development surface's HTTP signing; its presence is not proof that the grant is
     /// still valid (`GET_GRANT_STATUS` answers that).
@@ -565,6 +585,9 @@ pub struct Capabilities {
     /// `None` when the daemon (or the cached record) did not say; `Some` when it did, even
     /// when the set is empty.
     signing_purposes: Option<BTreeSet<String>>,
+    /// `Some` when the reply came through a capability token: the one DID that token signs
+    /// for. `None` on the shared sign socket, which has no such attribution.
+    capability_did: Option<String>,
     source: CapabilitySource,
 }
 
@@ -589,6 +612,7 @@ impl Capabilities {
             operations,
             announced,
             signing_purposes: None,
+            capability_did: None,
             source,
         }
     }
@@ -596,6 +620,20 @@ impl Capabilities {
     fn with_signing_purposes(mut self, purposes: Option<BTreeSet<String>>) -> Self {
         self.signing_purposes = purposes;
         self
+    }
+
+    fn with_capability_did(mut self, did: Option<String>) -> Self {
+        self.capability_did = did;
+        self
+    }
+
+    /// The DID the capability token is bound to, when the reply carried one.
+    ///
+    /// A protected call through a token names its principal's DID here; the shared sign
+    /// socket does not. `did attach --capability-file` compares this against the DID being
+    /// attached so a token minted for another identity fails at attach, not at signing.
+    pub fn capability_did(&self) -> Option<&str> {
+        self.capability_did.as_deref()
     }
 
     pub fn contains(&self, operation: Operation) -> bool {
@@ -896,23 +934,14 @@ impl AnpioKey {
     }
 
     /// Ask the protected surface (`anpio-key data --config`) for its capability set.
+    ///
+    /// Going through [`Self::protected_request`] rather than assembling the arguments here is
+    /// what puts `--capability-file` on the call: an identity bound to a token reaches the
+    /// capability endpoint, and the reply's `capability_did` names the DID that token is
+    /// pinned to.
     fn query_capabilities(&self) -> Result<Capabilities> {
-        let config = self
-            .config
-            .as_ref()
-            .expect("query_capabilities is only reached with a protected config");
-        let request = serde_json::to_vec(&serde_json::json!({"operation": "GET_CAPABILITIES"}))?;
-        let path = write_temp_json(&request)?;
-        let args = vec![
-            "data".to_string(),
-            "--config".to_string(),
-            config.display().to_string(),
-            "--file".to_string(),
-            path.display().to_string(),
-        ];
-        let result = self.invoke_protected(&args);
-        let _ = fs::remove_file(&path);
-        parse_capabilities(&result?)
+        let data = self.protected_request(&serde_json::json!({"operation": "GET_CAPABILITIES"}))?;
+        parse_capabilities_data(&data)
     }
 
     /// The key anpio-key will use when no fragment is named: the document's first
@@ -1352,13 +1381,17 @@ impl AnpioKey {
             )
         })?;
         let path = write_temp_json(&serde_json::to_vec(request)?)?;
-        let args = vec![
+        let mut args = vec![
             "data".to_string(),
             "--config".to_string(),
             config.display().to_string(),
             "--file".to_string(),
             path.display().to_string(),
         ];
+        if let Some(token) = &self.capability_file {
+            args.push("--capability-file".to_string());
+            args.push(token.display().to_string());
+        }
         let result = self.invoke_protected(&args);
         let _ = fs::remove_file(&path);
         reply_data(&result?, &operation)
@@ -2064,6 +2097,9 @@ fn origin_proof_from_data(data: Value) -> Result<OriginProofSigning> {
 /// The reply is the full v2 `Reply`, not just `data`. A daemon that predates capability
 /// schema 1 answers with its original five fields and no `operations`; that is not an
 /// error, it is the six known data operations.
+/// Read a whole `GET_CAPABILITIES` reply. Only the tests see one now: the live path goes
+/// through `protected_request`, which hands back the `data` half.
+#[cfg(test)]
 fn parse_capabilities(bytes: &[u8]) -> Result<Capabilities> {
     let reply: Value = serde_json::from_slice(bytes)
         .context("anpio-key data returned a capability reply that is not JSON")?;
@@ -2071,7 +2107,11 @@ fn parse_capabilities(bytes: &[u8]) -> Result<Capabilities> {
     if code != "OK" {
         bail!("anpio-key answered GET_CAPABILITIES with {code}");
     }
-    let data = reply.get("data").cloned().unwrap_or(Value::Null);
+    parse_capabilities_data(&reply.get("data").cloned().unwrap_or(Value::Null))
+}
+
+/// The `data` half of a `GET_CAPABILITIES` reply, which is what `protected_request` returns.
+fn parse_capabilities_data(data: &Value) -> Result<Capabilities> {
     let signing_purposes = match data.get("signing_purposes") {
         Some(Value::Array(items)) => {
             let mut purposes = BTreeSet::new();
@@ -2093,6 +2133,11 @@ fn parse_capabilities(bytes: &[u8]) -> Result<Capabilities> {
         }
         None => None,
     };
+    let capability_did = match data.get("capability_did") {
+        Some(Value::String(did)) => Some(did.clone()),
+        Some(other) => bail!("anpio-key returned capabilities.capability_did that is not a string: {other}"),
+        None => None,
+    };
     match data.get("operations") {
         Some(Value::Array(items)) => {
             let mut names = Vec::with_capacity(items.len());
@@ -2109,7 +2154,8 @@ fn parse_capabilities(bytes: &[u8]) -> Result<Capabilities> {
                 );
             }
             Ok(Capabilities::from_names(&names, CapabilitySource::Daemon)
-                .with_signing_purposes(signing_purposes))
+                .with_signing_purposes(signing_purposes)
+                .with_capability_did(capability_did))
         }
         Some(other) => {
             bail!("anpio-key returned capabilities.operations that is not an array: {other}")
@@ -2121,7 +2167,8 @@ fn parse_capabilities(bytes: &[u8]) -> Result<Capabilities> {
                 .collect::<Vec<_>>(),
             CapabilitySource::Daemon,
         )
-        .with_signing_purposes(signing_purposes)),
+        .with_signing_purposes(signing_purposes)
+        .with_capability_did(capability_did)),
     }
 }
 
