@@ -111,6 +111,27 @@ anpio-cli did show
 命令连同 grant id 原样打印），命名钥匙入口用 `--name`。命名钥匙进不了受保护 catalog，
 受保护签名走 grant。
 
+**进程跑在管理员自己账号下**（单用户机器、桌面启动的编辑器或 coding agent）时，受保护签名口
+不认它——它只认登记的 agent 账号。这时管理员为这个 DID 签一张**能力令牌**，再交给
+`did attach`：
+
+```bash
+# 管理员终端；明文只写一次，到 0600 文件
+anpio-key admin --config /Library/ANPIOKey/service.json capability mint \
+  --uid 601 --did <did> --label mybot --out /tmp/mybot.capability
+
+anpio-cli did attach --did <did> --config /Library/ANPIOKey/service.json \
+  --kid <agent>/<profile>-sign --grant http=<grant-id> \
+  --capability-file /tmp/mybot.capability --agent mybot
+```
+
+`--capability-file` 叠加在 `--kid` 和 `--grant` 之上，不是替代：令牌决定“以哪个主体、哪个 DID
+行事”，grant 仍决定“能签什么、多久、几次”。attach 会核对服务端回报的 `capability_did` 是否
+等于要 attach 的 DID，不符就拒绝且不写任何文件；通过后把令牌复制进身份目录的 `capability`
+（0600），`/tmp` 那份可以删。一张令牌只签一个 DID；撤销即时生效；服务重启作废 grant 但不作废
+令牌，`unlock` 后 `did refresh --uid 601` 即可。它是授权主体隔离，不是 UID 或进程隔离。
+`did create --key anpio-key` 尚未自动签发令牌，先 provision 再由管理员 mint。
+
 > [!NOTE]
 > `--host` 要的是一台 **DID 主机**（`awiki-open-server` 那条线），不是第 2 步那个**消息服务**
 > ——消息服务本身不托管 DID 文档，它只解析它们。改了文档之后要重新发布：`anpio-cli did register`

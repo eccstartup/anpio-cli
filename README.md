@@ -78,24 +78,56 @@ rust/target/debug/anpio-cli msg inbox
 ### 私钥可以放在 `anpio-key` 里
 
 默认由 `did create` 把私钥写进 store。另一条路是交给本地
-[`anpio-key`](https://github.com/open-agentx/anpio-key) 守护进程：
+[`anpio-key`](https://github.com/eccstartup/anpio-key) 的受保护服务：钥匙由服务生成并
+只留在服务里，身份目录记的是钥匙名（kid）和 grant id。
 
 ```bash
-# 管理员自己的终端，由 anpio-key 生成命名钥匙并签文档 proof
+# 管理员在自己的终端，一次性：把身份 provision 进受保护服务
 anpio-cli did create --host https://awiki.me --handle mybot --key anpio-key
-# 管理员另一次决定：签发 grant，然后把 grant id 交给 CLI 一次
-anpio-key grant create --key <name> --did <did> --target https://awiki.me/anp-im/rpc
-anpio-cli key grant <grant-id> --agent mybot
+# 身份记录丢了（换机器、清了 profile）时，用 attach 恢复
+anpio-cli did attach --did <did> --config /Library/ANPIOKey/service.json \
+  --kid <agent>/<profile>-sign --grant http=<grant-id> --agent mybot
 ```
 
-受保护命名签名还没落地：`grant create` 只认已登记进受保护 catalog 的 DID 绑定钥匙，
-命名钥匙现在会被明确拒绝（见 anpio-key 的 TODO）。
 身份文件里**一个私钥字节都没有**，只记钥匙名和 grant；每次签名由 CLI 请守护进程签。
 非管理员终端、非交互执行时 `--key anpio-key` 直接拒绝，不会偷偷改用本机钥匙。
 受保护入口还能代签 origin proof，并在绑定设备名后用 `SIGN_PURPOSE(device_assertion)`
 签群 E2EE 的设备断言。`did attach` 是恢复入口（旧命令 `did attach-anpio-key` 仍可解析）。
 细节与拒绝边界见 [rust/README.md](rust/README.md#私钥放在-anpio-key-里did-attach)
 和 [anpio-key-integration.md](docs/design/anpio-key-integration.md)。
+
+#### 用管理员自己的账号签名：能力令牌
+
+受保护的签名口只认登记的 Agent 账号。进程跑在管理员自己账号下（单用户机器、桌面
+启动的编辑器或 coding agent）时，管理员为这个 DID 签一张**能力令牌**，`did attach`
+记下它：
+
+```bash
+# 管理员终端；明文只写一次，到 0600 文件
+anpio-key admin --config /Library/ANPIOKey/service.json capability mint \
+  --uid 601 --did <did> --label mybot --out /tmp/mybot.capability
+
+anpio-cli did attach --did <did> --config /Library/ANPIOKey/service.json \
+  --kid <agent>/<profile>-sign --grant http=<grant-id> \
+  --capability-file /tmp/mybot.capability --agent mybot
+```
+
+`--capability-file` 是叠加不是替代：令牌说"以哪个主体、哪个 DID 行事"，grant 仍说
+"能签什么、多久、几次"。attach 会校验令牌形状（`anp1_` + 43 字符 base64url、`0600`、
+属调用方、普通文件），并比对服务端回报的 `capability_did` 与要 attach 的 DID；对不上
+直接拒绝，不写任何东西。之后令牌被复制到身份目录的 `capability`（0600），`/tmp` 那份
+可以删。
+
+- 一张令牌只签一个 DID；签别的 DID 得到 `CAPABILITY_SCOPE_DENIED`。
+- 令牌没给、已撤销或过期分别是 `CAPABILITY_REQUIRED` / `CAPABILITY_INVALID` /
+  `CAPABILITY_EXPIRED`，都不重试。
+- 撤销即时生效，不动 grant。
+- 服务重启作废所有 grant，但**不作废令牌**：管理员 `unlock` 后跑一次
+  `anpio-cli did refresh --uid 601` 即可，不必重签令牌。
+- 这是授权主体隔离，不是 UID 或进程隔离：同一账号的进程读得到同一个令牌文件。
+
+`did create --key anpio-key` 尚未自动签发能力令牌；先 provision，再由管理员 mint 并
+attach。完整语义见 anpio-key 文档站的[能力令牌](https://anpio-key.vercel.app/advanced/capability)。
 
 ## 文档
 

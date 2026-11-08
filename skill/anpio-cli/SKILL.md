@@ -237,6 +237,56 @@ for, and `missing:` with the ones it does not — a command that needs a missing
 purpose refuses by name. Signing then needs only the target —
 `anp sign --target <url>` — or `anp login`.
 
+### Signing from the operator's own account: the capability token
+
+The protected sign socket admits only the enrolled agent account, so a process
+running as the operator cannot sign even though the daemon holds the key. When
+the agent has to run as the operator (a single-user machine, an editor or a
+coding agent started from the desktop session), the anpio-key administrator
+mints a **capability token** for this identity's DID and attach records it:
+
+```bash
+# Administrator's terminal. The clear text is written once, to a 0600 file.
+anpio-key admin --config /Library/ANPIOKey/service.json capability mint \
+  --uid 601 --did <did> --label <agent> --out /tmp/<agent>.capability
+
+anpio-cli did attach --did <did> --kid <agent>/<profile>-sign \
+  --grant http=<id> --grant document_proof=<id> \
+  --capability-file /tmp/<agent>.capability --agent <your-id>
+```
+
+`--capability-file` is additive to `--kid` and `--grant`, not a replacement:
+the token says **which principal and which DID** this process acts as, the
+grants still say what it may sign, for how long and how often. Attach checks
+the token's shape (`anp1_` + 43 base64url characters, `0600`, owned by the
+caller, an ordinary file) and compares `GET_CAPABILITIES`'s `capability_did`
+with the DID being attached; a token minted for another DID is refused before
+anything is written. It then copies the token into the identity directory as
+`capability` (0600) and records `capabilityFile` in `identity.json`. The
+administrator's minting path can move or be deleted afterwards — every later
+command uses the copy.
+
+What changes for the identity:
+
+- Every protected call goes to the daemon's capability endpoint with the token,
+  instead of the shared sign socket.
+- One token signs one DID. `CAPABILITY_SCOPE_DENIED` means it was minted for
+  another identity; `CAPABILITY_REQUIRED` means this endpoint was not the
+  capability one; `CAPABILITY_INVALID` covers a revoked token or a disabled
+  principal; `CAPABILITY_EXPIRED` means what it says. None of them is retryable.
+- Revoking a token takes effect on the next request and does not touch the
+  identity's grants.
+- A service restart invalidates every grant but **not** the token. Recover with
+  the administrator's `unlock`, then `anpio-cli did refresh --uid 601`; there is
+  no need to mint a new token.
+- This is authorization-subject isolation, not UID or process isolation: every
+  process of the same account can read the same token file.
+
+`did create --key anpio-key` does not mint a capability token yet; after a
+provision, the administrator mints one and attaches it as above. Full semantics
+live in anpio-key's site under “能力令牌”
+(https://anpio-key.vercel.app/advanced/capability).
+
 Records written before keys had names find theirs again by DID fingerprint, and
 say so if that lookup fails. `did attach-anpio-key` still parses as the old
 spelling of the same command.

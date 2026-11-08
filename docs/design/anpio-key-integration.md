@@ -87,6 +87,12 @@ store 里只有公开文档、keyid 与授权引用；签名经本地守护进�
 - 身份记录多了 `config` / `grant` / `device` / `operations`，老文件照读；
   `did attach-anpio-key --config --grant` 走 `data --config`（LIST_AUTHORIZED_KEYS → GET_DOCUMENT），
   `--config` 与 `--key-root` / `--socket` 互斥，attach 时缓存协商到的操作集。
+- **能力令牌（2026-11）。** 进程不在登记的 agent 账号下时，`did attach --capability-file
+  <token>` 记录管理员 mint 的令牌：复制为身份目录下 `capability`（`0600`），
+  `identity.json` 记 `capabilityFile`，此后走 `capability.sock`。令牌绑
+  `(principal_id, did)`，只决定"以谁的身份行事"，不替代 grant；attach 时比对
+  `GET_CAPABILITIES` 的 `capability_did`，不符不写任何文件。服务重启作废 grant 而不
+  作废令牌，恢复走 `did refresh`。这是授权主体隔离，不是 UID 或进程隔离。
 - `msg` / `contacts` / `group` 的 origin proof 在 `SenderKey::AnpioKey` 这一支交给守护进程；
   能力集里没有 `SIGN_ORIGIN_PROOF` 时拒绝仍发生在联网之前。
 - 设备断言也已落地：`group e2ee` 在 `--device` 绑定 `{device}-sign`、且守护进程宣告

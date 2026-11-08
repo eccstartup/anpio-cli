@@ -62,7 +62,8 @@ cargo build --release --manifest-path rust/Cargo.toml
 | 子命令 | 作用 |
 |---|---|
 | `did create --host <url> --handle <name>` | 一条命令走完五个阶段：读服务信息、预检 handle、生成钥匙、签文档、注册（`--agent` 缺省=handle）。`--email` 等验证邮件。`--key anpio-key` 由**管理员在自己的终端**跑，走哪条路取决于机器上有没有受保护服务：装了服务就准备 `ProvisionIdentity`（读两遍新口令，铸根钥匙、设备签名钥匙、X25519 协商钥匙，发布策略与 grant，全程只确认一次）；没装服务就铸三把命名钥匙（不构成边界）。`--target` / `--method` / `--ecdh-peer` / `--device` 只在装了服务时有效，否则拒绝 |
-| `did attach --did <did>` | 恢复入口：把 `anpio-key` 已持有的钥接回 store，没有私钥字节，签名走 socket。`--config <service.json>` 选受保护入口（不给 `--key-root` / `--socket` 时缺省就是装好的受保护服务），此时要 `--kid`，并按用途重复给 `--grant <[purpose=]id>`；命名钥匙入口用 `--name`，指纹要与 DID 的最后一段一致。`--device <id>` 绑定群 E2EE 的设备名。过期或用尽的 grant 在 attach 时就被拒。旧名 `attach-anpio-key` 仍是别名 |
+| `did attach --did <did>` | 恢复入口：把 `anpio-key` 已持有的钥接回 store，没有私钥字节，签名走 socket。`--config <service.json>` 选受保护入口（不给 `--key-root` / `--socket` 时缺省就是装好的受保护服务），此时要 `--kid`，并按用途重复给 `--grant <[purpose=]id>`；命名钥匙入口用 `--name`，指纹要与 DID 的最后一段一致。`--device <id>` 绑定群 E2EE 的设备名。进程跑在管理员自己账号下时再加 `--capability-file <token>`：令牌只决定“以哪个主体、哪个 DID 行事”，不替代 `--kid` / `--grant`，attach 会核对服务端回报的 `capability_did` 并把它复制进身份目录。过期或用尽的 grant 在 attach 时就被拒。旧名 `attach-anpio-key` 仍是别名 |
+| `did refresh --uid <agent-uid>` | 服务重启、grant 到期或用尽之后，按身份原来持有的用途重新签发 grant，并写回 `identity.json`（同一把钥匙、同一策略、同一期限与次数）。刻意撤销的 grant 不会被复活；能力令牌不需要重签 |
 | `did show` | 打印本机存着的这份身份 |
 | `did list` | 这台机器持有的全部身份，以及各自绑到了什么 |
 | `did register` | 把 DID 文档（重新）发布给它自己的主机，取回 bearer token |
@@ -88,6 +89,14 @@ cargo build --release --manifest-path rust/Cargo.toml
 不给 `--key-root` / `--socket` 时 `--config` 缺省就是装好的受保护服务，接它要 `--kid` 和按用途的
 `--grant`。命名钥匙（daemon `key create` 铸的那种）**进不了**受保护 catalog，只能用 `--name` 走
 命名钥匙入口。
+`--capability-file` 是第三条入口：进程不是登记的 agent 账号（跑在管理员自己账号下）时，
+受保护签名口不会按 UID 认出它。管理员用
+`anpio-key admin --config <service.json> capability mint --uid <agent-uid> --did <did> --out <file>`
+签一张**能力令牌**，`did attach … --capability-file <file>` 记下；之后每次签名仍走受保护
+入口，信封里带令牌。一张令牌绑定一个 `(principal_id, did)`、只签一个 DID，没有通配符；撤销
+即时生效；服务端只存 `SHA-256(token)`，明文只在 mint 回包出现一次。它只决定“以谁的身份
+行事”，不替代 grant，也不是 UID 隔离——同一账号的进程读得到同一个令牌文件。服务重启作废
+grant 但不作废令牌。完整语义见 anpio-key 的“能力令牌”页。
 开发 socket 只覆盖"签整条 HTTP 请求"：`anp sign` / `anp login` / `did register` / `did publish`
 可用，`msg` / `contacts` / `group` 在动手之前就拒。受保护入口下，守护进程宣告
 `SIGN_ORIGIN_PROOF` 时 `msg`（本地读除外）/ `contacts` / `group`（不含 E2EE）的 origin proof

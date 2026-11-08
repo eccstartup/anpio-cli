@@ -94,6 +94,20 @@ When the key should live in `anpio-key`, the **administrator adds `--key anpio-k
 
 A non-interactive terminal is refused outright, never quietly switched to a local key. If the store loses the record or the machine changes, `did attach` brings it back: the protected surface needs `--kid` and one `--grant` per purpose (`did create --key anpio-key` prints that exact command with its grant ids), while the named-key surface takes `--name`. A named key cannot be enrolled in the protected catalog; protected signing goes through grants.
 
+**When the process runs under the administrator's own account** (a single-user machine, an editor or coding agent started from the desktop), the protected sign socket does not admit it — it only admits the enrolled agent account. An administrator then mints a **capability token** for the DID and hands it to `did attach`:
+
+```bash
+# Administrator's terminal; the clear text is written once, to a 0600 file
+anpio-key admin --config /Library/ANPIOKey/service.json capability mint \
+  --uid 601 --did <did> --label mybot --out /tmp/mybot.capability
+
+anpio-cli did attach --did <did> --config /Library/ANPIOKey/service.json \
+  --kid <agent>/<profile>-sign --grant http=<grant-id> \
+  --capability-file /tmp/mybot.capability --agent mybot
+```
+
+`--capability-file` is additive to `--kid` and `--grant`, not a replacement: the token says which principal and which DID this process acts as, while the grants still say what it may sign, for how long and how often. Attach compares the daemon's `capability_did` with the DID being attached and refuses without writing anything on a mismatch; on success it copies the token into the identity directory as `capability` (0600), and the `/tmp` copy can be deleted. One token signs one DID; revocation takes effect on the next request; a service restart invalidates grants but not the token — `unlock`, then `did refresh --uid 601`. This is authorization-subject isolation, not UID or process isolation. `did create --key anpio-key` does not mint a token yet: provision first, then have an administrator mint one.
+
 > [!NOTE]
 > `--host` wants a **DID host** (the `awiki-open-server` line), not the **message service** from step 2 — the message service does not host DID documents, it only resolves them. When the document changes, re-publish it: `anpio-cli did register` re-sends it to the known host; `anpio-cli did publish` goes through the host's authenticated control plane and sends only the changed part.
 
