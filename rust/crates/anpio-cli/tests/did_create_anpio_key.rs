@@ -717,7 +717,7 @@ fn read_json(path: &Path) -> Value {
     serde_json::from_str(&text).unwrap_or_else(|err| panic!("parse {}: {err}", path.display()))
 }
 
-fn create_args<'a>(base: &'a str) -> Vec<&'a str> {
+fn create_args(base: &str) -> Vec<&str> {
     vec![
         "did",
         "create",

@@ -95,7 +95,7 @@ pub enum DeviceSigner {
     /// over `SIGN_PURPOSE` and the returned key is checked against the document.
     Daemon {
         keyid: String,
-        key: crate::custody::AnpioKey,
+        key: Box<crate::custody::AnpioKey>,
         public: anp::PublicKeyMaterial,
         public_multibase: String,
     },
@@ -151,7 +151,7 @@ pub fn device_signer(identity: &Identity) -> Result<DeviceSigner> {
             device_signing_method(&identity.did_document, &identity.did, device)?;
         return Ok(DeviceSigner::Daemon {
             keyid,
-            key: key.clone(),
+            key: Box::new(key.clone()),
             public,
             public_multibase,
         });

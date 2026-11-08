@@ -1866,6 +1866,7 @@ async fn cmd_discover(endpoint: &str, allow_private: &[String]) -> anyhow::Resul
 /// and sign the document, then register with the email round trip. A handle is a candidate
 /// until registration succeeds, so nothing lands in `identity.json` before then: the key
 /// waits in `pending.json` at the store root, and `--reuse-key` picks it up again.
+#[allow(clippy::too_many_arguments)]
 async fn cmd_did_create(
     host: &str,
     handle: &str,
@@ -2295,6 +2296,7 @@ struct ProvisionedIdentity {
 /// terminal**, mints and seals the root and both device keys, publishes the policies,
 /// issues the grants, and unlocks the three keys with that same passphrase. The passphrase
 /// never passes through this process, its argv, or its environment.
+#[allow(clippy::too_many_arguments)]
 fn create_protected(
     config: &std::path::Path,
     mut input: CreateIdentityInput,
@@ -7078,7 +7080,7 @@ async fn cmd_group_e2ee_send(
             keyid, key, public, ..
         } => group_channel
             .sender
-            .signing_as_daemon_device(keyid, key, public),
+            .signing_as_daemon_device(keyid, *key, public),
     };
 
     let response = call(

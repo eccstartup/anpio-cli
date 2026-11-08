@@ -280,14 +280,17 @@ fn skill_invocations() -> Vec<(usize, Vec<String>)> {
             in_fence = !in_fence;
             continue;
         }
-        if !in_fence || raw.trim_start().starts_with('#') {
+        let line = raw.trim_start();
+        if !in_fence || line.starts_with('#') {
             continue;
         }
-        let Some(at) = raw.find("anpio-cli ") else { continue };
-        let argv = raw[at + "anpio-cli ".len()..]
-            .split_whitespace()
-            .map(str::to_string)
-            .collect();
+        // Only a line that invokes the binary counts: the install block's `ln -sf
+        // …/anpio-cli ~/bin/anpio-cli` mentions it without running it.
+        let line = line.strip_prefix("$ ").map(str::trim_start).unwrap_or(line);
+        let Some(rest) = line.strip_prefix("anpio-cli ") else {
+            continue;
+        };
+        let argv = rest.split_whitespace().map(str::to_string).collect();
         out.push((index + 1, argv));
     }
     out

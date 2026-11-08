@@ -244,7 +244,7 @@ section "did create — an identity whose document names our own service"
 for name in alice bob; do
   run "$CLI" did create --host "http://localhost:${HOST_PORT}" --handle "$name" --agent "$name"
   expect_status "did create $name succeeds" 0
-  expect "  and says it registered with the host" "registered with"
+  expect "  and says it registered with the host" "registered  did:wba:${AUTHORITY}:user:${name}:"
 done
 
 section "did show — the identity as this client sees it"
@@ -523,7 +523,7 @@ if [ "$WITH_AWIKI" = 1 ]; then
     AWIKI_AGENT="e2e-awiki-$(date +%s)"
     run "$CLI" did create --host "$AWIKI_URL" --handle "$AWIKI_AGENT" --agent "$AWIKI_AGENT"
     expect_status "did create succeeds against awiki" 0
-    expect "  and awiki accepted the document" "registered with"
+    expect "  and awiki accepted the document" "registered  did:wba:"
     run "$CLI" did publish --agent "$AWIKI_AGENT"
     expect_status "did publish succeeds against awiki" 0
     expect "  and nothing has changed, so it is a no-op" "already serves this document"
