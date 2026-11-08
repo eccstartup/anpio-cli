@@ -2611,10 +2611,9 @@ fn identity_policies(
             paths.push(path);
         }
     }
-    for path in [DID_AUTH_PATH.to_string()] {
-        if !paths.contains(&path) {
-            paths.push(path);
-        }
+    let path = DID_AUTH_PATH.to_string();
+    if !paths.contains(&path) {
+        paths.push(path);
     }
     for target in targets {
         let path = if target.contains("://") {
