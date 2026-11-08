@@ -2172,9 +2172,8 @@ async fn cmd_did_create(
             println!("      verification email sent to {email}");
             if no_wait {
                 println!(
-                    "      not waiting: verify the email, then run `anpio-cli did register \
-                     --agent {} --email {email}`",
-                    location.agent
+                    "      not waiting: verify the email, then run `{}`",
+                    resume_command(key_provider, host, handle, email, &location.agent)
                 );
                 return Ok(());
             }
@@ -2192,9 +2191,9 @@ async fn cmd_did_create(
                 println!("      email not verified yet");
                 anyhow::bail!(
                     "the identity was not registered and the key is kept at {}. Verify the \
-                     email, then run `anpio-cli did register --agent {} --email {email}`",
+                     email, then run `{}`",
                     pending_path.display(),
-                    location.agent
+                    resume_command(key_provider, host, handle, email, &location.agent)
                 );
             }
             println!("      email verified");
@@ -2204,7 +2203,15 @@ async fn cmd_did_create(
     match register_identity(&client, &base, &identity, email.as_deref()).await {
         Ok(issued) => {
             identity.save(&location)?;
-            clear_pending()?;
+            // The remote registered and the identity is on disk; a store that refuses the
+            // unlink must not turn a success into a failure.
+            if let Err(err) = clear_pending() {
+                eprintln!(
+                    "warning: registered, but could not remove {}: {err:#}. Delete it by \
+                     hand; leaving it only makes the next create reuse it.",
+                    pending_path.display()
+                );
+            }
             match cache_issued_token(&location, &identity, &issued) {
                 Ok(true) => println!("      token: cached in {}", location.session_path().display()),
                 Ok(false) => {}
@@ -2249,6 +2256,28 @@ async fn cmd_did_create(
             );
             Err(err)
         }
+    }
+}
+
+/// The command that finishes a create paused on the email round trip.
+///
+/// A local key only needs its pending record registered. A key in anpio-key is a named key
+/// the daemon mints, and a development daemon refuses to register an unfinished one, so the
+/// way back is the create that reuses the same key; a protected service retries it the same
+/// way, with the grants already provisioned in the vault.
+fn resume_command(
+    key_provider: KeyProvider,
+    host: &str,
+    handle: &str,
+    email: &str,
+    agent: &str,
+) -> String {
+    match key_provider {
+        KeyProvider::Local => format!("anpio-cli did register --agent {agent} --email {email}"),
+        KeyProvider::AnpioKey => format!(
+            "anpio-cli did create --host {host} --handle {handle} --agent {agent} \
+             --email {email} --key anpio-key --reuse-key"
+        ),
     }
 }
 
@@ -4144,7 +4173,13 @@ async fn cmd_did_register(agent: Option<&str>, profile: Option<&str>, email: Opt
     let issued = register_identity(&client, &base, &identity, email).await?;
     if from_pending {
         identity.save(&location)?;
-        clear_pending()?;
+        if let Err(err) = clear_pending() {
+            eprintln!(
+                "warning: registered, but could not remove {}: {err:#}. Delete it by hand; \
+                 leaving it only makes the next create reuse it.",
+                pending_path().display()
+            );
+        }
     }
     // Same credential, same place as `did create`: a re-register is one of the two ways the
     // token ever gets into the cache in the first place.
